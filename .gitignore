@@ -1,0 +1,15 @@
+output/
+dist/
+build/
+dist.*
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Cache
+.cache/
+.tmp/
+temp/
+

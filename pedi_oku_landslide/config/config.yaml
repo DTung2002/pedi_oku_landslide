@@ -1,0 +1,13 @@
+app:
+  ui_scale_percent: 100
+
+processing:
+  smooth_size: 11
+  sad_threshold: 800
+  grouping:
+    eps: 3.0
+    min_cluster_size: 20
+
+crs:
+  # dùng khi raster không có CRS & không tìm thấy .prj
+  fallback_epsg: "EPSG:32648"   # đổi theo khu vực của bạn
