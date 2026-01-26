@@ -2,6 +2,7 @@ output/
 dist/
 build/
 dist.*
+
 # IDE / Editor
 .vscode/
 .idea/
@@ -12,4 +13,3 @@ dist.*
 .cache/
 .tmp/
 temp/
-

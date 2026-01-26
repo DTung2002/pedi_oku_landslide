@@ -17,7 +17,7 @@ class AnalysisContext:
     project_id: str
     run_id: str
     base_dir: str
-    project_dir: str      # output/<project_id>
+    project_dir: str     # output/<project_id>
     run_dir: str         # output/<project_id>/<run_id>
     in_dir: str          # .../input
     out_ui1: str         # .../ui1
