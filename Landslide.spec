@@ -1,10 +1,27 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_all, collect_dynamic_libs
 from PyInstaller.utils.hooks import collect_data_files
 from PyInstaller.utils.hooks import collect_dynamic_libs
 from PyInstaller.utils.hooks import collect_submodules
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('pedi_oku_landslide\\assets', 'pedi_oku_landslide\\assets'), ('pedi_oku_landslide\\config', 'pedi_oku_landslide\\config'), ('C:\\Users\\Tungdd.PEDI\\miniconda3\\envs\\landslide_build\\Library\\share\\gdal', 'gdal-data'), ('C:\\Users\\Tungdd.PEDI\\miniconda3\\envs\\landslide_build\\Library\\share\\proj', 'proj-data'), ('C:\\Users\\Tungdd.PEDI\\miniconda3\\envs\\landslide_build\\Library\\lib\\tcl8.6', '_tcl_data'), ('C:\\Users\\Tungdd.PEDI\\miniconda3\\envs\\landslide_build\\Library\\lib\\tk8.6', '_tk_data')]
+import os
+CONDA_PREFIX = os.environ.get("CONDA_PREFIX")  # lấy đúng env đang activate
+if not CONDA_PREFIX:
+    raise SystemExit("Hãy activate đúng conda env rồi mới chạy pyinstaller với spec này.")
+
+ 
+datas = [
+    ('pedi_oku_landslide\\assets', 'pedi_oku_landslide\\assets'),
+    ('pedi_oku_landslide\\config', 'pedi_oku_landslide\\config'),
+
+    (os.path.join(CONDA_PREFIX, 'Library', 'share', 'gdal'), 'gdal-data'),
+    (os.path.join(CONDA_PREFIX, 'Library', 'share', 'proj'), 'proj-data'),
+    (os.path.join(CONDA_PREFIX, 'Library', 'lib', 'tcl8.6'), '_tcl_data'),
+    (os.path.join(CONDA_PREFIX, 'Library', 'lib', 'tk8.6'), '_tk_data'),
+]
+
+
 binaries = []
 hiddenimports = []
 datas += collect_data_files('PyQt5')
@@ -37,8 +54,13 @@ tmp_ret = collect_all('sklearn')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('matplotlib')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-
-
+tmp_ret = collect_all('cv2')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+binaries += collect_dynamic_libs('cv2')
+tmp_ret = collect_all('scipy')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+ 
+ 
 a = Analysis(
     ['__main__.py'],
     pathex=[],
@@ -53,7 +75,7 @@ a = Analysis(
     optimize=0,
 )
 pyz = PYZ(a.pure)
-
+ 
 exe = EXE(
     pyz,
     a.scripts,
@@ -80,3 +102,8 @@ coll = COLLECT(
     upx_exclude=[],
     name='Landslide',
 )
+ 
+hiddenimports += [
+    "scipy._cyutility",
+    "scipy._lib._ccallback_c",
+]

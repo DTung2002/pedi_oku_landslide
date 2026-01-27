@@ -334,6 +334,13 @@ def _densify(line: LineString, step_m: float) -> Tuple[np.ndarray, np.ndarray, n
 def _sample(ds: rasterio.io.DatasetReader, xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
     vals = list(ds.sample(list(zip(xs.tolist(), ys.tolist())), indexes=1))
     out = np.array([v[0] if len(v) else np.nan for v in vals], dtype="float32")
+    # Normalize nodata -> NaN to avoid scaling issues in UI3 plots
+    nodata = ds.nodata
+    if nodata is not None:
+        if np.isnan(nodata):
+            out[~np.isfinite(out)] = np.nan
+        else:
+            out[np.isclose(out, float(nodata))] = np.nan
     return out
 
 
