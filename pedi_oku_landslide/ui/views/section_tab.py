@@ -202,15 +202,18 @@ def generate_auto_lines_from_arrays(
     m_valid = m_mask & np.isfinite(dx) & np.isfinite(dy)
     if not np.any(m_valid):
         # không có vector hợp lệ → lấy mặc định, độ lớn 0
-        v = np.array([1.0, 0.0], dtype=float)
-        u_main, mag_mean = _unit(v)
+        v_map = np.array([1.0, 0.0], dtype=float)
+        u_main, mag_mean = _unit(v_map)
         mag_mean = 0.0
     else:
-        v = np.array(
+        v_pix = np.array(
             [np.nanmean(dx[m_valid]), np.nanmean(dy[m_valid])],
             dtype=float,
         )
-        u_main, mag_mean = _unit(v)
+        # x = a*col + b*row + c ; y = d*col + e*row + f
+        a, b, _, d, e, _ = transform.a, transform.b, transform.c, transform.d, transform.e, transform.f
+        v_map = np.array([a * v_pix[0] + b * v_pix[1], d * v_pix[0] + e * v_pix[1]], dtype=float)
+        u_main, mag_mean = _unit(v_map)
 
     # nếu độ lớn quá nhỏ → fallback PCA shape
     if mag_mean < float(min_mag_thresh):
@@ -657,6 +660,7 @@ class AutoLineDialog(QDialog):
         grid.addWidget(QLabel("Offset (m):"),        1, 3)
         grid.addWidget(self.cross_off,               1, 4)
 
+
         layout.addWidget(grp)
 
         # OK / Cancel
@@ -784,7 +788,7 @@ class SectionSelectionTab(QWidget):
 
         grp_layers = QGroupBox("Layers"); ll = QVBoxLayout(grp_layers)
         r_gf = HBox(); r_gf.addWidget(QLabel("Grid font size:"))
-        self.sld_grid_font = QSlider(Qt.Horizontal); self.sld_grid_font.setRange(8, 72); self.sld_grid_font.setValue(32)
+        self.sld_grid_font = QSlider(Qt.Horizontal); self.sld_grid_font.setRange(8, 72); self.sld_grid_font.setValue(12)
         r_gf.addWidget(self.sld_grid_font, 1); ll.addLayout(r_gf)
         r_hs = HBox(); r_hs.addWidget(QLabel("Hillshade opacity:"))
         self.sld_hill = QSlider(Qt.Horizontal); self.sld_hill.setRange(0, 100); self.sld_hill.setValue(100)
@@ -793,7 +797,7 @@ class SectionSelectionTab(QWidget):
         self.sld_heat = QSlider(Qt.Horizontal); self.sld_heat.setRange(0, 100); self.sld_heat.setValue(75)
         r_hm.addWidget(self.sld_heat, 1); ll.addLayout(r_hm)
         r_vs = HBox(); r_vs.addWidget(QLabel("Vector size:"))
-        self.sld_vec_size = QSlider(Qt.Horizontal); self.sld_vec_size.setRange(50, 200); self.sld_vec_size.setValue(100)
+        self.sld_vec_size = QSlider(Qt.Horizontal); self.sld_vec_size.setRange(50, 200); self.sld_vec_size.setValue(50)
         r_vs.addWidget(self.sld_vec_size, 1); ll.addLayout(r_vs)
         r_vc = HBox(); r_vc.addWidget(QLabel("Vectors opacity:"))
         self.sld_vec = QSlider(Qt.Horizontal); self.sld_vec.setRange(0, 100); self.sld_vec.setValue(100)
@@ -1116,7 +1120,7 @@ class SectionSelectionTab(QWidget):
         pix_h = float(abs(self._tr.e)) if self._tr is not None else 1.0
 
         # scale càng lớn → vector càng dài, giống UI1
-        k = 0.3  # hệ số hiệu chỉnh, có thể chỉnh 0.3–0.6 tuỳ mắt nhìn
+        k = 0.4  # hệ số hiệu chỉnh, có thể chỉnh 0.3–0.6 tuỳ mắt nhìn
         vx_pix = (dx / (pix_w + 1e-9)) * scale * k
         vy_pix = (-dy / (pix_h + 1e-9)) * scale * k  # y pixel hướng xuống
 
@@ -1326,6 +1330,9 @@ class SectionSelectionTab(QWidget):
         if not mains and not crosses:
             self._info("[UI2] Auto line: no lines returned.")
             return
+
+        # redraw vectors after auto line generation
+        self._load_dx_dy_and_draw(self._ui1_dir, step=self._vec_step, scale=self._vec_scale)
         debug = outs.get("debug", {})
         ang = debug.get("ang_main_deg", None)
         if ang is not None:
