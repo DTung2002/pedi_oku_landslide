@@ -269,6 +269,54 @@ class CurveAnalyzeTab(QWidget):
     #     # Không tô band
     #     self._group_bands_bot.clear()
 
+    def _save_groups_to_ui(self, groups: list, prof: dict, line_id: str, log_text: Optional[str] = None) -> None:
+        try:
+            js = {"line": self.line_combo.currentText(), "groups": groups}
+            with open(self._groups_json_path(), "w", encoding="utf-8") as f:
+                json.dump(js, f, ensure_ascii=False, indent=2)
+            self._log(f"[✓] Saved group definition: {self._groups_json_path()}")
+        except Exception as e:
+            self._warn(f"[UI3] Cannot save groups JSON: {e}")
+
+        if self.group_table is not None:
+            self.group_table.setRowCount(0)
+            for i, g in enumerate(groups, 1):
+                self.group_table.insertRow(self.group_table.rowCount())
+                self.group_table.setItem(i - 1, 0, QTableWidgetItem(str(i)))
+                self.group_table.setItem(i - 1, 1, QTableWidgetItem(str(g.get("id", f"G{i}"))))
+                self.group_table.setItem(i - 1, 2, QTableWidgetItem(f'{float(g.get("start", 0.0)):.3f}'))
+                self.group_table.setItem(i - 1, 3, QTableWidgetItem(f'{float(g.get("end", 0.0)):.3f}'))
+                self.group_table.setItem(i - 1, 4, QTableWidgetItem(str(g.get("color", ""))))
+
+        if "length_m" in prof and prof["length_m"] is not None:
+            length_m = float(prof["length_m"])
+        else:
+            ch = prof.get("chain")
+            length_m = float(ch[-1] - ch[0]) if ch is not None and len(ch) >= 2 else None
+
+        bounds_set = set()
+        for g in groups:
+            s = float(g.get("start", 0.0))
+            e = float(g.get("end", 0.0))
+            if e < s:
+                s, e = e, s
+            if length_m:
+                s = max(0.0, min(length_m, s))
+                e = max(0.0, min(length_m, e))
+            bounds_set.add(s)
+            bounds_set.add(e)
+        bounds_m = sorted(bounds_set)
+
+        self._group_bounds[line_id] = bounds_m
+        self._sec_len_m = length_m
+
+        if self._px_per_m is None and getattr(self, "_img_ground", None) and self._sec_len_m:
+            W = self._img_ground.pixmap().width()
+            self._px_per_m = float(W) / float(self._sec_len_m)
+
+        if log_text:
+            self._ok(log_text)
+
     def _on_auto_group(self) -> None:
         """Sinh group tự động như UI3, lưu JSON, cập nhật bảng, và vẽ guide (không re-render)."""
         try:
@@ -302,55 +350,13 @@ class CurveAnalyzeTab(QWidget):
                 self._warn("[UI3] Auto grouping produced no segments within slip zone.")
                 return
 
-            # 4) Lưu JSON
-            js = {"line": self.line_combo.currentText(), "groups": groups}
-            try:
-                with open(self._groups_json_path(), "w", encoding="utf-8") as f:
-                    json.dump(js, f, ensure_ascii=False, indent=2)
-                self._log(f"[✓] Saved group definition: {self._groups_json_path()}")
-            except Exception as e:
-                self._warn(f"[UI3] Cannot save groups JSON: {e}")
-
-            # 5) Cập nhật bảng group
-            self.group_table.setRowCount(0)
-            for i, g in enumerate(groups, 1):
-                self.group_table.insertRow(self.group_table.rowCount())
-                self.group_table.setItem(i - 1, 0, QTableWidgetItem(str(i)))
-                self.group_table.setItem(i - 1, 1, QTableWidgetItem(str(g.get("id", f"G{i}"))))
-                self.group_table.setItem(i - 1, 2, QTableWidgetItem(f'{float(g.get("start", 0.0)):.3f}'))
-                self.group_table.setItem(i - 1, 3, QTableWidgetItem(f'{float(g.get("end", 0.0)):.3f}'))
-                self.group_table.setItem(i - 1, 4, QTableWidgetItem(str(g.get("color", ""))))
-
-            # 6) Tạo bounds [x0, x1, ...] để vẽ dashed guides
-            if "length_m" in prof and prof["length_m"] is not None:
-                length_m = float(prof["length_m"])
-            else:
-                ch = prof.get("chain");
-                length_m = float(ch[-1] - ch[0]) if ch is not None and len(ch) >= 2 else None
-
-            bounds_set = set()
-            for g in groups:
-                s = float(g.get("start", 0.0))
-                e = float(g.get("end", 0.0))
-                if e < s: s, e = e, s
-                if length_m:
-                    s = max(0.0, min(length_m, s))
-                    e = max(0.0, min(length_m, e))
-                bounds_set.add(s);
-                bounds_set.add(e)
-            bounds_m = sorted(bounds_set)
-
             line_id = self._line_id_current()
-            self._group_bounds[line_id] = bounds_m
-            self._sec_len_m = length_m
-
-            # 7) Đảm bảo có px/m (dùng ảnh hiện tại)
-            if self._px_per_m is None and getattr(self, "_img_ground", None) and self._sec_len_m:
-                W = self._img_ground.pixmap().width()
-                self._px_per_m = float(W) / float(self._sec_len_m)
-
-            # 7) Lưu JSON, log, rồi re-render để ảnh có màu nhóm
-            self._ok(f"[UI3] Auto Group done for '{line_id}': {len(bounds_m) - 1} groups.")
+            self._save_groups_to_ui(
+                groups,
+                prof,
+                line_id,
+                log_text=f"[UI3] Auto Group done for '{line_id}': {len(groups)} groups.",
+            )
             self._render_current_safe()
         except Exception:
             pass
@@ -422,10 +428,22 @@ class CurveAnalyzeTab(QWidget):
                     groups = []
             if not groups:
                 groups = auto_group_profile(prof)
-            groups = clamp_groups_to_slip(prof, groups)
-            if not groups:
-                self._warn("[UI3] No groups within slip zone.");
-                return
+                groups = clamp_groups_to_slip(prof, groups)
+                if not groups:
+                    self._warn("[UI3] Auto grouping produced no segments within slip zone.");
+                    return
+                line_id = self._line_id_current()
+                self._save_groups_to_ui(
+                    groups,
+                    prof,
+                    line_id,
+                    log_text=f"[UI3] Auto Group (implicit) for '{line_id}': {len(groups)} groups.",
+                )
+            else:
+                groups = clamp_groups_to_slip(prof, groups)
+                if not groups:
+                    self._warn("[UI3] No groups within slip zone.");
+                    return
             #
             # # 3) Base curve trong slip-zone (theo UI3 gốc)
             # base = estimate_slip_curve(
@@ -1229,7 +1247,11 @@ class CurveAnalyzeTab(QWidget):
         return out
 
     def _load_groups_for_current_line(self):
-        """Ưu tiên đọc JSON (Auto-Group đã lưu) ; nếu không có thì đọc từ bảng."""
+        """Ưu tiên đọc từ bảng (phản ánh chỉnh sửa/delete mới nhất); nếu trống thì đọc JSON."""
+        table_groups = self._read_groups_from_table()
+        if table_groups:
+            return table_groups
+
         js_path = self._groups_json_path()
         if os.path.exists(js_path):
             try:
@@ -1244,9 +1266,10 @@ class CurveAnalyzeTab(QWidget):
                     e = g.get("end", g.get("end_chainage"))
                     if s is None or e is None:
                         continue
-                    s = float(s);
+                    s = float(s)
                     e = float(e)
-                    if e < s: s, e = e, s
+                    if e < s:
+                        s, e = e, s
                     norm.append({
                         "id": g.get("id", f"G{i}"),
                         "start": s, "end": e,
@@ -1256,8 +1279,7 @@ class CurveAnalyzeTab(QWidget):
                     return norm
             except Exception:
                 pass
-        # fallback: đọc từ bảng
-        return self._read_groups_from_table()
+        return []
 
     def _on_confirm_groups(self):
         """Lưu JSON nhóm và re-render."""
