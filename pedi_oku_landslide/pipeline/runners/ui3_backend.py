@@ -873,12 +873,14 @@ def render_profile_png(
             except Exception:
                 pass
 
-        if (y_min is not None) and (y_max is not None) and (y_max > y_min):
-            ax.set_ylim(float(y_min), float(y_max))
+        user_y_fixed = (y_user_min is not None) and (y_user_max is not None) and (y_user_max > y_user_min)
+        user_x_fixed = (x_user_min is not None) and (x_user_max is not None) and (x_user_max > x_user_min)
+        if user_y_fixed:
+            ax.set_ylim(float(y_user_min), float(y_user_max))
 
-        if (x_min is not None) and (x_max is not None) and (x_max > x_min):
-            ax.set_xlim(float(x_min), float(x_max))
-            ax2.set_xlim(float(x_min), float(x_max))
+        if user_x_fixed:
+            ax.set_xlim(float(x_user_min), float(x_user_max))
+            ax2.set_xlim(float(x_user_min), float(x_user_max))
         # --- OVERLAY SLIP CURVES
         if overlay_curves:
             for item in overlay_curves:
