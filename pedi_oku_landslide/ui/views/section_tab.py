@@ -1419,6 +1419,16 @@ class SectionSelectionTab(QWidget):
 
     def _on_clear(self) -> None:
         """Xoá toàn bộ sections + line trên map."""
+        reply = QMessageBox.question(
+            self,
+            "Confirm",
+            "本当に消しますか？\nAre you sure you want to delete it?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
         self.tbl.setRowCount(0)
         self._sections.clear()
 
