@@ -493,11 +493,52 @@ def render_profile_png(
     if not prof:
         return "[Γ£ù] Empty profile", None
 
+    def _dump_ground_json(out_png_path: str, prof_dict: Dict[str, np.ndarray]) -> None:
+        try:
+            xs = np.asarray(prof_dict.get("x", []), dtype=float)
+            ys = np.asarray(prof_dict.get("y", []), dtype=float)
+            z_raw = np.asarray(prof_dict.get("elev", []), dtype=float)
+            z_smooth = np.asarray(prof_dict.get("elev_s", []), dtype=float)
+            n = min(xs.size, ys.size, z_raw.size, z_smooth.size)
+            if n == 0:
+                return
+
+            ui3_dir = os.path.dirname(os.path.dirname(out_png_path))
+            base = os.path.splitext(os.path.basename(out_png_path))[0]
+            out_json = os.path.join(ui3_dir, f"{base}_ground.json")
+
+            rows = []
+            for i in range(n):
+                xr = float(xs[i]) if np.isfinite(xs[i]) else None
+                yr = float(ys[i]) if np.isfinite(ys[i]) else None
+                zr = float(z_raw[i]) if np.isfinite(z_raw[i]) else None
+                zs = float(z_smooth[i]) if np.isfinite(z_smooth[i]) else None
+                rows.append({
+                    "index": i,
+                    "x": xr,
+                    "y": yr,
+                    "z_raw": zr,
+                    "z_smooth": zs,
+                })
+
+            payload = {
+                "count": n,
+                "data": rows,
+            }
+            os.makedirs(ui3_dir, exist_ok=True)
+            with open(out_json, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
     x_user_min, x_user_max = x_min, x_max
     y_user_min, y_user_max = y_min, y_max
 
     chain = prof["chain"]; elev_s = prof["elev_s"]
     d_para = prof["d_para"]; dz = prof["dz"]; theta = prof["theta"]
+
+    if out_png:
+        _dump_ground_json(out_png, prof)
 
     if (x_min is None) or (x_max is None):
         if "slip_span" in prof and prof["slip_span"]:
@@ -873,12 +914,14 @@ def render_profile_png(
             except Exception:
                 pass
 
-        if (y_min is not None) and (y_max is not None) and (y_max > y_min):
-            ax.set_ylim(float(y_min), float(y_max))
+        user_y_fixed = (y_user_min is not None) and (y_user_max is not None) and (y_user_max > y_user_min)
+        user_x_fixed = (x_user_min is not None) and (x_user_max is not None) and (x_user_max > x_user_min)
+        if user_y_fixed:
+            ax.set_ylim(float(y_user_min), float(y_user_max))
 
-        if (x_min is not None) and (x_max is not None) and (x_max > x_min):
-            ax.set_xlim(float(x_min), float(x_max))
-            ax2.set_xlim(float(x_min), float(x_max))
+        if user_x_fixed:
+            ax.set_xlim(float(x_user_min), float(x_user_max))
+            ax2.set_xlim(float(x_user_min), float(x_user_max))
         # --- OVERLAY SLIP CURVES
         if overlay_curves:
             for item in overlay_curves:

@@ -36,6 +36,67 @@ except Exception as e:
     UI1App = None
     print("[UI2] Warning: cannot import UI1App:", e)
 
+def _densify_line(line: LineString, step_m: float) -> tuple[np.ndarray, np.ndarray]:
+    if line is None or getattr(line, "is_empty", False):
+        return np.array([]), np.array([])
+    try:
+        length_m = float(line.length)
+    except Exception:
+        return np.array([]), np.array([])
+    if not np.isfinite(length_m) or length_m <= 0:
+        return np.array([]), np.array([])
+    step = float(step_m) if step_m and np.isfinite(step_m) else 1.0
+    n = max(2, int(np.ceil(length_m / step)) + 1)
+    s = np.linspace(0.0, length_m, n)
+    xs = np.empty(n); ys = np.empty(n)
+    for i, d in enumerate(s):
+        p = line.interpolate(d)
+        xs[i], ys[i] = p.x, p.y
+    return xs, ys
+
+def _export_lines_dem_json(dem_path: str, lines: list, labels: list, out_json: str, step_m: float | None) -> str:
+    import json
+    if not dem_path or not os.path.exists(dem_path):
+        return "[!] DEM path not found for JSON export."
+    if not lines:
+        return "[!] No lines to export."
+    os.makedirs(os.path.dirname(out_json), exist_ok=True)
+    with rasterio.open(dem_path) as ds:
+        if step_m is None:
+            px = abs(float(ds.transform.a)) if np.isfinite(ds.transform.a) else 0.0
+            py = abs(float(ds.transform.e)) if np.isfinite(ds.transform.e) else 0.0
+            step_m = max(px, py, 1.0)
+        nodata = ds.nodata
+        out_lines = []
+        for i, line in enumerate(lines):
+            xs, ys = _densify_line(line, step_m)
+            if xs.size == 0:
+                out_lines.append({"index": i, "label": labels[i], "points": []})
+                continue
+            vals = list(ds.sample(list(zip(xs.tolist(), ys.tolist())), indexes=1))
+            pts = []
+            for x, y, v in zip(xs.tolist(), ys.tolist(), vals):
+                z = v[0] if len(v) else np.nan
+                if nodata is not None:
+                    if np.isnan(nodata):
+                        if not np.isfinite(z):
+                            z = None
+                    else:
+                        if np.isclose(z, float(nodata)):
+                            z = None
+                if z is not None and not np.isfinite(z):
+                    z = None
+                pts.append({"x": float(x), "y": float(y), "z": None if z is None else float(z)})
+            out_lines.append({"index": i, "label": labels[i], "points": pts})
+    payload = {
+        "dem_path": os.path.abspath(dem_path),
+        "step_m": float(step_m),
+        "lines": out_lines,
+    }
+    with open(out_json, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    return f"[✓] Saved DEM points JSON → {os.path.abspath(out_json)}"
+
 class DeletableTableWidget(QTableWidget):
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Delete:
@@ -133,6 +194,7 @@ class UI2App(QWidget):
         self.log_path = os.path.join(self.workspace, f"log_{datetime.datetime.now():%Y%m%d_%H%M%S}.txt")
         self.transform = None
         self.crs = None
+        self.dem_path = ""
         self._build_ui()
         self._auto_load_default()
 
@@ -275,6 +337,7 @@ class UI2App(QWidget):
             self.transform = src.transform
             self.crs = src.crs
             h, w = src.height, src.width
+        self.dem_path = dem_path
         pixmap = QPixmap(png_path)
         self.scene.clear()
         item = QGraphicsPixmapItem(pixmap)
@@ -372,6 +435,7 @@ class UI2App(QWidget):
 
             # 2) Đọc bảng -> LineString + vẽ overlay
             lines = []
+            labels = []
             for r in range(self.table.rowCount()):
                 try:
                     x0 = float(self.table.item(r, 1).text());
@@ -383,6 +447,8 @@ class UI2App(QWidget):
                     continue
 
                 lines.append(LineString([(x0, y0), (x1, y1)]))
+                label_item = self.table.item(r, 0)
+                labels.append(label_item.text() if label_item else str(r + 1))
                 c0, r0 = ~self.transform * (x0, y0)
                 c1, r1 = ~self.transform * (x1, y1)
                 it = self.scene.addLine(c0, r0, c1, r1, QPen(Qt.white, 2));
@@ -429,7 +495,12 @@ class UI2App(QWidget):
             _write_json(os.path.join("output", "UI2", "ui_shared_data.json"), payload)
             self.log("[i] Updated output/UI2/ui_shared_data.json")
 
-            # --- 5) Fit view + dọn chấm chọn như cũ ---
+            # --- 5) Export DEM points JSON for drawn lines ---
+            out_json = os.path.join("output", "UI2", "step2_selected_lines", "selected_lines_dem_points.json")
+            msg = _export_lines_dem_json(self.dem_path, lines, labels, out_json, step_m=None)
+            self.log(msg)
+
+            # --- 6) Fit view + dọn chấm chọn như cũ ---
             self.view.fitInView(self.scene.itemsBoundingRect(), Qt.KeepAspectRatio)
             for d in self.view.click_dots:
                 self.scene.removeItem(d)

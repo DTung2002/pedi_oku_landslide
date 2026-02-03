@@ -408,7 +408,7 @@ class MainWindow(QMainWindow):
             QTabBar::tab:selected {{
                 background: qlineargradient(
                     x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #6fa34a, stop:1 #056832
+                    stop:0 #f5a623, stop:1 #f76b1c
                 );
                 color: #ffffff;
             }}

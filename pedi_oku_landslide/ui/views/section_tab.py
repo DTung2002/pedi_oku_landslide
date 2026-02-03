@@ -132,6 +132,24 @@ def _build_line(center_xy: Tuple[float, float], u_dir: np.ndarray, length_m: flo
     dx, dy = u_dir * half
     return LineString([(cx - dx, cy - dy), (cx + dx, cy + dy)])
 
+def _densify_line(line: LineString, step_m: float) -> Tuple[np.ndarray, np.ndarray]:
+    if line is None or getattr(line, "is_empty", False):
+        return np.array([]), np.array([])
+    try:
+        length_m = float(line.length)
+    except Exception:
+        return np.array([]), np.array([])
+    if not np.isfinite(length_m) or length_m <= 0:
+        return np.array([]), np.array([])
+    step = float(step_m) if step_m and np.isfinite(step_m) else 1.0
+    n = max(2, int(np.ceil(length_m / step)) + 1)
+    s = np.linspace(0.0, length_m, n)
+    xs = np.empty(n); ys = np.empty(n)
+    for i, d in enumerate(s):
+        p = line.interpolate(d)
+        xs[i], ys[i] = p.x, p.y
+    return xs, ys
+
 
 def _bbox_length_from_mask(
     mask: np.ndarray,
@@ -584,6 +602,11 @@ class _LayeredViewer(UI1Viewer):
                 self.cursorMoved.emit(x, y)
                 return True
 
+            if ev.type() == QEvent.MouseButtonPress and ev.button() == Qt.RightButton:
+                if self._picking and self._p1_pix is not None:
+                    self.cancel_pick()
+                return True
+
             if ev.type() == QEvent.MouseButtonPress and ev.button() == Qt.LeftButton:
                 sp = self.view.mapToScene(ev.pos())
                 c, r = float(sp.x()), float(sp.y())
@@ -704,6 +727,7 @@ class SectionSelectionTab(QWidget):
         self._dx: Optional[np.ndarray] = None
         self._dy: Optional[np.ndarray] = None
         self._mask: Optional[np.ndarray] = None  # uint8 0/1 aligned to dz grid
+        self._dem_path: Optional[str] = None
 
         # vector drawing params (sync với UI1)
         self._vec_step: int = 25
@@ -931,6 +955,7 @@ class SectionSelectionTab(QWidget):
         before_smooth = os.path.join(ui1, "before_asc_smooth.tif")
         if _file_exists(before_smooth):
             before_tif = before_smooth
+        self._dem_path = before_tif
 
         # Có thể có các tên mask khác nhau
         # Có thể có các tên mask khác nhau (ưu tiên detect_mask.tif của UI1 mới)
@@ -1394,6 +1419,16 @@ class SectionSelectionTab(QWidget):
 
     def _on_clear(self) -> None:
         """Xoá toàn bộ sections + line trên map."""
+        reply = QMessageBox.question(
+            self,
+            "Confirm",
+            "本当に消しますか？\nAre you sure you want to delete it?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
         self.tbl.setRowCount(0)
         self._sections.clear()
 
