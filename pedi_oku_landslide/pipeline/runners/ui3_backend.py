@@ -415,7 +415,7 @@ def compute_profile(
         elev_s = elev.copy()
 
     for d in (dem_ds, dx_ds, dy_ds, dz_ds): d.close()
-    if mask_bool is not None:
+    if mask_bool is not None and slip_only:
         keep = np.isfinite(chain) & (mask_bool == True) & np.isfinite(elev_s)
     else:
         keep = np.isfinite(chain) & np.isfinite(elev_s)

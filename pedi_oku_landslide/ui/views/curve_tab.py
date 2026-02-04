@@ -378,7 +378,7 @@ class CurveAnalyzeTab(QWidget):
                 self.dem_path, self.dx_path, self.dy_path, self.dz_path,
                 geom, step_m=self.step_box.value(),
                 smooth_win=11, smooth_poly=2,
-                slip_mask_path=self.slip_path, slip_only=True
+                slip_mask_path=self.slip_path, slip_only=False
             )
             if not prof or len(prof.get("chain", [])) < 6:
                 self._warn("[UI3] Empty/too-short slip profile.");
@@ -810,15 +810,15 @@ class CurveAnalyzeTab(QWidget):
                     return p
             return ""
 
-        # Prefer DEM input (before_dem) over before.asc
+        # Prefer full DEM input (before_dem / ground) over cropped DEM
         self.dem_path = _pick_first(
-            meta_processed.get("dem_cropped") or "",
-            meta_inputs.get("before_dem") or "",
             js.get("dem_ground_path") or "",
+            meta_inputs.get("before_dem") or "",
             ap.get("dem", ""),
             meta_inputs.get("before_asc") or "",
             os.path.join(run_dir, "input", "before_dem.tif"),
             os.path.join(run_dir, "input", "before.asc"),
+            meta_processed.get("dem_cropped") or "",
         )
         self.dx_path = _pick_first(
             js.get("dx_path") or "",
@@ -1125,14 +1125,14 @@ class CurveAnalyzeTab(QWidget):
         self._log(f"[UI3] DZ:  {self.dz_path}")
         self._log(f"[UI3] MASK:{self.slip_path}")
 
-        # 2) Tính profile (chỉ trong slip-zone)
+        # 2) Tính profile (ground full line, không giới hạn slip-zone)
         geom = self._gdf.geometry.iloc[row]
         prof = compute_profile(
             self.dem_path, self.dx_path, self.dy_path, self.dz_path,
             geom,
             step_m=self.step_box.value(),
             smooth_win=11, smooth_poly=2,
-            slip_mask_path=self.slip_path, slip_only=True
+            slip_mask_path=self.slip_path, slip_only=False
         )
         if not prof:
             self._log("[!] Empty profile.")
