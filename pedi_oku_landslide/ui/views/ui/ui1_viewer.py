@@ -16,6 +16,8 @@ class ZoomableGraphicsView(QGraphicsView):
         self.setRenderHint(QPainter.SmoothPixmapTransform, True)
         self.setRenderHint(QPainter.TextAntialiasing, True)
         self.setDragMode(QGraphicsView.ScrollHandDrag)
+        self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+        self.setResizeAnchor(QGraphicsView.AnchorUnderMouse)
         self._zoom = 1.0
 
     def wheelEvent(self, event):
@@ -27,12 +29,8 @@ class ZoomableGraphicsView(QGraphicsView):
         else:
             factor = zoom_out_factor
 
-        old_pos = self.mapToScene(event.pos())
         self.scale(factor, factor)
         self._zoom *= factor
-        new_pos = self.mapToScene(event.pos())
-        delta = new_pos - old_pos
-        self.translate(delta.x(), delta.y())
 
     def set_zoom_100(self):
         # Reset về 100%

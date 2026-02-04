@@ -11,6 +11,8 @@ class FilePicker(QWidget):
         self.lbl = QLabel("No file selected")
 
         lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
         lay.addWidget(self.btn)
         lay.addWidget(self.lbl, 1)
 

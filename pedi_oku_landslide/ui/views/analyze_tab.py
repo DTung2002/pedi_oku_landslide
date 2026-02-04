@@ -57,7 +57,7 @@ class AnalyzeTab(QWidget):
         self.edit_project.setPlaceholderText("e.g. Jimba_01")
         row_proj.addWidget(self.edit_project, 1)
 
-        self.btn_load_run = QPushButton("Load Run…")
+        self.btn_load_run = QPushButton("Load Run")
         self.btn_load_run.setToolTip("Open an existing run folder under output/<Project>/<RunID>")
         self.btn_load_run.clicked.connect(self._on_open_existing_run)
         row_proj.addWidget(self.btn_load_run)
@@ -75,54 +75,70 @@ class AnalyzeTab(QWidget):
         left_layout.addWidget(grp_proj)
 
         # Inputs group
-        grp_inputs = QGroupBox("Inputs (5 files)")
+        grp_inputs = QGroupBox("Inputs")
         inputs_layout = QVBoxLayout(grp_inputs)
-        self.fp_bdem = FilePicker("1) BEFORE DEM (.tif)", "GeoTIFF (*.tif *.tiff)")
-        self.fp_basc = FilePicker("2) BEFORE.asc", "ASC (*.asc)")
-        self.fp_aasc = FilePicker("3) AFTER.asc", "ASC (*.asc)")
-        self.fp_bpz  = FilePicker("4) BEFORE_PZ.asc", "ASC (*.asc)")
-        self.fp_apz  = FilePicker("5) AFTER_PZ.asc", "ASC (*.asc)")
+        inputs_layout.setContentsMargins(6, 8, 6, 8)
+        inputs_layout.setSpacing(2)
+
+        self.fp_bdem = FilePicker("BEFORE DEM.tif", "GeoTIFF (*.tif *.tiff)")
+        self.fp_basc = FilePicker("BEFORE.asc", "ASC (*.asc)")
+        self.fp_aasc = FilePicker("AFTER.asc", "ASC (*.asc)")
+        self.fp_bpz  = FilePicker("BEFORE_PZ.asc", "ASC (*.asc)")
+        self.fp_apz  = FilePicker("AFTER_PZ.asc", "ASC (*.asc)")
+        
+        btn_w = max(
+            self.fp_bdem.btn.sizeHint().width(),
+            self.fp_basc.btn.sizeHint().width(),
+            self.fp_aasc.btn.sizeHint().width(),
+            self.fp_bpz.btn.sizeHint().width(),
+            self.fp_apz.btn.sizeHint().width(),
+        ) + 40
+        for fp in (self.fp_bdem, self.fp_basc, self.fp_aasc, self.fp_bpz, self.fp_apz):
+            fp.btn.setFixedWidth(btn_w)
+
         for w in (self.fp_bdem, self.fp_basc, self.fp_aasc, self.fp_bpz, self.fp_apz):
             inputs_layout.addWidget(w)
-        left_layout.addWidget(grp_inputs)
-
-        # Actions row
+            
+        # Actions row (inside Inputs panel)
         actions = QHBoxLayout()
+        actions.setContentsMargins(0, 2, 0, 0)
+        actions.setSpacing(6)
+
         self.btn_confirm = QPushButton("Confirm Input")
         self.btn_confirm.clicked.connect(self._on_confirm_input)
+
         self.btn_open_run = QPushButton("Open run folder")
         self.btn_open_run.clicked.connect(self._on_open_run)
         self.btn_open_run.setEnabled(False)
-        actions.addWidget(self.btn_confirm, 2)
+        actions.addWidget(self.btn_confirm, 1)
         actions.addWidget(self.btn_open_run, 1)
-        left_layout.addLayout(actions)
+        inputs_layout.addLayout(actions)
 
-        # ===================== Smooth Input =====================
-        grp_smooth = QGroupBox("Smooth Input")
-        lay_smooth = QVBoxLayout(grp_smooth)
+        left_layout.addWidget(grp_inputs)
+
+        # ===================== Detect Landslide Zone (combined) =====================
+        grp_detect = QGroupBox("Detect Landslide Zone")
+        lay_detect = QVBoxLayout(grp_detect)
 
         row_s1 = QHBoxLayout()
-        row_s1.addWidget(QLabel("Gaussian σ (px):"))
+        row_s1.addWidget(QLabel("Smooth Gaussian σ (px):"))
         self.spin_sigma = QDoubleSpinBox()
         self.spin_sigma.setRange(0.0, 50.0)
         self.spin_sigma.setSingleStep(0.5)
         self.spin_sigma.setDecimals(1)
         self.spin_sigma.setValue(2.0)
         row_s1.addWidget(self.spin_sigma)
-        lay_smooth.addLayout(row_s1)
-
+        row_s1.addStretch(1)
         self.btn_smooth = QPushButton("Smooth (preview)")
         self.btn_smooth.setEnabled(False)  # bật sau Confirm Input
         self.btn_smooth.clicked.connect(self._on_smooth)
-        lay_smooth.addWidget(self.btn_smooth)
+        row_s1.addWidget(self.btn_smooth)
+        lay_detect.addLayout(row_s1)
 
-        left_layout.addWidget(grp_smooth)
+        # ---- Calculate SAD ----
+        lay_sad = QHBoxLayout()
 
-        # ===================== Calculate SAD =====================
-        grp_sad = QGroupBox("Calculate SAD")
-        lay_sad = QHBoxLayout(grp_sad)
-
-        lay_sad.addWidget(QLabel("Method:"))
+        lay_sad.addWidget(QLabel("Calculation Method:"))
         self.cmb_method = QComboBox()
         self.cmb_method.addItems(["OpenCV", "Traditional"])
         self.cmb_method.setCurrentText("OpenCV")
@@ -131,14 +147,12 @@ class AnalyzeTab(QWidget):
         self.btn_calc_sad = QPushButton("Calculate (SAD + dZ)")
         self.btn_calc_sad.setEnabled(False)  # bật sau Confirm Input
         self.btn_calc_sad.clicked.connect(self._on_calc_sad)
-        lay_sad.addWidget(self.btn_calc_sad)
-
         lay_sad.addStretch(1)
-        left_layout.addWidget(grp_sad)
+        lay_sad.addWidget(self.btn_calc_sad)
+        lay_detect.addLayout(lay_sad)
 
-        # ===== Landslide Zone & Vector displacement =====
-        grp_zone = QGroupBox("Landslide Zone - Vector displacement")
-        lay_zone = QVBoxLayout(grp_zone)
+        # ---- Landslide Zone ----
+        lay_zone = QVBoxLayout()
 
         # --- Detect row (xuống hàng riêng)
         row_d = QHBoxLayout()
@@ -152,11 +166,14 @@ class AnalyzeTab(QWidget):
         self.btn_detect = QPushButton("Detect Landslide Zone")
         self.btn_detect.setEnabled(False)  # bật sau SAD
         self.btn_detect.clicked.connect(self._on_detect)
-        row_d.addWidget(self.btn_detect)
         row_d.addStretch(1)
+        row_d.addWidget(self.btn_detect)
         lay_zone.addLayout(row_d)
 
-        # --- Vectors controls
+        lay_detect.addLayout(lay_zone)
+        # ---- Vectors Adjustment ----
+        grp_vectors = QGroupBox("Vectors Adjustment")
+        lay_vectors = QVBoxLayout(grp_vectors)
         row_v = QHBoxLayout()
         row_v.addWidget(QLabel("Vectors step:"))
         self.spin_vec_step = QSpinBox()
@@ -171,14 +188,22 @@ class AnalyzeTab(QWidget):
         self.spin_vec_scale.setValue(1.0)  # theo mét
         row_v.addWidget(self.spin_vec_scale)
         row_v.addStretch(1)
-        lay_zone.addLayout(row_v)
-
         self.btn_vectors = QPushButton("Render Vectors")
         self.btn_vectors.setEnabled(False)  # bật sau SAD
         self.btn_vectors.clicked.connect(self._on_render_vectors)
-        lay_zone.addWidget(self.btn_vectors)
-
-        left_layout.addWidget(grp_zone)
+        row_v.addWidget(self.btn_vectors)
+        lay_vectors.addLayout(row_v)
+        # Normalize button widths in Detect panel
+        btn_detect_w = max(
+            self.btn_smooth.sizeHint().width(),
+            self.btn_calc_sad.sizeHint().width(),
+            self.btn_detect.sizeHint().width(),
+        )
+        btn_detect_w = int(round(btn_detect_w * 1.5))
+        for b in (self.btn_smooth, self.btn_calc_sad, self.btn_detect):
+            b.setFixedWidth(btn_detect_w)
+        left_layout.addWidget(grp_detect)
+        left_layout.addWidget(grp_vectors)
 
         # Status group
         grp_status = QGroupBox("Status")

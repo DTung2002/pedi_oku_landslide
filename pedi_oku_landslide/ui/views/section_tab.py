@@ -402,6 +402,7 @@ class _LayeredViewer(UI1Viewer):
         # picking state
         self._picking: bool = True
         self._p1_pix: Optional[Tuple[float, float]] = None  # (col,row) trong raster
+        self._last_mouse_scene: Optional[QPointF] = None
 
         # behaviour view
         self.view.setDragMode(QGraphicsView.NoDrag)
@@ -414,6 +415,15 @@ class _LayeredViewer(UI1Viewer):
         self.view.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.view.setViewportUpdateMode(QGraphicsView.SmartViewportUpdate)
         self.view.setRenderHints(self.view.renderHints() | QPainter.Antialiasing)
+
+        # Rebind zoom buttons to zoom around last mouse (or view center)
+        try:
+            self.btn_zoom_in.clicked.disconnect()
+            self.btn_zoom_out.clicked.disconnect()
+        except Exception:
+            pass
+        self.btn_zoom_in.clicked.connect(lambda: self._zoom_by_factor(1.15))
+        self.btn_zoom_out.clicked.connect(lambda: self._zoom_by_factor(1 / 1.15))
 
     # ---- georef helpers ----
     def set_transform(self, tr: Affine) -> None:
@@ -479,12 +489,12 @@ class _LayeredViewer(UI1Viewer):
         step_px_x = step_m * pix_per_m_x
         step_px_y = step_m * pix_per_m_y
 
-        pen = QPen(QColor(200, 0, 0, 180))
+        pen = QPen(QColor(140, 140, 140, 180))
         pen.setStyle(Qt.DashLine)
         pen.setCosmetic(True)
         pen.setWidth(0)
 
-        text_brush = QBrush(QColor(180, 0, 0))
+        text_brush = QBrush(QColor(0, 0, 0))
 
         # Vertical lines + X labels
         x = 0.0
@@ -582,9 +592,19 @@ class _LayeredViewer(UI1Viewer):
 
     def eventFilter(self, obj, ev):
         if obj is self.view.viewport():
+            if ev.type() == QEvent.Wheel:
+                dy = ev.angleDelta().y()
+                if dy == 0:
+                    return True
+                zoom_in_factor = 1.15
+                factor = zoom_in_factor if dy > 0 else (1 / zoom_in_factor)
+                # Zoom toward cursor position (robust even if anchor misbehaves)
+                self._zoom_at(ev.pos(), factor)
+                return True
             if ev.type() == QEvent.MouseMove:
                 sp = self.view.mapToScene(ev.pos())
                 c, r = float(sp.x()), float(sp.y())
+                self._last_mouse_scene = sp
 
                 # crosshair + dot
                 self._cross_h.setLine(0, r, self.scene.width(), r)
@@ -628,6 +648,25 @@ class _LayeredViewer(UI1Viewer):
                 return True
 
         return super().eventFilter(obj, ev)
+
+    def _zoom_by_factor(self, factor: float) -> None:
+        if self._last_mouse_scene is not None:
+            vp = self.view.mapFromScene(self._last_mouse_scene)
+        else:
+            vp = self.view.viewport().rect().center()
+        self._zoom_at(vp, factor)
+
+    def _zoom_at(self, viewport_pos, factor: float) -> None:
+        old_pos = self.view.mapToScene(viewport_pos)
+        # Disable built-in anchoring to avoid double compensation
+        self.view.setTransformationAnchor(QGraphicsView.NoAnchor)
+        self.view.scale(factor, factor)
+        new_pos = self.view.mapToScene(viewport_pos)
+        delta = new_pos - old_pos
+        # Move scene so the point under cursor stays fixed
+        self.view.translate(delta.x(), delta.y())
+        # Restore expected anchor for other interactions
+        self.view.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
 
 from PyQt5.QtWidgets import QDialog, QGridLayout, QSpinBox, QDoubleSpinBox
 
@@ -718,7 +757,9 @@ class SectionSelectionTab(QWidget):
         self.run_label: Optional[str] = None
         self.run_dir: Optional[str] = None
         self._section_lines: list[QGraphicsLineItem] = []
+        self._section_line_labels: list[QGraphicsSimpleTextItem] = []
         self._preview_line: Optional[QGraphicsLineItem] = None
+        self._preview_label: Optional[QGraphicsSimpleTextItem] = None
 
         # caches
         self._tr: Optional[Affine] = None
@@ -1228,6 +1269,7 @@ class SectionSelectionTab(QWidget):
 
         # 2) vẽ line lên viewer (map → pixel)
         line_item = None
+        label_item = None
         if self._inv_tr is not None:
             c0, r0 = self._inv_tr * p0
             c1, r1 = self._inv_tr * p1
@@ -1238,9 +1280,43 @@ class SectionSelectionTab(QWidget):
             line_item.setPen(pen)
             line_item.setZValue(3)
             self.viewer.scene.addItem(line_item)
+            label_item = self._add_line_label(line_label, c0, r0, c1, r1, z=5)
 
         self._section_lines.append(line_item)
+        self._section_line_labels.append(label_item)
         self._ok("Section line drawn on map.")
+
+    def _add_line_label(
+            self,
+            label_text: str,
+            start_x: float,
+            start_y: float,
+            end_x: float,
+            end_y: float,
+            z: float = 5,
+    ) -> QGraphicsSimpleTextItem:
+        lbl = QGraphicsSimpleTextItem(str(label_text))
+        lbl.setFont(QFont("Arial", 15))
+        lbl.setBrush(QBrush(QColor(0, 170, 0)))
+
+        # Offset label away from the line (perpendicular direction)
+        dx = end_x - start_x
+        dy = end_y - start_y
+        length = (dx * dx + dy * dy) ** 0.5
+        if length > 1e-6:
+            nx = -dy / length
+            ny = dx / length
+        else:
+            nx, ny = 0.0, -1.0
+        offset = 10.0
+
+        br = lbl.boundingRect()
+        x = start_x - br.width() * 0.5 + nx * offset
+        y = start_y - br.height() * 0.5 + ny * offset
+        lbl.setPos(x, y)
+        lbl.setZValue(z)
+        self.viewer.scene.addItem(lbl)
+        return lbl
 
     def _on_table_item_changed(self, item) -> None:
         """
@@ -1255,8 +1331,8 @@ class SectionSelectionTab(QWidget):
         row = item.row()
         col = item.column()
 
-        # chỉ quan tâm cột 1 (Start) và 2 (End)
-        if col not in (1, 2):
+        # chỉ quan tâm cột 1 (Start), 2 (End), 0 (Label)
+        if col not in (0, 1, 2):
             return
 
         # lấy cả start & end của dòng hiện tại
@@ -1286,9 +1362,47 @@ class SectionSelectionTab(QWidget):
             if line_item is not None:
                 line_item.setLine(c0, r0, c1, r1)
 
+        # cập nhật label (line number)
+        if 0 <= row < len(self._section_line_labels):
+            lbl = self._section_line_labels[row]
+            if lbl is not None:
+                label_item = self.tbl.item(row, 0)
+                lbl.setText(label_item.text() if label_item else str(row + 1))
+                br = lbl.boundingRect()
+                dx = c1 - c0
+                dy = r1 - r0
+                length = (dx * dx + dy * dy) ** 0.5
+                if length > 1e-6:
+                    nx = -dy / length
+                    ny = dx / length
+                else:
+                    nx, ny = 0.0, -1.0
+                offset = 10.0
+                lbl.setPos(
+                    c0 - br.width() * 0.5 + nx * offset,
+                    r0 - br.height() * 0.5 + ny * offset,
+                )
+
         # nếu đang có preview line cho đúng dòng này, cập nhật luôn
         if self._preview_line is not None and self.tbl.currentRow() == row:
             self._preview_line.setLine(c0, r0, c1, r1)
+            if self._preview_label is not None:
+                label_item = self.tbl.item(row, 0)
+                self._preview_label.setText(label_item.text() if label_item else str(row + 1))
+                br = self._preview_label.boundingRect()
+                dx = c1 - c0
+                dy = r1 - r0
+                length = (dx * dx + dy * dy) ** 0.5
+                if length > 1e-6:
+                    nx = -dy / length
+                    ny = dx / length
+                else:
+                    nx, ny = 0.0, -1.0
+                offset = 10.0
+                self._preview_label.setPos(
+                    c0 - br.width() * 0.5 + nx * offset,
+                    r0 - br.height() * 0.5 + ny * offset,
+                )
 
         self._ok(f"Updated section #{row + 1} from table edit.")
 
@@ -1370,9 +1484,16 @@ class SectionSelectionTab(QWidget):
             if it is not None:
                 self.viewer.scene.removeItem(it)
         self._section_lines.clear()
+        for it in getattr(self, "_section_line_labels", []):
+            if it is not None:
+                self.viewer.scene.removeItem(it)
+        self._section_line_labels.clear()
         if getattr(self, "_preview_line", None) is not None:
             self.viewer.scene.removeItem(self._preview_line)
             self._preview_line = None
+        if getattr(self, "_preview_label", None) is not None:
+            self.viewer.scene.removeItem(self._preview_label)
+            self._preview_label = None
 
         # 5) Helper: convert feat (LineString) -> 1 dòng trong bảng + vẽ line
         def _add_feat(feat: dict) -> None:
@@ -1400,6 +1521,9 @@ class SectionSelectionTab(QWidget):
         if self._preview_line is not None:
             self.viewer.scene.removeItem(self._preview_line)
             self._preview_line = None
+        if self._preview_label is not None:
+            self.viewer.scene.removeItem(self._preview_label)
+            self._preview_label = None
 
         p0 = tuple(map(float, self.tbl.item(r, 1).text().split(",")))
         p1 = tuple(map(float, self.tbl.item(r, 2).text().split(",")))
@@ -1414,6 +1538,15 @@ class SectionSelectionTab(QWidget):
         item.setZValue(4)  # cao hơn line xanh
         self.viewer.scene.addItem(item)
         self._preview_line = item
+        label_item = self.tbl.item(r, 0)
+        self._preview_label = self._add_line_label(
+            label_item.text() if label_item else str(r + 1),
+            c0,
+            r0,
+            c1,
+            r1,
+            z=6,
+        )
 
         self._ok("Preview line drawn.")
 
@@ -1437,11 +1570,18 @@ class SectionSelectionTab(QWidget):
             if it is not None:
                 self.viewer.scene.removeItem(it)
         self._section_lines.clear()
+        for it in self._section_line_labels:
+            if it is not None:
+                self.viewer.scene.removeItem(it)
+        self._section_line_labels.clear()
 
         self._ok("Cleared sections.")
         if self._preview_line is not None:
             self.viewer.scene.removeItem(self._preview_line)
             self._preview_line = None
+        if self._preview_label is not None:
+            self.viewer.scene.removeItem(self._preview_label)
+            self._preview_label = None
 
     def _on_confirm_sections(self) -> None:
         """Ghi ui2/sections.csv và phát 1 signal sang MainWindow/Curve tab."""
@@ -1509,6 +1649,12 @@ class SectionSelectionTab(QWidget):
                             self.viewer.scene.removeItem(it)
                         self._section_lines.pop(r)
 
+                    if 0 <= r < len(self._section_line_labels):
+                        it = self._section_line_labels[r]
+                        if it is not None:
+                            self.viewer.scene.removeItem(it)
+                        self._section_line_labels.pop(r)
+
                     if 0 <= r < len(self._sections):
                         self._sections.pop(r)
 
@@ -1517,6 +1663,9 @@ class SectionSelectionTab(QWidget):
                 if self._preview_line is not None:
                     self.viewer.scene.removeItem(self._preview_line)
                     self._preview_line = None
+                if self._preview_label is not None:
+                    self.viewer.scene.removeItem(self._preview_label)
+                    self._preview_label = None
 
                 self._ok("Deleted selected section(s).")
                 event.accept()
@@ -1570,11 +1719,19 @@ class SectionSelectionTab(QWidget):
                 if it is not None:
                     self.viewer.scene.removeItem(it)
             self._section_lines.clear()
+        if hasattr(self, "_section_line_labels"):
+            for it in self._section_line_labels:
+                if it is not None:
+                    self.viewer.scene.removeItem(it)
+            self._section_line_labels.clear()
 
         # Xoá preview line nếu có
         if hasattr(self, "_preview_line") and self._preview_line is not None:
             self.viewer.scene.removeItem(self._preview_line)
             self._preview_line = None
+        if hasattr(self, "_preview_label") and self._preview_label is not None:
+            self.viewer.scene.removeItem(self._preview_label)
+            self._preview_label = None
 
         # Xoá status
         if hasattr(self, "status_text"):
