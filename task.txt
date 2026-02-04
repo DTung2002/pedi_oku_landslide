@@ -1,9 +1,1 @@
-Task
-2.Tôi muốn có khả năng điều chỉnh hiển thị vector (màu sắc, độ dày đường kẻ, hình dạng ô). - UI1, UI2
-3.Tôi muốn các số và tên được nhập trong trường - UI2
-4.Tôi muốn các giá trị tọa độ lưới trên bản vẽ được hiển thị giống như UI1. Như vậy sẽ dễ nhìn hơn. - UI2
-5.Khi nhấn vào nút "Xóa tất cả", tôi muốn có thể chọn tiếp tục bằng cách hiển thị một thông báo như "Bạn có chắc chắn muốn xóa không?" để tránh thao tác ngoài ý muốn. - UI2
-6.Tôi muốn có thể thay đổi màu sắc và độ rộng của đường kẻ và con trỏ nhập liệu. - UI2
-7.Tôi muốn có thể thay đổi màu sắc của từng nhóm vector. - UI3
-8. Một số đường mặt đất đã biến mất. Có vẻ như mặt đất không được hiển thị ở những khu vực không có vectơ, nhưng tôi muốn mặt đất hiển thị toàn bộ phạm vi được chỉ định trong các Khu vực. - UI3
-9.Vẽ đường cong NURBS# trong bảng Sections được hiển thị dưới dạng nhãn trên các đường kẻ trên bản vẽ.
+
