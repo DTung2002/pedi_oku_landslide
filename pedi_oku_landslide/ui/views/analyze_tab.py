@@ -187,6 +187,18 @@ class AnalyzeTab(QWidget):
         self.spin_vec_scale.setSingleStep(1.0)
         self.spin_vec_scale.setValue(1.0)  # theo mét
         row_v.addWidget(self.spin_vec_scale)
+        row_v.addWidget(QLabel("Color:"))
+        self.combo_vec_color = QComboBox()
+        self.combo_vec_color.addItems(["Blue", "Red", "Green", "Black", "Yellow", "Magenta"])
+        self.combo_vec_color.setCurrentText("Blue")
+        row_v.addWidget(self.combo_vec_color)
+        row_v.addWidget(QLabel("Size:"))
+        self.spin_vec_width = QDoubleSpinBox()
+        self.spin_vec_width.setDecimals(4)
+        self.spin_vec_width.setRange(0.0002, 0.02)
+        self.spin_vec_width.setSingleStep(0.0002)
+        self.spin_vec_width.setValue(0.001)
+        row_v.addWidget(self.spin_vec_width)
         row_v.addStretch(1)
         self.btn_vectors = QPushButton("Render Vectors")
         self.btn_vectors.setEnabled(False)  # bật sau SAD
@@ -552,6 +564,8 @@ class AnalyzeTab(QWidget):
         try:
             step = int(self.spin_vec_step.value())
             scale = float(self.spin_vec_scale.value())
+            color = str(self.combo_vec_color.currentText())
+            width = float(self.spin_vec_width.value())
 
             # reconstruct ctx
             parts = os.path.normpath(self._last_run_dir).split(os.sep)
@@ -576,6 +590,8 @@ class AnalyzeTab(QWidget):
                 ctx,
                 step=step,
                 scale=scale,
+                vector_color=color,
+                vector_width=width,
             )
 
             # Hiển thị: trái = overlay (nếu có) hoặc dz, phải = vectors overlay

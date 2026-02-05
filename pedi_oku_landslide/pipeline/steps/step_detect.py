@@ -245,6 +245,8 @@ def render_vectors(
     ctx: AnalysisContext,
     step: int = 25,
     scale: float = 0.1,
+    vector_color: str = "blue",
+    vector_width: float = 0.01,
     min_m: float = 0.05,
     max_m: float = 2.0,
 ) -> dict:
@@ -323,9 +325,9 @@ def render_vectors(
     plt.imshow(hill, cmap="gray", extent=extent, origin="upper")
     plt.quiver(
         Xw, Yw, U, V,
-        color="blue", angles="xy",
+        color=vector_color, angles="xy",
         scale_units="xy", scale=(1.0 / max(scale, 1e-6)),
-        width=0.0018, headwidth=6, headlength=7
+        width=float(vector_width), headwidth=6, headlength=7
     )
     plt.title(f"Displacement Vectors (step={step}, scale={scale}, {min_m}–{max_m} m) — masked")
     plt.xlabel("X (m)"); plt.ylabel("Y (m)")

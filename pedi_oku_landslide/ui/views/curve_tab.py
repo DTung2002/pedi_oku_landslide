@@ -810,16 +810,17 @@ class CurveAnalyzeTab(QWidget):
                     return p
             return ""
 
-        # Prefer full DEM input (before_dem / ground) over cropped DEM
+        # Prefer raw DEM inputs over smoothed/cropped outputs
         self.dem_path = _pick_first(
-            js.get("dem_ground_path") or "",
             meta_inputs.get("before_dem") or "",
+            js.get("dem_ground_path") or "",
             ap.get("dem", ""),
             meta_inputs.get("before_asc") or "",
             os.path.join(run_dir, "input", "before_dem.tif"),
             os.path.join(run_dir, "input", "before.asc"),
             meta_processed.get("dem_cropped") or "",
         )
+        self._log(f"[UI3] Ground DEM input: {self.dem_path}")
         self.dx_path = _pick_first(
             js.get("dx_path") or "",
             ap.get("dx", ""),
