@@ -11,7 +11,7 @@ from PyQt5.QtWidgets import (
     QScrollArea, QFrame, QTextEdit, QComboBox, QDoubleSpinBox,
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
     QTableWidget, QTableWidgetItem, QHeaderView, QSizePolicy,
-    QSplitter, QLineEdit, QMessageBox
+    QSplitter, QLineEdit, QMessageBox, QColorDialog
 )
 from PyQt5.QtGui import QPixmap, QPixmapCache
 from typing import Tuple, List, Dict, Optional
@@ -282,17 +282,17 @@ class CurveAnalyzeTab(QWidget):
             self.group_table.setRowCount(0)
             for i, g in enumerate(groups, 1):
                 self.group_table.insertRow(self.group_table.rowCount())
-                self.group_table.setItem(i - 1, 0, QTableWidgetItem(str(i)))
-                self.group_table.setItem(i - 1, 1, QTableWidgetItem(str(g.get("id", f"G{i}"))))
-                self.group_table.setItem(i - 1, 2, QTableWidgetItem(f'{float(g.get("start", 0.0)):.3f}'))
-                self.group_table.setItem(i - 1, 3, QTableWidgetItem(f'{float(g.get("end", 0.0)):.3f}'))
-                self.group_table.setItem(i - 1, 4, QTableWidgetItem(str(g.get("color", ""))))
+                self.group_table.setItem(i - 1, 0, QTableWidgetItem(str(g.get("id", f"G{i}"))))
+                self.group_table.setItem(i - 1, 1, QTableWidgetItem(f'{float(g.get("start", 0.0)):.3f}'))
+                self.group_table.setItem(i - 1, 2, QTableWidgetItem(f'{float(g.get("end", 0.0)):.3f}'))
+                self._set_color_cell(i - 1, str(g.get("color", "")).strip())
 
         if "length_m" in prof and prof["length_m"] is not None:
             length_m = float(prof["length_m"])
         else:
             ch = prof.get("chain")
             length_m = float(ch[-1] - ch[0]) if ch is not None and len(ch) >= 2 else None
+        self._append_ungrouped_row(groups, length_m)
 
         bounds_set = set()
         for g in groups:
@@ -688,14 +688,14 @@ class CurveAnalyzeTab(QWidget):
         # Group table
         box_grp = QGroupBox("Group")
         lg = QVBoxLayout(box_grp)
-        self.group_table = QTableWidget(0, 5)
+        self.group_table = QTableWidget(0, 4)
         self.group_table.setHorizontalHeaderLabels(
-            ["#", "Group ID", "Start (m)", "End (m)", "Color"]
+            ["Group ID", "Start (m)", "End (m)", "Color"]
         )
         self.group_table.verticalHeader().setVisible(False)
         self.group_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.group_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.group_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        self.group_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.group_table.cellDoubleClicked.connect(self._on_group_cell_double_clicked)
         lg.addWidget(self.group_table)
 
         rowg = QHBoxLayout()
@@ -1028,30 +1028,34 @@ class CurveAnalyzeTab(QWidget):
                 for g in js.get("groups", []):
                     r = self.group_table.rowCount();
                     self.group_table.insertRow(r)
-                    self.group_table.setItem(r, 0, QTableWidgetItem(str(r + 1)))
-                    self.group_table.setItem(r, 1, QTableWidgetItem(str(g.get("id", ""))))
-                    self.group_table.setItem(r, 2, QTableWidgetItem(f'{float(g.get("start", 0.0)):.3f}'))
-                    self.group_table.setItem(r, 3, QTableWidgetItem(f'{float(g.get("end", 0.0)):.3f}'))
-                    self.group_table.setItem(r, 4, QTableWidgetItem(str(g.get("color", ""))))
+                    self.group_table.setItem(r, 0, QTableWidgetItem(str(g.get("id", ""))))
+                    self.group_table.setItem(r, 1, QTableWidgetItem(f'{float(g.get("start", 0.0)):.3f}'))
+                    self.group_table.setItem(r, 2, QTableWidgetItem(f'{float(g.get("end", 0.0)):.3f}'))
+                    self._set_color_cell(r, str(g.get("color", "")).strip())
                     loaded += 1
             except Exception as e:
                 self._log(f"[!] Cannot read groups: {e}")
+        if loaded:
+            self._append_ungrouped_row(self._read_groups_from_table(), self._sec_len_m)
         if loaded == 0:
             # 3 dòng trống mặc định
             for _ in range(3):
                 r = self.group_table.rowCount();
                 self.group_table.insertRow(r)
-                self.group_table.setItem(r, 0, QTableWidgetItem(str(r + 1)))
+                self.group_table.setItem(r, 0, QTableWidgetItem(""))
 
     def _read_group_table(self) -> List[dict]:
         out = []
         rc = self.group_table.rowCount()
         for r in range(rc):
-            gid = (self.group_table.item(r, 1).text().strip() if self.group_table.item(r, 1) else "")
-            s = (self.group_table.item(r, 2).text().strip() if self.group_table.item(r, 2) else "")
-            e = (self.group_table.item(r, 3).text().strip() if self.group_table.item(r, 3) else "")
-            color = (self.group_table.item(r, 4).text().strip() if self.group_table.item(r, 4) else "")
-            if not gid and not s and not e: continue
+            gid = (self.group_table.item(r, 0).text().strip() if self.group_table.item(r, 0) else "")
+            if gid.upper() == "UNGROUPED":
+                continue
+            s = (self.group_table.item(r, 1).text().strip() if self.group_table.item(r, 1) else "")
+            e = (self.group_table.item(r, 2).text().strip() if self.group_table.item(r, 2) else "")
+            color = self._get_color_cell_value(r)
+            if not gid and not s and not e:
+                continue
             try:
                 s_val = float(s);
                 e_val = float(e)
@@ -1211,19 +1215,23 @@ class CurveAnalyzeTab(QWidget):
                 pass
 
     def _on_add_group(self):
-        r = self.group_table.rowCount();
+        r = self._find_ungrouped_row()
+        if r is None:
+            r = self.group_table.rowCount()
         self.group_table.insertRow(r)
-        self.group_table.setItem(r, 0, QTableWidgetItem(str(r + 1)))
+        n_groups = len(self._read_groups_from_table()) + 1
+        self.group_table.setItem(r, 0, QTableWidgetItem(f"G{n_groups}"))
 
     def _on_delete_group(self):
         rows = sorted({i.row() for i in self.group_table.selectedIndexes()}, reverse=True)
         if not rows:
             self._log("[!] Select row(s) to delete.");
             return
-        for r in rows: self.group_table.removeRow(r)
-        # renumber
-        for i in range(self.group_table.rowCount()):
-            self.group_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
+        for r in rows:
+            gid = self.group_table.item(r, 0)
+            if gid and gid.text().strip().upper() == "UNGROUPED":
+                continue
+            self.group_table.removeRow(r)
 
 
     def _read_groups_from_table(self):
@@ -1231,21 +1239,150 @@ class CurveAnalyzeTab(QWidget):
         rows = self.group_table.rowCount()
         out = []
         for r in range(rows):
-            gid = self.group_table.item(r, 1)
-            s = self.group_table.item(r, 2)
-            e = self.group_table.item(r, 3)
-            c = self.group_table.item(r, 4)
+            gid = self.group_table.item(r, 0)
+            s = self.group_table.item(r, 1)
+            e = self.group_table.item(r, 2)
             try:
                 gid = gid.text().strip() if gid else f"G{r + 1}"
+                if gid.upper() == "UNGROUPED":
+                    continue
                 s = float(s.text()) if s and s.text() not in ("", None) else None
                 e = float(e.text()) if e and e.text() not in ("", None) else None
                 if s is None or e is None:
                     continue
                 if e < s: s, e = e, s
-                out.append({"id": gid, "start": s, "end": e, "color": (c.text().strip() if c else "")})
+                out.append({"id": gid, "start": s, "end": e, "color": self._get_color_cell_value(r)})
             except Exception:
                 continue
         return out
+
+    def _find_ungrouped_row(self) -> Optional[int]:
+        rows = self.group_table.rowCount()
+        for r in range(rows):
+            gid = self.group_table.item(r, 0)
+            if gid and gid.text().strip().upper() == "UNGROUPED":
+                return r
+        return None
+
+    def _compute_ungrouped_ranges(self, groups: list, smin: float, smax: float) -> List[tuple]:
+        if smin is None or smax is None:
+            return []
+        if smax <= smin:
+            return []
+        norm = []
+        for g in (groups or []):
+            try:
+                s = float(g.get("start", 0.0))
+                e = float(g.get("end", 0.0))
+            except Exception:
+                continue
+            if e < s:
+                s, e = e, s
+            s = max(s, smin)
+            e = min(e, smax)
+            if e > s:
+                norm.append((s, e))
+        norm.sort(key=lambda x: x[0])
+
+        gaps = []
+        cur = smin
+        for s, e in norm:
+            if s > cur:
+                gaps.append((cur, s))
+            if e > cur:
+                cur = e
+        if cur < smax:
+            gaps.append((cur, smax))
+        return gaps
+
+    def _append_ungrouped_row(self, groups: list, length_m: Optional[float]) -> None:
+        r = self._find_ungrouped_row()
+        if r is not None:
+            self.group_table.removeRow(r)
+
+        if length_m is not None:
+            smin, smax = 0.0, float(length_m)
+        else:
+            starts = [float(g.get("start", 0.0)) for g in (groups or []) if g.get("start", None) is not None]
+            ends = [float(g.get("end", 0.0)) for g in (groups or []) if g.get("end", None) is not None]
+            if not starts or not ends:
+                return
+            smin, smax = min(starts), max(ends)
+
+        gaps = self._compute_ungrouped_ranges(groups, smin, smax)
+        if not gaps:
+            return
+
+        starts = "; ".join([f"{s:.3f}" for s, _ in gaps])
+        ends = "; ".join([f"{e:.3f}" for _, e in gaps])
+
+        r = self.group_table.rowCount()
+        self.group_table.insertRow(r)
+        item_id = QTableWidgetItem("UNGROUPED")
+        item_s = QTableWidgetItem(starts)
+        item_e = QTableWidgetItem(ends)
+        for it in (item_id, item_s, item_e):
+            it.setFlags(it.flags() & ~Qt.ItemIsEditable)
+        self.group_table.setItem(r, 0, item_id)
+        self.group_table.setItem(r, 1, item_s)
+        self.group_table.setItem(r, 2, item_e)
+        self._set_color_cell(r, "")
+        color_item = self.group_table.item(r, 3)
+        if color_item:
+            color_item.setFlags(color_item.flags() & ~Qt.ItemIsEditable)
+
+    def _normalize_color_hex(self, color_hex: str) -> str:
+        if not color_hex:
+            return ""
+        c = color_hex.strip()
+        if not c:
+            return ""
+        if not c.startswith("#"):
+            c = f"#{c}"
+        qc = QColor(c)
+        return qc.name() if qc.isValid() else ""
+
+    def _set_color_cell(self, row: int, color_hex: str) -> None:
+        c = self._normalize_color_hex(color_hex)
+        item = self.group_table.item(row, 3)
+        if item is None:
+            item = QTableWidgetItem("")
+            self.group_table.setItem(row, 3, item)
+        item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+        if c:
+            item.setData(Qt.UserRole, c)
+            item.setToolTip(c)
+            item.setText("")
+            item.setBackground(QColor(c))
+        else:
+            item.setData(Qt.UserRole, "")
+            item.setToolTip("")
+            item.setText("")
+            item.setBackground(QColor(0, 0, 0, 0))
+
+    def _get_color_cell_value(self, row: int) -> str:
+        item = self.group_table.item(row, 3)
+        if item is None:
+            return ""
+        val = item.data(Qt.UserRole)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+        txt = item.text().strip() if item.text() else ""
+        return self._normalize_color_hex(txt)
+
+    def _on_group_cell_double_clicked(self, row: int, col: int) -> None:
+        if col != 3:
+            return
+        gid = self.group_table.item(row, 0)
+        if gid and gid.text().strip().upper() == "UNGROUPED":
+            return
+        current = self._get_color_cell_value(row)
+        initial = QColor(current) if current else QColor(255, 255, 255)
+        color = QColorDialog.getColor(initial, self, "Select group color")
+        if color.isValid():
+            self._set_color_cell(row, color.name())
+            # Re-render to reflect new group colors on vectors
+            self._render_current_safe()
 
     def _load_groups_for_current_line(self):
         """Ưu tiên đọc từ bảng (phản ánh chỉnh sửa/delete mới nhất); nếu trống thì đọc JSON."""

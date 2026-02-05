@@ -616,7 +616,7 @@ def render_profile_png(
                               angles="xy", scale_units="xy", scale=vec_scale,
                               width=vec_width, color=color,
                               headlength=head_len, headwidth=head_w)
-                    ax.plot([], [], color=color, lw=3, label=str(gid))
+                    ax.plot([], [], color=color, lw=3, label="_nolegend_")
 
             order = np.argsort(chain)
             chain_s = chain[order]
@@ -690,7 +690,7 @@ def render_profile_png(
                           angles="xy", scale_units="xy", scale=vec_scale,
                           width=vec_width, color="#bbbbbb", alpha=0.9,
                           headlength=head_len, headwidth=head_w)
-                ax.plot([], [], color="#bbbbbb", lw=3, label="(ungrouped)")
+                ax.plot([], [], color="#bbbbbb", lw=3, label="_nolegend_")
         else:
             ax.quiver(
                 chain, elev_s, d_para, dz,
