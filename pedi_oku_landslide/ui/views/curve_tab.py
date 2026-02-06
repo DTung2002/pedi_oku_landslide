@@ -144,6 +144,10 @@ class CurveAnalyzeTab(QWidget):
         super().__init__()
         self.base_dir = base_dir
         self._ctx: Dict[str, str] = {"project": "", "run_label": "", "run_dir": ""}
+        self._splitter: Optional[QSplitter] = None
+        self._left_min_w = 380
+        self._left_default_w = 490
+        self._pending_init_splitter = True
 
         self._ax_top = None  # dict: {x_min,x_max,left_px,top_px,width_px,height_px}
         self._ax_bot = None
@@ -533,6 +537,7 @@ class CurveAnalyzeTab(QWidget):
                 head_len=6.0, head_w=4.0,
                 highlight_theta=None,
                 group_ranges=groups,
+                ungrouped_color=self._get_ungrouped_color(),
                 overlay_curves=[(x_smooth, z_smooth, "#bf00ff", "Slip curve")]
             )
             self._log(msg)
@@ -612,10 +617,13 @@ class CurveAnalyzeTab(QWidget):
         # ===== BODY: dùng QSplitter để panel trái/phải kéo được =====
         splitter = QSplitter(Qt.Horizontal, self)
         splitter.setChildrenCollapsible(False)
+        self._splitter = splitter
+        splitter.splitterMoved.connect(lambda *_: self._enforce_left_pane_bounds())
         root.addWidget(splitter)
 
         # ===== LEFT: controls (KHÔNG dùng QScrollArea nữa) =====
         left_container = QWidget()
+        left_container.setMinimumWidth(self._left_min_w)
         left = QVBoxLayout(left_container)
         left.setContentsMargins(6, 6, 6, 6)
         left.setSpacing(8)
@@ -624,20 +632,35 @@ class CurveAnalyzeTab(QWidget):
         # Project info – giống Section tab
         box_proj = QGroupBox("Project")
         lp = QVBoxLayout(box_proj)
+        proj_input_h = 30
+        fm = self.fontMetrics()
+        proj_label_w = max(
+            fm.horizontalAdvance("Name:"),
+            fm.horizontalAdvance("Run label:")
+        ) + 15
+
+        def _fit_proj_label(text: str) -> QLabel:
+            lb = QLabel(text)
+            lb.setFixedWidth(proj_label_w)
+            return lb
 
         row1 = QHBoxLayout()
-        row1.addWidget(QLabel("Name:"))
+        row1.addWidget(_fit_proj_label("Name:"))
         self.edit_project = QLineEdit()
         self.edit_project.setPlaceholderText("—")
         self.edit_project.setReadOnly(True)
+        self.edit_project.setFixedHeight(proj_input_h)
+        self.edit_project.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         row1.addWidget(self.edit_project, 1)
         lp.addLayout(row1)
 
         row2 = QHBoxLayout()
-        row2.addWidget(QLabel("Run label:"))
+        row2.addWidget(_fit_proj_label("Run label:"))
         self.edit_runlabel = QLineEdit()
         self.edit_runlabel.setPlaceholderText("—")
         self.edit_runlabel.setReadOnly(True)
+        self.edit_runlabel.setFixedHeight(proj_input_h)
+        self.edit_runlabel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         row2.addWidget(self.edit_runlabel, 1)
         lp.addLayout(row2)
 
@@ -655,33 +678,44 @@ class CurveAnalyzeTab(QWidget):
         left.addWidget(box_sel)
 
         # Advanced (quiver + axes)
-        box_adv = QGroupBox("Advanced display")
-        la = QVBoxLayout(box_adv)
+        box_adv = QGroupBox("Advanced Display")
+        la = QHBoxLayout(box_adv)
+        la.setContentsMargins(8, 8, 8, 8)
+        la.setSpacing(6)
 
-        row1 = QHBoxLayout()
-        row1.addWidget(QLabel("Step (m):"))
+        def _fit_adv_label(text: str) -> QLabel:
+            lb = QLabel(text)
+            min_w = lb.fontMetrics().horizontalAdvance(text) + 8
+            lb.setFixedWidth(min_w)
+            return lb
+
+        lbl_step = _fit_adv_label("Step (m):")
+        la.addWidget(lbl_step)
         self.step_box = QDoubleSpinBox()
         self.step_box.setDecimals(2)
         self.step_box.setValue(0.20)
         self.step_box.setMaximum(1e6)
-        row1.addWidget(self.step_box)
-        row1.addStretch(1)
-        la.addLayout(row1)
-
-        row2 = QHBoxLayout()
-        row2.addWidget(QLabel("Vec scale:"))
+        self.step_box.setMinimumWidth(56)
+        self.step_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        la.addWidget(self.step_box, 1)
+        lbl_scale = _fit_adv_label("Scale:")
+        la.addWidget(lbl_scale)
         self.vscale = QDoubleSpinBox()
         self.vscale.setDecimals(3)
         self.vscale.setValue(0.1)
         self.vscale.setMaximum(1e6)
-        row2.addWidget(self.vscale)
-        row2.addWidget(QLabel("Width:"))
+        self.vscale.setMinimumWidth(56)
+        self.vscale.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        la.addWidget(self.vscale, 1)
+        lbl_width = _fit_adv_label("Width:")
+        la.addWidget(lbl_width)
         self.vwidth = QDoubleSpinBox()
         self.vwidth.setDecimals(4)
         self.vwidth.setValue(0.0015)
         self.vwidth.setMaximum(1.0)
-        row2.addWidget(self.vwidth)
-        la.addLayout(row2)
+        self.vwidth.setMinimumWidth(56)
+        self.vwidth.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        la.addWidget(self.vwidth, 1)
 
         left.addWidget(box_adv)
 
@@ -705,14 +739,12 @@ class CurveAnalyzeTab(QWidget):
         self.btn_del_g.clicked.connect(self._on_delete_group)
         self.btn_draw_curve = QPushButton("Draw Curve")
         self.btn_draw_curve.clicked.connect(self._on_draw_curve)
-        self.btn_auto_group = QPushButton("Auto-Gene Vector Group")
+        self.btn_auto_group = QPushButton("Auto Group")
         self.btn_auto_group.clicked.connect(self._on_auto_group)
 
-        rowg.addWidget(self.btn_auto_group)
-        rowg.addWidget(self.btn_add_g)
-        rowg.addWidget(self.btn_del_g)
-        rowg.addStretch(1)
-        rowg.addWidget(self.btn_draw_curve)
+        for btn in (self.btn_auto_group, self.btn_add_g, self.btn_del_g, self.btn_draw_curve):
+            btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            rowg.addWidget(btn, 1)
         lg.addLayout(rowg)
         left.addWidget(box_grp)
 
@@ -721,11 +753,9 @@ class CurveAnalyzeTab(QWidget):
         ls = QVBoxLayout(box_st)
         self.status = QTextEdit()
         self.status.setReadOnly(True)
-        self.status.setFixedHeight(110)
+        self.status.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         ls.addWidget(self.status)
-        left.addWidget(box_st)
-
-        left.addStretch(1)
+        left.addWidget(box_st, 1)
 
         # ===== RIGHT: preview (zoomable like AnalyzeTab) =====
         right_container = QWidget()
@@ -761,9 +791,54 @@ class CurveAnalyzeTab(QWidget):
         # Tỉ lệ ban đầu giữa panel trái/phải
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([400, 900])
+        splitter.setSizes([self._left_default_w, 900])
 
         self._apply_button_style()
+
+    def _left_max_w(self) -> int:
+        base_w = self.width()
+        if self._splitter is not None and self._splitter.width() > 0:
+            base_w = self._splitter.width()
+        if base_w < (self._left_min_w * 2):
+            return -1
+        return max(self._left_min_w, int(base_w * 0.5))
+
+    def _try_apply_initial_splitter_width(self) -> None:
+        if not self._pending_init_splitter or self._splitter is None:
+            return
+        max_w = self._left_max_w()
+        if max_w < 0:
+            return
+        init_left = max(self._left_min_w, min(self._left_default_w, max_w))
+        total = sum(self._splitter.sizes())
+        if total <= 0:
+            total = max(self._splitter.width(), self.width(), init_left + 1)
+        self._splitter.setSizes([init_left, max(1, total - init_left)])
+        self._pending_init_splitter = False
+
+    def _enforce_left_pane_bounds(self) -> None:
+        if self._splitter is None:
+            return
+        self._try_apply_initial_splitter_width()
+        sizes = self._splitter.sizes()
+        if len(sizes) != 2:
+            return
+        left_w, right_w = sizes
+        total = left_w + right_w
+        max_w = self._left_max_w()
+        if max_w < 0:
+            return
+        clamped_left = max(self._left_min_w, min(left_w, max_w))
+        if clamped_left != left_w and total > 0:
+            self._splitter.setSizes([clamped_left, max(1, total - clamped_left)])
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._enforce_left_pane_bounds()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._enforce_left_pane_bounds()
 
     def _row(self) -> QHBoxLayout:
         r = QHBoxLayout()
@@ -1160,7 +1235,8 @@ class CurveAnalyzeTab(QWidget):
             vec_width=self.vwidth.value(),
             head_len=6.0, head_w=4.0,
             highlight_theta=None,
-            group_ranges=groups if groups else None
+            group_ranges=groups if groups else None,
+            ungrouped_color=self._get_ungrouped_color()
         )
         self._log(msg)
         if not path or not os.path.exists(path):
@@ -1326,7 +1402,7 @@ class CurveAnalyzeTab(QWidget):
         self.group_table.setItem(r, 0, item_id)
         self.group_table.setItem(r, 1, item_s)
         self.group_table.setItem(r, 2, item_e)
-        self._set_color_cell(r, "")
+        self._set_color_cell(r, "#bbbbbb")
         color_item = self.group_table.item(r, 3)
         if color_item:
             color_item.setFlags(color_item.flags() & ~Qt.ItemIsEditable)
@@ -1373,9 +1449,6 @@ class CurveAnalyzeTab(QWidget):
     def _on_group_cell_double_clicked(self, row: int, col: int) -> None:
         if col != 3:
             return
-        gid = self.group_table.item(row, 0)
-        if gid and gid.text().strip().upper() == "UNGROUPED":
-            return
         current = self._get_color_cell_value(row)
         initial = QColor(current) if current else QColor(255, 255, 255)
         color = QColorDialog.getColor(initial, self, "Select group color")
@@ -1383,6 +1456,13 @@ class CurveAnalyzeTab(QWidget):
             self._set_color_cell(row, color.name())
             # Re-render to reflect new group colors on vectors
             self._render_current_safe()
+
+    def _get_ungrouped_color(self) -> str:
+        r = self._find_ungrouped_row()
+        if r is None:
+            return "#bbbbbb"
+        c = self._get_color_cell_value(r)
+        return c or "#bbbbbb"
 
     def _load_groups_for_current_line(self):
         """Ưu tiên đọc từ bảng (phản ánh chỉnh sửa/delete mới nhất); nếu trống thì đọc JSON."""

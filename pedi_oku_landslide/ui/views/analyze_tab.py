@@ -4,7 +4,7 @@ from PyQt5.QtCore import QObject, QThread, pyqtSignal, Qt
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QMessageBox, QGroupBox, QTextEdit, QSplitter, QSizePolicy,
-    QDoubleSpinBox, QComboBox, QSpinBox, QFileDialog
+    QDoubleSpinBox, QComboBox, QSpinBox, QFileDialog, QScrollArea, QGridLayout
 )
 import os, sys
 from datetime import datetime
@@ -32,6 +32,10 @@ class AnalyzeTab(QWidget):
         super().__init__(parent)
         self.base_dir = base_dir
         self._last_run_dir: Optional[str] = None
+        self._splitter: Optional[QSplitter] = None
+        self._left_min_w = 380
+        self._left_default_w = 490
+        self._pending_init_splitter = True
         self._build_ui()
 
     # ---------- UI ----------
@@ -40,37 +44,48 @@ class AnalyzeTab(QWidget):
 
         splitter = QSplitter(Qt.Horizontal, self)
         splitter.setChildrenCollapsible(False)
+        self._splitter = splitter
+        splitter.splitterMoved.connect(lambda *_: self._enforce_left_pane_bounds())
         root.addWidget(splitter)
 
         # ----- Left pane -----
         left_container = QWidget()
+        left_container.setMinimumWidth(self._left_min_w)
         left_layout = QVBoxLayout(left_container)
 
         # Project group
         grp_proj = QGroupBox("Project")
-        proj_layout = QVBoxLayout(grp_proj)
+        proj_layout = QGridLayout(grp_proj)
+        proj_layout.setHorizontalSpacing(8)
+        proj_layout.setVerticalSpacing(6)
+        proj_layout.setColumnStretch(1, 1)
 
-        # Hàng 1: Project name + nút Load Run…
-        row_proj = QHBoxLayout()
-        row_proj.addWidget(QLabel("Name:"))
+        lbl_name = QLabel("Name:")
+        lbl_run = QLabel("Run label:")
+        label_col_w = max(lbl_name.sizeHint().width(), lbl_run.sizeHint().width())
+        proj_layout.setColumnMinimumWidth(0, label_col_w)
+
+        proj_input_h = 30
         self.edit_project = QLineEdit()
         self.edit_project.setPlaceholderText("e.g. Jimba_01")
-        row_proj.addWidget(self.edit_project, 1)
+        self.edit_project.setFixedHeight(proj_input_h)
+        self.edit_project.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         self.btn_load_run = QPushButton("Load Run")
         self.btn_load_run.setToolTip("Open an existing run folder under output/<Project>/<RunID>")
         self.btn_load_run.clicked.connect(self._on_open_existing_run)
-        row_proj.addWidget(self.btn_load_run)
-
-        proj_layout.addLayout(row_proj)
-
-        # Hàng 2: Run label
-        row_runlabel = QHBoxLayout()
-        row_runlabel.addWidget(QLabel("Run label:"))
         self.edit_runlabel = QLineEdit()
         self.edit_runlabel.setPlaceholderText("e.g. baseline")
-        row_runlabel.addWidget(self.edit_runlabel)
-        proj_layout.addLayout(row_runlabel)
+        self.edit_runlabel.setFixedHeight(proj_input_h)
+        self.edit_runlabel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        # Reserve the same right column width on both rows so inputs end next to Load Run.
+        proj_layout.setColumnMinimumWidth(2, self.btn_load_run.sizeHint().width())
+        proj_layout.addWidget(lbl_name, 0, 0)
+        proj_layout.addWidget(self.edit_project, 0, 1)
+        proj_layout.addWidget(self.btn_load_run, 0, 2)
+        proj_layout.addWidget(lbl_run, 1, 0)
+        proj_layout.addWidget(self.edit_runlabel, 1, 1)
 
         left_layout.addWidget(grp_proj)
 
@@ -78,7 +93,7 @@ class AnalyzeTab(QWidget):
         grp_inputs = QGroupBox("Inputs")
         inputs_layout = QVBoxLayout(grp_inputs)
         inputs_layout.setContentsMargins(6, 8, 6, 8)
-        inputs_layout.setSpacing(2)
+        inputs_layout.setSpacing(6)
 
         self.fp_bdem = FilePicker("BEFORE DEM.tif", "GeoTIFF (*.tif *.tiff)")
         self.fp_basc = FilePicker("BEFORE.asc", "ASC (*.asc)")
@@ -86,16 +101,6 @@ class AnalyzeTab(QWidget):
         self.fp_bpz  = FilePicker("BEFORE_PZ.asc", "ASC (*.asc)")
         self.fp_apz  = FilePicker("AFTER_PZ.asc", "ASC (*.asc)")
         
-        btn_w = max(
-            self.fp_bdem.btn.sizeHint().width(),
-            self.fp_basc.btn.sizeHint().width(),
-            self.fp_aasc.btn.sizeHint().width(),
-            self.fp_bpz.btn.sizeHint().width(),
-            self.fp_apz.btn.sizeHint().width(),
-        ) + 40
-        for fp in (self.fp_bdem, self.fp_basc, self.fp_aasc, self.fp_bpz, self.fp_apz):
-            fp.btn.setFixedWidth(btn_w)
-
         for w in (self.fp_bdem, self.fp_basc, self.fp_aasc, self.fp_bpz, self.fp_apz):
             inputs_layout.addWidget(w)
             
@@ -114,106 +119,132 @@ class AnalyzeTab(QWidget):
         actions.addWidget(self.btn_open_run, 1)
         inputs_layout.addLayout(actions)
 
+        # Keep action buttons at their natural size; only normalize file-picker buttons.
+        file_buttons = [self.fp_bdem.btn, self.fp_basc.btn, self.fp_aasc.btn, self.fp_bpz.btn, self.fp_apz.btn]
+        max_w = max(btn.sizeHint().width() for btn in file_buttons) + 36
+        max_h = max(btn.sizeHint().height() for btn in file_buttons)
+        for btn in file_buttons:
+            btn.setFixedSize(max_w, max_h)
+
         left_layout.addWidget(grp_inputs)
 
         # ===================== Detect Landslide Zone (combined) =====================
         grp_detect = QGroupBox("Detect Landslide Zone")
         lay_detect = QVBoxLayout(grp_detect)
 
-        row_s1 = QHBoxLayout()
-        row_s1.addWidget(QLabel("Smooth Gaussian σ (px):"))
+        lab_smooth = QLabel("Gaussian σ (px):")
         self.spin_sigma = QDoubleSpinBox()
         self.spin_sigma.setRange(0.0, 50.0)
         self.spin_sigma.setSingleStep(0.5)
         self.spin_sigma.setDecimals(1)
         self.spin_sigma.setValue(2.0)
-        row_s1.addWidget(self.spin_sigma)
-        row_s1.addStretch(1)
-        self.btn_smooth = QPushButton("Smooth (preview)")
+        self.spin_sigma.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.btn_smooth = QPushButton("Smooth")
         self.btn_smooth.setEnabled(False)  # bật sau Confirm Input
         self.btn_smooth.clicked.connect(self._on_smooth)
-        row_s1.addWidget(self.btn_smooth)
-        lay_detect.addLayout(row_s1)
 
         # ---- Calculate SAD ----
-        lay_sad = QHBoxLayout()
-
-        lay_sad.addWidget(QLabel("Calculation Method:"))
+        lab_method = QLabel("SAD Method:")
         self.cmb_method = QComboBox()
         self.cmb_method.addItems(["OpenCV", "Traditional"])
         self.cmb_method.setCurrentText("OpenCV")
-        lay_sad.addWidget(self.cmb_method)
+        self.cmb_method.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
-        self.btn_calc_sad = QPushButton("Calculate (SAD + dZ)")
+        self.btn_calc_sad = QPushButton("Calculate")
         self.btn_calc_sad.setEnabled(False)  # bật sau Confirm Input
         self.btn_calc_sad.clicked.connect(self._on_calc_sad)
-        lay_sad.addStretch(1)
-        lay_sad.addWidget(self.btn_calc_sad)
-        lay_detect.addLayout(lay_sad)
 
         # ---- Landslide Zone ----
-        lay_zone = QVBoxLayout()
-
-        # --- Detect row (xuống hàng riêng)
-        row_d = QHBoxLayout()
-        row_d.addWidget(QLabel("Detect displacement (m):"))
+        lab_detect = QLabel("Displacement (m):")
         self.spin_detect_thr = QDoubleSpinBox()
         self.spin_detect_thr.setRange(0.0, 10.0)
         self.spin_detect_thr.setSingleStep(0.1)
         self.spin_detect_thr.setValue(0.8)
-        row_d.addWidget(self.spin_detect_thr)
+        self.spin_detect_thr.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
-        self.btn_detect = QPushButton("Detect Landslide Zone")
+        self.btn_detect = QPushButton("Detect")
         self.btn_detect.setEnabled(False)  # bật sau SAD
         self.btn_detect.clicked.connect(self._on_detect)
-        row_d.addStretch(1)
-        row_d.addWidget(self.btn_detect)
-        lay_zone.addLayout(row_d)
-
-        lay_detect.addLayout(lay_zone)
+        # Three aligned rows: label | input | action button.
+        grid_detect = QGridLayout()
+        grid_detect.setHorizontalSpacing(8)
+        grid_detect.setVerticalSpacing(6)
+        grid_detect.setColumnStretch(1, 1)
+        grid_detect.addWidget(lab_smooth, 0, 0)
+        grid_detect.addWidget(self.spin_sigma, 0, 1)
+        grid_detect.addWidget(self.btn_smooth, 0, 2)
+        grid_detect.addWidget(lab_method, 1, 0)
+        grid_detect.addWidget(self.cmb_method, 1, 1)
+        grid_detect.addWidget(self.btn_calc_sad, 1, 2)
+        grid_detect.addWidget(lab_detect, 2, 0)
+        grid_detect.addWidget(self.spin_detect_thr, 2, 1)
+        grid_detect.addWidget(self.btn_detect, 2, 2)
+        lay_detect.addLayout(grid_detect)
         # ---- Vectors Adjustment ----
         grp_vectors = QGroupBox("Vectors Adjustment")
         lay_vectors = QVBoxLayout(grp_vectors)
-        row_v = QHBoxLayout()
-        row_v.addWidget(QLabel("Vectors step:"))
+        grid_vec = QGridLayout()
+        grid_vec.setHorizontalSpacing(8)
+        grid_vec.setVerticalSpacing(6)
+        grid_vec.setColumnStretch(1, 1)
+        grid_vec.setColumnStretch(3, 1)
+
+        lab_step = QLabel("Step:")
+        lab_scale = QLabel("Scale:")
+        lab_size = QLabel("Size:")
+        lab_color = QLabel("Color:")
+
         self.spin_vec_step = QSpinBox()
         self.spin_vec_step.setRange(1, 200)
         self.spin_vec_step.setValue(25)  # mặc định gọn
-        row_v.addWidget(self.spin_vec_step)
-
-        row_v.addWidget(QLabel("Scale:"))
+        self.spin_vec_step.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.spin_vec_scale = QDoubleSpinBox()
         self.spin_vec_scale.setRange(0.01, 10.0)
         self.spin_vec_scale.setSingleStep(1.0)
         self.spin_vec_scale.setValue(1.0)  # theo mét
-        row_v.addWidget(self.spin_vec_scale)
-        row_v.addWidget(QLabel("Color:"))
-        self.combo_vec_color = QComboBox()
-        self.combo_vec_color.addItems(["Blue", "Red", "Green", "Black", "Yellow", "Magenta"])
-        self.combo_vec_color.setCurrentText("Blue")
-        row_v.addWidget(self.combo_vec_color)
-        row_v.addWidget(QLabel("Size:"))
+        self.spin_vec_scale.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
         self.spin_vec_width = QDoubleSpinBox()
         self.spin_vec_width.setDecimals(4)
         self.spin_vec_width.setRange(0.0002, 0.02)
         self.spin_vec_width.setSingleStep(0.0002)
         self.spin_vec_width.setValue(0.001)
-        row_v.addWidget(self.spin_vec_width)
-        row_v.addStretch(1)
+        self.spin_vec_width.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        self.combo_vec_color = QComboBox()
+        self.combo_vec_color.addItems(["Blue", "Red", "Green", "Black", "Yellow", "Magenta"])
+        self.combo_vec_color.setCurrentText("Blue")
+        self.combo_vec_color.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        # Row 1: Step + Scale
+        grid_vec.addWidget(lab_step, 0, 0)
+        grid_vec.addWidget(self.spin_vec_step, 0, 1)
+        grid_vec.addWidget(lab_scale, 0, 2)
+        grid_vec.addWidget(self.spin_vec_scale, 0, 3)
+        # Row 2: Size + Color
+        grid_vec.addWidget(lab_size, 1, 0)
+        grid_vec.addWidget(self.spin_vec_width, 1, 1)
+        grid_vec.addWidget(lab_color, 1, 2)
+        grid_vec.addWidget(self.combo_vec_color, 1, 3)
+        lay_vectors.addLayout(grid_vec)
+
+        row_v3 = QHBoxLayout()
         self.btn_vectors = QPushButton("Render Vectors")
         self.btn_vectors.setEnabled(False)  # bật sau SAD
         self.btn_vectors.clicked.connect(self._on_render_vectors)
-        row_v.addWidget(self.btn_vectors)
-        lay_vectors.addLayout(row_v)
-        # Normalize button widths in Detect panel
+        self.btn_vectors.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        row_v3.addWidget(self.btn_vectors)
+        lay_vectors.addLayout(row_v3)
+        # Force same width as "Detect Landslide Zone" for action buttons.
         btn_detect_w = max(
+            self.btn_detect.sizeHint().width(),
             self.btn_smooth.sizeHint().width(),
             self.btn_calc_sad.sizeHint().width(),
-            self.btn_detect.sizeHint().width(),
+            120,  # keep labels fully visible on narrow panes
         )
-        btn_detect_w = int(round(btn_detect_w * 1.5))
-        for b in (self.btn_smooth, self.btn_calc_sad, self.btn_detect):
-            b.setFixedWidth(btn_detect_w)
+        self.btn_smooth.setFixedWidth(btn_detect_w)
+        self.btn_calc_sad.setFixedWidth(btn_detect_w)
+        self.btn_detect.setFixedWidth(btn_detect_w)
         left_layout.addWidget(grp_detect)
         left_layout.addWidget(grp_vectors)
 
@@ -227,7 +258,13 @@ class AnalyzeTab(QWidget):
         left_layout.addWidget(grp_status)
 
         left_layout.addStretch(1)
-        splitter.addWidget(left_container)
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setMinimumWidth(self._left_min_w)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        left_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        left_scroll.setWidget(left_container)
+        splitter.addWidget(left_scroll)
 
         # ----- Right pane: Preview -----
         right_container = QWidget()
@@ -242,9 +279,60 @@ class AnalyzeTab(QWidget):
         right_layout.addWidget(self.viewer, 1)
 
         splitter.addWidget(right_container)
-        splitter.setSizes([420, 900])  # 30% / 70%
+        splitter.setCollapsible(0, False)
+        splitter.setCollapsible(1, False)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([self._left_default_w, 900])
 
         self._apply_button_style(self)
+
+    def _left_max_w(self) -> int:
+        # Left pane can occupy at most 50% of current window width.
+        base_w = self.width()
+        if self._splitter is not None and self._splitter.width() > 0:
+            base_w = self._splitter.width()
+        # During early layout, widths can be tiny/unstable; defer clamping then.
+        if base_w < (self._left_min_w * 2):
+            return -1
+        return max(self._left_min_w, int(base_w * 0.5))
+
+    def _try_apply_initial_splitter_width(self) -> None:
+        if not self._pending_init_splitter or self._splitter is None:
+            return
+        max_w = self._left_max_w()
+        if max_w < 0:
+            return
+        init_left = max(self._left_min_w, min(self._left_default_w, max_w))
+        total = sum(self._splitter.sizes())
+        if total <= 0:
+            total = max(self._splitter.width(), self.width(), init_left + 1)
+        self._splitter.setSizes([init_left, max(1, total - init_left)])
+        self._pending_init_splitter = False
+
+    def _enforce_left_pane_bounds(self) -> None:
+        if self._splitter is None:
+            return
+        self._try_apply_initial_splitter_width()
+        sizes = self._splitter.sizes()
+        if len(sizes) != 2:
+            return
+        left_w, right_w = sizes
+        total = left_w + right_w
+        max_w = self._left_max_w()
+        if max_w < 0:
+            return
+        clamped_left = max(self._left_min_w, min(left_w, max_w))
+        if clamped_left != left_w and total > 0:
+            self._splitter.setSizes([clamped_left, max(1, total - clamped_left)])
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._enforce_left_pane_bounds()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._enforce_left_pane_bounds()
 
     def _apply_button_style(self, container: QWidget | None = None) -> None:
         """Áp style chung cho tab Analyze (nền trắng + nút xanh)."""

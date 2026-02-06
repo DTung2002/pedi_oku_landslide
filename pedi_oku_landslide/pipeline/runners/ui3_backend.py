@@ -488,10 +488,18 @@ def render_profile_png(
     tick_font: int = 20,
     legend_font: int = 20,
     ground_lw: float = 2.2,
+    ungrouped_color: str = "#bbbbbb",
 ) -> Tuple[str, Optional[str]]:
 
     if not prof:
         return "[Γ£ù] Empty profile", None
+
+    # UI3 global font scale: shrink all legend/axis/tick text to 80%
+    font_scale = 0.8
+    base_font = max(1, int(round(base_font * font_scale)))
+    label_font = max(1, int(round(label_font * font_scale)))
+    tick_font = max(1, int(round(tick_font * font_scale)))
+    legend_font = max(1, int(round(legend_font * font_scale)))
 
     def _dump_ground_json(out_png_path: str, prof_dict: Dict[str, np.ndarray]) -> None:
         try:
@@ -686,11 +694,12 @@ def render_profile_png(
 
             m = finite & (gidx == -1)
             if np.any(m):
+                ug_color = ungrouped_color or "#bbbbbb"
                 ax.quiver(chain[m], elev_s[m], d_para[m], dz[m],
                           angles="xy", scale_units="xy", scale=vec_scale,
-                          width=vec_width, color="#bbbbbb", alpha=0.9,
+                          width=vec_width, color=ug_color, alpha=0.9,
                           headlength=head_len, headwidth=head_w)
-                ax.plot([], [], color="#bbbbbb", lw=3, label="_nolegend_")
+                ax.plot([], [], color=ug_color, lw=3, label="_nolegend_")
         else:
             ax.quiver(
                 chain, elev_s, d_para, dz,

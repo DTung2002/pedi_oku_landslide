@@ -15,7 +15,7 @@ from PyQt5.QtWidgets import (
     QTableWidget, QTableWidgetItem, QTextEdit, QSplitter, QSlider,
     QGraphicsPixmapItem, QGraphicsLineItem, QGraphicsEllipseItem, QGraphicsPathItem,
     QGraphicsSimpleTextItem, QGraphicsView, QMessageBox, QDialog, QDialogButtonBox,
-    QSpinBox, QDoubleSpinBox, QGridLayout,
+    QSpinBox, QDoubleSpinBox, QGridLayout, QSizePolicy,
 )
 
 from .ui.ui1_viewer import UI1Viewer
@@ -738,6 +738,10 @@ class SectionSelectionTab(QWidget):
     def __init__(self, base_dir: str, parent=None) -> None:
         super().__init__(parent)
         self.base_dir = base_dir
+        self._splitter: Optional[QSplitter] = None
+        self._left_min_w = 380
+        self._left_default_w = 490
+        self._pending_init_splitter = True
 
         # run context
         self._ctx_ready: bool = False
@@ -836,37 +840,67 @@ class SectionSelectionTab(QWidget):
         root = QHBoxLayout(self)
         splitter = QSplitter(Qt.Horizontal, self)
         splitter.setChildrenCollapsible(False)
+        self._splitter = splitter
+        splitter.splitterMoved.connect(lambda *_: self._enforce_left_pane_bounds())
         root.addWidget(splitter)
         self.viewer = _LayeredViewer(self)
 
         # left pane
-        left = QWidget(); left_lo = QVBoxLayout(left)
+        left = QWidget(); left.setMinimumWidth(self._left_min_w); left_lo = QVBoxLayout(left)
 
-        grp_proj = QGroupBox("Project"); gl = QVBoxLayout(grp_proj)
-        row1 = HBox(); row1.addWidget(QLabel("Name:"))
+        grp_proj = QGroupBox("Project"); gl = QGridLayout(grp_proj)
+        gl.setHorizontalSpacing(4)
+        gl.setVerticalSpacing(6)
+        gl.setColumnStretch(0, 0)
+        gl.setColumnStretch(1, 1)
+        proj_input_h = 30
+        lbl_name = QLabel("Name:")
+        lbl_run = QLabel("Run label:")
+        fm = lbl_name.fontMetrics()
+        proj_label_w = max(fm.horizontalAdvance("Name:"), fm.horizontalAdvance("Run label:")) + 8
+        gl.setColumnMinimumWidth(0, proj_label_w)
+        gl.setColumnMinimumWidth(1, 1)
         self.edit_project = QLineEdit(); self.edit_project.setPlaceholderText("—")
-        row1.addWidget(self.edit_project, 1); gl.addLayout(row1)
-        row2 = HBox(); row2.addWidget(QLabel("Run label:"))
+        self.edit_project.setFixedHeight(proj_input_h)
+        self.edit_project.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        gl.addWidget(lbl_name, 0, 0)
+        gl.addWidget(self.edit_project, 0, 1)
         self.edit_runlabel = QLineEdit(); self.edit_runlabel.setPlaceholderText("—")
-        row2.addWidget(self.edit_runlabel, 1); gl.addLayout(row2)
+        self.edit_runlabel.setFixedHeight(proj_input_h)
+        self.edit_runlabel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        gl.addWidget(lbl_run, 1, 0)
+        gl.addWidget(self.edit_runlabel, 1, 1)
         left_lo.addWidget(grp_proj)
 
-        grp_layers = QGroupBox("Layers"); ll = QVBoxLayout(grp_layers)
-        r_gf = HBox(); r_gf.addWidget(QLabel("Grid font size:"))
+        grp_layers = QGroupBox("Layers"); ll = QGridLayout(grp_layers)
+        ll.setHorizontalSpacing(6)
+        ll.setVerticalSpacing(6)
+        ll.setColumnStretch(1, 1)
+
+        lbl_gf = QLabel("Grid font size:")
+        lbl_hs = QLabel("Hillshade opacity:")
+        lbl_hm = QLabel("Heatmap opacity:")
+        lbl_vs = QLabel("Vector size:")
+        lbl_vc = QLabel("Vectors opacity:")
+        ll.setColumnMinimumWidth(0, max(
+            lbl_gf.sizeHint().width(),
+            lbl_hs.sizeHint().width(),
+            lbl_hm.sizeHint().width(),
+            lbl_vs.sizeHint().width(),
+            lbl_vc.sizeHint().width(),
+        ))
+
         self.sld_grid_font = QSlider(Qt.Horizontal); self.sld_grid_font.setRange(8, 72); self.sld_grid_font.setValue(12)
-        r_gf.addWidget(self.sld_grid_font, 1); ll.addLayout(r_gf)
-        r_hs = HBox(); r_hs.addWidget(QLabel("Hillshade opacity:"))
         self.sld_hill = QSlider(Qt.Horizontal); self.sld_hill.setRange(0, 100); self.sld_hill.setValue(100)
-        r_hs.addWidget(self.sld_hill, 1); ll.addLayout(r_hs)
-        r_hm = HBox(); r_hm.addWidget(QLabel("Heatmap opacity:"))
         self.sld_heat = QSlider(Qt.Horizontal); self.sld_heat.setRange(0, 100); self.sld_heat.setValue(75)
-        r_hm.addWidget(self.sld_heat, 1); ll.addLayout(r_hm)
-        r_vs = HBox(); r_vs.addWidget(QLabel("Vector size:"))
         self.sld_vec_size = QSlider(Qt.Horizontal); self.sld_vec_size.setRange(50, 200); self.sld_vec_size.setValue(50)
-        r_vs.addWidget(self.sld_vec_size, 1); ll.addLayout(r_vs)
-        r_vc = HBox(); r_vc.addWidget(QLabel("Vectors opacity:"))
         self.sld_vec = QSlider(Qt.Horizontal); self.sld_vec.setRange(0, 100); self.sld_vec.setValue(100)
-        r_vc.addWidget(self.sld_vec, 1); ll.addLayout(r_vc)
+
+        ll.addWidget(lbl_gf, 0, 0); ll.addWidget(self.sld_grid_font, 0, 1)
+        ll.addWidget(lbl_hs, 1, 0); ll.addWidget(self.sld_hill, 1, 1)
+        ll.addWidget(lbl_hm, 2, 0); ll.addWidget(self.sld_heat, 2, 1)
+        ll.addWidget(lbl_vs, 3, 0); ll.addWidget(self.sld_vec_size, 3, 1)
+        ll.addWidget(lbl_vc, 4, 0); ll.addWidget(self.sld_vec, 4, 1)
         left_lo.addWidget(grp_layers)
 
         grp_secs = QGroupBox("Sections");
@@ -876,15 +910,15 @@ class SectionSelectionTab(QWidget):
         hdr = self.tbl.horizontalHeader()
         hdr.setStretchLastSection(False)
         hdr.setSectionResizeMode(0, hdr.Fixed)  # cột #
-        hdr.setSectionResizeMode(1, hdr.Fixed)  # Start
-        hdr.setSectionResizeMode(2, hdr.Stretch)  # End (cột cuối cùng fill phần dư)
+        hdr.setSectionResizeMode(1, hdr.Stretch)  # Start
+        hdr.setSectionResizeMode(2, hdr.Stretch)  # End
         self.tbl.itemChanged.connect(self._on_table_item_changed)
         sl.addWidget(self.tbl)
 
         # Hàng trên: Auto Line Generation + Preview + Clear (dàn đều chiều ngang)
         row_top = HBox()
         self.btn_auto = QPushButton("Auto Line Generation")
-        self.btn_prev = QPushButton("Preview line")
+        self.btn_prev = QPushButton("Preview Line")
         self.btn_clear = QPushButton("Clear All")
 
         for b in (self.btn_auto, self.btn_prev, self.btn_clear):
@@ -917,10 +951,55 @@ class SectionSelectionTab(QWidget):
         splitter.addWidget(self.viewer)  # khung phải (map)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([600, 700])
+        splitter.setSizes([self._left_default_w, 700])
 
         # Áp style nút
         self._apply_button_style()
+
+    def _left_max_w(self) -> int:
+        base_w = self.width()
+        if self._splitter is not None and self._splitter.width() > 0:
+            base_w = self._splitter.width()
+        if base_w < (self._left_min_w * 2):
+            return -1
+        return max(self._left_min_w, int(base_w * 0.5))
+
+    def _try_apply_initial_splitter_width(self) -> None:
+        if not self._pending_init_splitter or self._splitter is None:
+            return
+        max_w = self._left_max_w()
+        if max_w < 0:
+            return
+        init_left = max(self._left_min_w, min(self._left_default_w, max_w))
+        total = sum(self._splitter.sizes())
+        if total <= 0:
+            total = max(self._splitter.width(), self.width(), init_left + 1)
+        self._splitter.setSizes([init_left, max(1, total - init_left)])
+        self._pending_init_splitter = False
+
+    def _enforce_left_pane_bounds(self) -> None:
+        if self._splitter is None:
+            return
+        self._try_apply_initial_splitter_width()
+        sizes = self._splitter.sizes()
+        if len(sizes) != 2:
+            return
+        left_w, right_w = sizes
+        total = left_w + right_w
+        max_w = self._left_max_w()
+        if max_w < 0:
+            return
+        clamped_left = max(self._left_min_w, min(left_w, max_w))
+        if clamped_left != left_w and total > 0:
+            self._splitter.setSizes([clamped_left, max(1, total - clamped_left)])
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._enforce_left_pane_bounds()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._enforce_left_pane_bounds()
 
 
     def _apply_button_style(self) -> None:
@@ -1092,10 +1171,9 @@ class SectionSelectionTab(QWidget):
             scale=self._vec_scale,
         )
 
-        # fit view
-        self.viewer.view.fitInView(
-            self.viewer.scene.itemsBoundingRect(), Qt.KeepAspectRatio
-        )
+        # default zoom = 100% (không fit-to-view)
+        self.viewer.view.resetTransform()
+        self.viewer.view.centerOn(self.viewer.scene.itemsBoundingRect().center())
         self._ok("[UI2] Layers loaded & aligned.")
         self._load_saved_sections()
 
@@ -1250,7 +1328,7 @@ class SectionSelectionTab(QWidget):
         hdr = self.tbl.horizontalHeader()
         hdr.setStretchLastSection(False)
         hdr.setSectionResizeMode(0, hdr.Fixed)
-        hdr.setSectionResizeMode(1, hdr.Fixed)
+        hdr.setSectionResizeMode(1, hdr.Stretch)
         hdr.setSectionResizeMode(2, hdr.Stretch)
 
         line_label = label if label is not None else str(r + 1)
@@ -1259,7 +1337,6 @@ class SectionSelectionTab(QWidget):
         self.tbl.setItem(r, 2, QTableWidgetItem(f"{p1[0]:.2f}, {p1[1]:.2f}"))
         self.tbl.verticalHeader().setDefaultSectionSize(22)  # chiều cao mỗi row
         self.tbl.setColumnWidth(0, 40)  # cột chỉ số
-        self.tbl.setColumnWidth(1, 240)  # Start
 
         self._updating_table = False
         # cột cuối cùng đang stretch, giữ nguyên
