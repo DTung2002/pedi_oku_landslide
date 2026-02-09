@@ -1019,12 +1019,12 @@ def render_profile_png(
         fig.savefig(out_png, dpi=dpi, bbox_inches="tight", pad_inches=pad_inches)
 
         plt.close(fig)
-        return f"[Γ£ô] Saved {out_png}", out_png
+        return f"Saved {out_png}", out_png
 
 
 def export_csv(prof: Dict[str, np.ndarray], out_csv: Optional[str]) -> Tuple[str, Optional[str]]:
     if not prof:
-        return "[Γ£ù] Empty profile", None
+        return "Empty profile", None
 
     if not out_csv:
         from datetime import datetime
@@ -1134,6 +1134,126 @@ def rdp_points_from_profile(prof: dict, rdp_eps_m: float = 0.5) -> List[List[flo
     pts = list(zip(map(float, chain_f), map(float, elev_f)))
     simp = _rdp_polyline(pts, rdp_eps_m)
     return [[float(x), float(y)] for x, y in simp]
+
+def _cluster_chain_marks(chain_marks: np.ndarray, gap_m: float = 0.5) -> List[float]:
+    vals = np.asarray(chain_marks, dtype=float)
+    vals = vals[np.isfinite(vals)]
+    if vals.size == 0:
+        return []
+    vals.sort()
+    clusters: List[List[float]] = [[float(vals[0])]]
+    for v in vals[1:]:
+        if (float(v) - clusters[-1][-1]) <= gap_m:
+            clusters[-1].append(float(v))
+        else:
+            clusters.append([float(v)])
+    return [float(np.mean(c)) for c in clusters if c]
+
+def auto_group_profile_by_criteria(
+    prof: dict,
+    rdp_eps_m: float = 0.5,
+    curvature_thr_abs: float = 2.0,
+    horizontal_angle_tol_deg: float = 5.0,
+    adjacent_angle_split_deg: float = 10.0,
+    horizontal_cluster_gap_m: float = 0.5,
+    min_len_m: float = 0.20,
+) -> list:
+    """
+    New standalone grouping rule:
+    1) Start/end of slip block.
+    2) Points where |curvature| > curvature_thr_abs on RDP-simplified smoothed profile.
+    3) Points where vector is horizontal within +/- horizontal_angle_tol_deg.
+    4) Split between adjacent vectors when |delta angle| > adjacent_angle_split_deg.
+    """
+    chain = np.asarray(prof.get("chain"), dtype=float)
+    elev_s = np.asarray(prof.get("elev_s"), dtype=float)
+    dpa = np.asarray(prof.get("d_para"), dtype=float)
+    dzz = np.asarray(prof.get("dz"), dtype=float)
+    if chain.ndim != 1 or elev_s.ndim != 1 or dpa.ndim != 1 or dzz.ndim != 1:
+        return []
+    if chain.size < 2:
+        return []
+
+    if "slip_span" in prof and prof["slip_span"]:
+        smin, smax = map(float, prof["slip_span"])
+    else:
+        finite_all = np.isfinite(chain) & np.isfinite(elev_s)
+        if finite_all.sum() < 2:
+            return []
+        smin = float(np.nanmin(chain[finite_all]))
+        smax = float(np.nanmax(chain[finite_all]))
+    if smax < smin:
+        smin, smax = smax, smin
+    if smax <= smin:
+        return []
+
+    boundaries = [smin, smax]
+
+    finite_curve = np.isfinite(chain) & np.isfinite(elev_s) & (chain >= smin) & (chain <= smax)
+    if finite_curve.sum() >= 3:
+        pts = list(zip(chain[finite_curve].tolist(), elev_s[finite_curve].tolist()))
+        rdp_pts = _rdp_polyline(pts, rdp_eps_m)
+        if len(rdp_pts) >= 3:
+            k_vals = _curvature_points_from_rdp(rdp_pts)
+            for (xv, _), kv in zip(rdp_pts, k_vals):
+                if np.isfinite(kv) and abs(float(kv)) > float(curvature_thr_abs):
+                    boundaries.append(float(xv))
+
+    finite_vec = np.isfinite(chain) & np.isfinite(dpa) & np.isfinite(dzz) & (chain >= smin) & (chain <= smax)
+    if finite_vec.any():
+        chain_v = chain[finite_vec]
+        dpa_v = dpa[finite_vec]
+        dzz_v = dzz[finite_vec]
+        ang = np.degrees(np.arctan2(dzz_v, dpa_v))  # [-180, 180]
+        ang_abs = np.abs(ang)
+        # Distance to nearest horizontal direction (0 deg or 180 deg).
+        dist_to_horizontal = np.minimum(ang_abs, np.abs(180.0 - ang_abs))
+        horiz = np.isfinite(dist_to_horizontal) & (dist_to_horizontal <= float(horizontal_angle_tol_deg))
+        if np.any(horiz):
+            chain_h = chain_v[horiz]
+            boundaries.extend(_cluster_chain_marks(chain_h, gap_m=horizontal_cluster_gap_m))
+
+        # Adjacent-vector split rule: split when angle jump is larger than threshold.
+        if chain_v.size >= 2:
+            a1 = ang[:-1]
+            a2 = ang[1:]
+            jump = np.abs((a2 - a1 + 180.0) % 360.0 - 180.0)
+            split_mask = np.isfinite(jump) & (jump > float(adjacent_angle_split_deg))
+            if np.any(split_mask):
+                # Split at the exact position of vector i+1.
+                split_points = chain_v[1:][split_mask]
+                boundaries.extend(split_points.tolist())
+
+    boundaries = [b for b in boundaries if np.isfinite(b) and (smin <= b <= smax)]
+    if not boundaries:
+        return []
+    boundaries = sorted(boundaries)
+    uniq = [boundaries[0]]
+    for b in boundaries[1:]:
+        if abs(b - uniq[-1]) > 1e-6:
+            uniq.append(b)
+
+    colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+              "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"]
+    groups = []
+    for s, e in zip(uniq[:-1], uniq[1:]):
+        if (e - s) < float(min_len_m):
+            continue
+        i = len(groups) + 1
+        groups.append({
+            "id": f"G{i}",
+            "start": float(s),
+            "end": float(e),
+            "color": colors[(i - 1) % len(colors)],
+        })
+    if not groups and (smax - smin) >= float(min_len_m):
+        groups = [{
+            "id": "G1",
+            "start": float(smin),
+            "end": float(smax),
+            "color": colors[0],
+        }]
+    return groups
 
 def _mean_angle_deg(d_para_seg, dz_seg):
     V = np.vstack([d_para_seg, dz_seg]).T
@@ -1360,8 +1480,8 @@ def fit_bezier_smooth_curve(chain, elevg, target_s, target_z,
 """
 def fit_bezier_with_intersection(chain, elevg,
                                  target_s, target_z,
-                                 sA, sB,                 # fit trong [sA, sB] = slip-zone hiß╗çn h├ánh
-                                 pass_point,             # (sM, zM) ΓÇô phß║úi ─æi qua ─æiß╗âm giao
+                                 sA, sB,                 
+                                 pass_point,             
                                  c0=0.30, c1=0.30,
                                  clearance=0.12,
                                  hard_weight=2000.0):
@@ -1416,5 +1536,3 @@ def fit_bezier_with_intersection(chain, elevg,
     z_bez[-1] = zg[-1]
     return {"chain": s_bez, "elev": z_bez}
 """
-
-

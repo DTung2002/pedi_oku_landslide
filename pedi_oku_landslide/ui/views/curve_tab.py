@@ -18,7 +18,7 @@ from typing import Tuple, List, Dict, Optional
 # backend UI3 đã có sẵn
 from pedi_oku_landslide.pipeline.runners.ui3_backend import (
     auto_paths, list_lines, compute_profile, render_profile_png,
-    clamp_groups_to_slip, auto_group_profile,
+    clamp_groups_to_slip, auto_group_profile_by_criteria, auto_group_profile,
     estimate_slip_curve, fit_bezier_smooth_curve   # <-- thêm 2 hàm này
 )
 from pedi_oku_landslide.pipeline.runners.ui3_backend import rdp_indices_from_profile, rdp_points_from_profile
@@ -347,8 +347,32 @@ class CurveAnalyzeTab(QWidget):
                 self._err("[UI3] Empty profile.")
                 return
 
-            # 3) Auto-group + clamp (y như UI3)
-            groups = auto_group_profile(prof)
+            # 3) Chọn thuật toán Auto-group
+            dlg = QMessageBox(self)
+            dlg.setIcon(QMessageBox.Question)
+            dlg.setWindowTitle("Auto Group Method")
+            dlg.setText("Select grouping method:")
+            dlg.setStandardButtons(QMessageBox.NoButton)
+            btn_traditional = dlg.addButton("Traditional", QMessageBox.ActionRole)
+            btn_new = dlg.addButton("New", QMessageBox.ActionRole)
+            btn_cancel = dlg.addButton("Cancel", QMessageBox.RejectRole)
+            dlg.exec_()
+
+            clicked = dlg.clickedButton()
+            clicked_text = clicked.text().strip() if clicked is not None else ""
+            if clicked_text == "Traditional":
+                # Theo yêu cầu: Traditional -> hàm mới
+                self._log("[UI3] Auto Group method: Traditional -> new criteria")
+                groups = auto_group_profile_by_criteria(prof)
+            elif clicked_text == "New":
+                # Theo yêu cầu: New -> hàm/tiêu chí cũ
+                self._log("[UI3] Auto Group method: New -> legacy criteria")
+                groups = auto_group_profile(prof)
+            else:
+                if clicked == btn_cancel:
+                    self._log("[UI3] Auto Group canceled.")
+                return
+
             groups = clamp_groups_to_slip(prof, groups)
             if not groups:
                 self._warn("[UI3] Auto grouping produced no segments within slip zone.")
@@ -361,9 +385,10 @@ class CurveAnalyzeTab(QWidget):
                 line_id,
                 log_text=f"[UI3] Auto Group done for '{line_id}': {len(groups)} groups.",
             )
+            # Re-render ngay để vẽ vector và tô màu theo group vừa tạo.
             self._render_current_safe()
-        except Exception:
-            pass
+        except Exception as e:
+            self._err(f"[UI3] Auto Group error: {e}")
 
     def _on_draw_curve(self) -> None:
         """Tính và vẽ đường cong (overlay) vào PNG preview hiện tại."""
@@ -431,7 +456,7 @@ class CurveAnalyzeTab(QWidget):
                 except Exception:
                     groups = []
             if not groups:
-                groups = auto_group_profile(prof)
+                groups = auto_group_profile_by_criteria(prof)
                 groups = clamp_groups_to_slip(prof, groups)
                 if not groups:
                     self._warn("[UI3] Auto grouping produced no segments within slip zone.");
@@ -1163,6 +1188,11 @@ class CurveAnalyzeTab(QWidget):
         os.makedirs(path, exist_ok=True)
         return path
 
+    def _vectors_dir(self) -> str:
+        path = os.path.join(self._ui3_run_dir(), "vectors")
+        os.makedirs(path, exist_ok=True)
+        return path
+
     def _line_id_current(self) -> str:
         # dùng id ổn định để tên file không đụng nhau (ưu tiên tên trong combo)
         if hasattr(self, "line_combo"):
@@ -1177,6 +1207,91 @@ class CurveAnalyzeTab(QWidget):
 
     def _groups_json_path_for(self, line_id: str) -> str:
         return os.path.join(self._groups_dir(), f"{line_id}.json")
+
+    def _vectors_json_path_for(self, line_id: str) -> str:
+        return os.path.join(self._vectors_dir(), f"{line_id}.json")
+
+    @staticmethod
+    def _group_for_chainage(groups: List[dict], chainage: float) -> Tuple[Optional[str], Optional[str]]:
+        for g in (groups or []):
+            try:
+                s = float(g.get("start", g.get("start_chainage", 0.0)))
+                e = float(g.get("end", g.get("end_chainage", 0.0)))
+                if e < s:
+                    s, e = e, s
+                if s <= chainage <= e:
+                    gid = str(g.get("id", "")) or None
+                    color = g.get("color", None)
+                    return gid, color
+            except Exception:
+                continue
+        return None, None
+
+    def _save_vectors_json_for_line(self, line_id: str, prof: dict, groups: Optional[List[dict]]) -> Optional[str]:
+        def _to_float(arr, i: int) -> Optional[float]:
+            if arr is None:
+                return None
+            try:
+                v = float(arr[i])
+            except Exception:
+                return None
+            return v if np.isfinite(v) else None
+
+        chain = np.asarray(prof.get("chain", []), dtype=float)
+        n = int(chain.size)
+        if n == 0:
+            return None
+
+        x = np.asarray(prof.get("x", []), dtype=float) if prof.get("x", None) is not None else None
+        y = np.asarray(prof.get("y", []), dtype=float) if prof.get("y", None) is not None else None
+        elev = np.asarray(prof.get("elev", []), dtype=float) if prof.get("elev", None) is not None else None
+        elev_s = np.asarray(prof.get("elev_s", []), dtype=float) if prof.get("elev_s", None) is not None else None
+        dx = np.asarray(prof.get("dx", []), dtype=float) if prof.get("dx", None) is not None else None
+        dy = np.asarray(prof.get("dy", []), dtype=float) if prof.get("dy", None) is not None else None
+        dz = np.asarray(prof.get("dz", []), dtype=float) if prof.get("dz", None) is not None else None
+        d_para = np.asarray(prof.get("d_para", []), dtype=float) if prof.get("d_para", None) is not None else None
+        theta = np.asarray(prof.get("theta", []), dtype=float) if prof.get("theta", None) is not None else None
+        slip_mask = np.asarray(prof.get("slip_mask", [])) if prof.get("slip_mask", None) is not None else None
+
+        rows: List[dict] = []
+        for i in range(n):
+            ch = _to_float(chain, i)
+            if ch is None:
+                continue
+            gid, gcolor = self._group_for_chainage(groups or [], ch)
+            in_slip = None
+            if slip_mask is not None and i < slip_mask.size:
+                try:
+                    in_slip = bool(slip_mask[i])
+                except Exception:
+                    in_slip = None
+            rows.append({
+                "index": i,
+                "chain_m": ch,
+                "x": _to_float(x, i),
+                "y": _to_float(y, i),
+                "elev_raw_m": _to_float(elev, i),
+                "elev_s_m": _to_float(elev_s, i),
+                "dx_m": _to_float(dx, i),
+                "dy_m": _to_float(dy, i),
+                "dz_m": _to_float(dz, i),
+                "d_para_m": _to_float(d_para, i),
+                "theta_deg": _to_float(theta, i),
+                "in_slip_zone": in_slip,
+                "group_id": gid,
+                "group_color": gcolor,
+            })
+
+        payload = {
+            "line_id": line_id,
+            "count": len(rows),
+            "groups": groups or [],
+            "vectors": rows,
+        }
+        out_json = self._vectors_json_path_for(line_id)
+        with open(out_json, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        return out_json
 
     # tiện gọi ở mọi nơi hiện tại (giữ chữ ký cũ không tham số)
     def _profile_png_path(self) -> str:
@@ -1260,6 +1375,13 @@ class CurveAnalyzeTab(QWidget):
         if getattr(self, "_first_show", True):
             self.view.fit_to_scene()
             self._first_show = False
+
+        try:
+            vec_json = self._save_vectors_json_for_line(line_id, prof, groups if groups else [])
+            if vec_json:
+                self._log(f"[UI3] Saved vectors JSON: {vec_json}")
+        except Exception as e:
+            self._warn(f"[UI3] Cannot save vectors JSON: {e}")
 
         # KHÔNG vẽ overlay guide nữa vì đã vẽ sẵn trong backend
 
@@ -1517,7 +1639,7 @@ class CurveAnalyzeTab(QWidget):
                 slip_mask_path=self.slip_path, slip_only=True
             )
             if prof:
-                groups = auto_group_profile(prof)
+                groups = auto_group_profile_by_criteria(prof)
 
         # clamp trong slip-zone
         try:
