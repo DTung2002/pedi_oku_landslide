@@ -200,6 +200,8 @@ class CurveAnalyzeTab(QWidget):
         self._nurbs_params_by_line: Dict[str, Dict[str, Any]] = {}
         self._group_table_updating: bool = False
         self._nurbs_updating_ui: bool = False
+        # True when background image already has a baked slip-curve (profile_*_nurbs.png).
+        self._static_nurbs_bg_loaded: bool = False
         self._nurbs_live_timer = QTimer(self)
         self._nurbs_live_timer.setSingleShot(True)
         self._nurbs_live_timer.setInterval(30)
@@ -902,6 +904,11 @@ class CurveAnalyzeTab(QWidget):
         params = self._collect_nurbs_params_from_ui()
         if not params:
             return
+        # If current background already contains a baked curve, refresh base image once
+        # before drawing live overlay to avoid showing two slip-curves at the same time.
+        if self._static_nurbs_bg_loaded:
+            self._render_current_safe()
+            self._static_nurbs_bg_loaded = False
         self._set_nurbs_params_for_line(line_id, params)
         self._draw_control_points_overlay(params)
         curve_method = self._get_curve_method_for_line(line_id)
@@ -988,7 +995,7 @@ class CurveAnalyzeTab(QWidget):
         self._schedule_nurbs_live_update()
 
     def _nurbs_png_path_for(self, line_id: str) -> str:
-        return os.path.join(self._preview_dir(), f"profile_{line_id}_nurbs.png")
+        return os.path.join(self._curve_dir(), f"profile_{line_id}_nurbs.png")
 
     def _nurbs_json_path_for(self, line_id: str) -> str:
         return os.path.join(self._preview_dir(), f"profile_{line_id}_nurbs.json")
@@ -1408,6 +1415,7 @@ class CurveAnalyzeTab(QWidget):
             self._img_ground = item
             self._img_rate0 = item
             self._load_axes_meta(path)
+            self._static_nurbs_bg_loaded = False
 
             self._active_curve = {
                 "chain": np.asarray(curve["chain"], dtype=float),
@@ -1993,14 +2001,190 @@ class CurveAnalyzeTab(QWidget):
         if hasattr(self, "edit_runlabel") and self.edit_runlabel is not None:
             self.edit_runlabel.setText(rl)
 
+        if self.line_combo.count() > 0:
+            self.line_combo.blockSignals(True)
+            self.line_combo.setCurrentIndex(0)
+            self.line_combo.blockSignals(False)
+            self._on_line_changed(0)
+
     def _on_line_changed(self, _idx: int) -> None:
-        self._log("[i] Line changed. Click 'Render Section' to preview.")
+        self._log("[i] Line changed. Loading saved UI3 data if available.")
         self._clear_curve_overlay()
         self._active_prof = None
         self._active_groups = []
         self._active_base_curve = None
         self._active_curve = None
-        self._populate_group_table_for_current_line()  # <-- đổi tên ở đây
+        try:
+            row = self.line_combo.currentIndex()
+            if row >= 0 and hasattr(self, "_gdf") and self._gdf is not None and not self._gdf.empty:
+                geom = self._gdf.geometry.iloc[row]
+                self._sec_len_m = float(getattr(geom, "length", np.nan))
+        except Exception:
+            self._sec_len_m = None
+
+        self._load_saved_curve_state_for_current_line()
+
+    def _try_load_group_table_from_curve(self, line_id: str) -> bool:
+        path = self._curve_group_json_path_for(line_id)
+        if not os.path.exists(path):
+            return False
+        loaded = 0
+        self._group_table_updating = True
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f) or {}
+            groups = data.get("groups", [])
+            self.group_table.setRowCount(0)
+            for g in (groups or []):
+                try:
+                    gid = str(g.get("group_id", g.get("id", ""))).strip()
+                    s = float(g.get("start", g.get("start_chainage")))
+                    e = float(g.get("end", g.get("end_chainage")))
+                except Exception:
+                    continue
+                if e < s:
+                    s, e = e, s
+                r = self.group_table.rowCount()
+                self.group_table.insertRow(r)
+                self.group_table.setItem(r, 0, QTableWidgetItem(gid or f"G{r + 1}"))
+                self.group_table.setItem(r, 1, QTableWidgetItem(f"{s:.3f}"))
+                self.group_table.setItem(r, 2, QTableWidgetItem(f"{e:.3f}"))
+                self._set_color_cell(r, str(g.get("color", "")).strip())
+                loaded += 1
+            if loaded:
+                self._append_ungrouped_row(self._read_groups_from_table(), self._sec_len_m)
+        except Exception as e:
+            self._log(f"[!] Cannot read curve group file: {e}")
+            return False
+        finally:
+            self._group_table_updating = False
+        if loaded:
+            self._set_curve_method_for_line(line_id, "nurbs")
+            self._log(f"[UI3] Loaded group table from: {path}")
+            return True
+        return False
+
+    def _try_load_nurbs_table_from_curve(self, line_id: str) -> bool:
+        path = self._curve_nurbs_info_json_path_for(line_id)
+        if not os.path.exists(path):
+            return False
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f) or {}
+            cp_items = data.get("control_points", []) or []
+            if not cp_items:
+                return False
+            cp_items = sorted(
+                cp_items,
+                key=lambda d: int(d.get("cp_index", 0)) if str(d.get("cp_index", "")).strip() else 0,
+            )
+            cps = []
+            ws = []
+            for cp in cp_items:
+                try:
+                    s = float(cp.get("chainage_m"))
+                    z = float(cp.get("elev_m"))
+                    w = float(cp.get("weight", 1.0))
+                except Exception:
+                    continue
+                if not (np.isfinite(s) and np.isfinite(z)):
+                    continue
+                cps.append([float(s), float(z)])
+                ws.append(float(w) if np.isfinite(w) and w > 0 else 1.0)
+            if len(cps) < 2:
+                return False
+            params = {
+                "degree": int(data.get("degree", 3)),
+                "control_points": cps,
+                "weights": ws if len(ws) == len(cps) else [1.0] * len(cps),
+            }
+            self._set_nurbs_params_for_line(line_id, params)
+            n_ctrl = len(cps)
+            deg = max(1, min(int(params.get("degree", 3)), n_ctrl - 1))
+            self._nurbs_updating_ui = True
+            try:
+                self.nurbs_cp_spin.setValue(n_ctrl)
+                self.nurbs_deg_spin.setMaximum(max(1, n_ctrl - 1))
+                self.nurbs_deg_spin.setValue(deg)
+                self._populate_nurbs_table(params)
+            finally:
+                self._nurbs_updating_ui = False
+            self._draw_control_points_overlay(params)
+            self._set_curve_method_for_line(line_id, "nurbs")
+            self._log(f"[UI3] Loaded NURBS table from: {path}")
+            return True
+        except Exception as e:
+            self._log(f"[!] Cannot read curve nurbs_info file: {e}")
+            return False
+
+    def _try_load_nurbs_preview_from_curve(self, line_id: str) -> bool:
+        path = self._curve_nurbs_png_path_for(line_id)
+        if not os.path.exists(path):
+            return False
+        pm = QPixmap(path)
+        if pm.isNull():
+            return False
+        try:
+            QPixmapCache.clear()
+            self.scene.clear()
+            item = QGraphicsPixmapItem(pm)
+            self.scene.addItem(item)
+            self._img_ground = item
+            self._img_rate0 = item
+            self._clear_curve_overlay()
+            self._load_axes_meta(path)
+            self._static_nurbs_bg_loaded = True
+            if getattr(self, "_first_show", True):
+                self.view.fit_to_scene()
+                self._first_show = False
+            self._log(f"[UI3] Loaded NURBS preview: {path}")
+            return True
+        except Exception:
+            return False
+
+    def _build_profile_for_current_line(self) -> Optional[dict]:
+        try:
+            if not hasattr(self, "_gdf") or self._gdf is None or self._gdf.empty:
+                return None
+            row = self.line_combo.currentIndex()
+            if row < 0:
+                return None
+            geom = self._gdf.geometry.iloc[row]
+            prof = compute_profile(
+                self.dem_path, self.dx_path, self.dy_path, self.dz_path,
+                geom,
+                step_m=self.step_box.value(),
+                smooth_win=11, smooth_poly=2,
+                slip_mask_path=self.slip_path, slip_only=False
+            )
+            if not prof or len(prof.get("chain", [])) < 2:
+                return None
+            return prof
+        except Exception:
+            return None
+
+    def _load_saved_curve_state_for_current_line(self) -> None:
+        line_id = self._line_id_current()
+        loaded_groups = self._try_load_group_table_from_curve(line_id)
+        if not loaded_groups:
+            self._populate_group_table_for_current_line()
+
+        prof = self._build_profile_for_current_line()
+        if prof is not None:
+            self._active_prof = prof
+
+        groups = self._read_groups_from_table() or []
+        if groups and self._active_prof:
+            try:
+                groups = clamp_groups_to_slip(self._active_prof, groups)
+            except Exception:
+                pass
+        self._active_groups = groups
+
+        loaded_preview = self._try_load_nurbs_preview_from_curve(line_id)
+        self._try_load_nurbs_table_from_curve(line_id)
+        if not loaded_preview:
+            self._log("[i] No saved NURBS preview in ui3/curve. Click 'Render Section' to preview.")
 
     # def _groups_json_path(self) -> str:
     #     line_label = self.line_combo.currentText().strip() or f"line_{self.line_combo.currentIndex() + 1:03d}"
@@ -2095,6 +2279,15 @@ class CurveAnalyzeTab(QWidget):
         path = os.path.join(self._ui3_run_dir(), "curve")
         os.makedirs(path, exist_ok=True)
         return path
+
+    def _curve_group_json_path_for(self, line_id: str) -> str:
+        return os.path.join(self._curve_dir(), f"group_{line_id}.json")
+
+    def _curve_nurbs_info_json_path_for(self, line_id: str) -> str:
+        return os.path.join(self._curve_dir(), f"nurbs_info_{line_id}.json")
+
+    def _curve_nurbs_png_path_for(self, line_id: str) -> str:
+        return os.path.join(self._curve_dir(), f"profile_{line_id}_nurbs.png")
 
     def _line_id_current(self) -> str:
         # dùng id ổn định để tên file không đụng nhau (ưu tiên tên trong combo)
@@ -2275,6 +2468,7 @@ class CurveAnalyzeTab(QWidget):
         self._img_rate0 = item
         self._clear_curve_overlay()
         self._load_axes_meta(path)
+        self._static_nurbs_bg_loaded = False
         self._active_prof = prof
         self._active_groups = groups if groups else []
         self._active_base_curve = None

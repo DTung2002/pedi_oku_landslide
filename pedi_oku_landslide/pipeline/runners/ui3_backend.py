@@ -502,6 +502,9 @@ def render_profile_png(
     legend_font = max(1, int(round(legend_font * font_scale)))
     # Additional 10% reduction for legend fonts.
     legend_font = max(1, int(round(legend_font * 0.9)))
+    # Additional 10% reduction for requested axis labels/tick labels.
+    axis_label_font = max(1, int(round(label_font * 0.9)))
+    axis_tick_font = max(1, int(round(tick_font * 0.9)))
 
     def _dump_ground_json(out_png_path: str, prof_dict: Dict[str, np.ndarray]) -> None:
         try:
@@ -649,9 +652,9 @@ def render_profile_png(
                 ax2.plot(ch, theta_rate, lw=2.2, color="#2ca02c", zorder=5, label="θ-rate")
 
             ax2.axhline(0.0, color="0.5", lw=1.0, zorder=1)
-            ax2.set_ylabel("θ rate (deg/m)", fontsize=label_font)
+            ax2.set_ylabel("θ rate (deg/m)", fontsize=axis_label_font)
             ax2r = ax2.twinx()
-            ax2r.set_ylabel("Curvature (1/m)", fontsize=label_font)
+            ax2r.set_ylabel("Curvature (1/m)", fontsize=axis_label_font)
 
             # Curvature from RDP points on the profile (signed k = 1/R).
             k_curve = None
@@ -893,9 +896,19 @@ def render_profile_png(
                 ax.plot(chain[m], elev_s[m], "o", color="limegreen", ms=5,
                         label=f"θ ΓëÑ {thr:.1f}┬░ & dz>0")
 
-        ax2.set_xlabel("Chainage (m)", fontsize=label_font)
-        ax.set_ylabel("Elevation (m)", fontsize=label_font)
-        ax.tick_params(labelsize=tick_font)
+        ax2.set_xlabel("Chainage (m)", fontsize=axis_label_font)
+        ax.set_ylabel("Elevation (m)", fontsize=axis_label_font)
+        ax2.set_ylabel("θ rate (deg/m)", fontsize=axis_label_font)
+        try:
+            ax2r.set_ylabel("Curvature (1/m)", fontsize=axis_label_font)
+        except Exception:
+            pass
+        ax.tick_params(axis="both", labelsize=axis_tick_font)
+        ax2.tick_params(axis="both", labelsize=axis_tick_font)
+        try:
+            ax2r.tick_params(axis="both", labelsize=axis_tick_font)
+        except Exception:
+            pass
         ax.grid(ls="--", lw=0.8, alpha=0.35)
         ax.margins(x=0.02)
 
