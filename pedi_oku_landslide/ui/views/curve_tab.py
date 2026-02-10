@@ -4,14 +4,14 @@ import os, json
 from typing import Optional, Dict, Any, List
 import os
 import numpy as np
-from PyQt5.QtCore import Qt, pyqtSignal, QSize
-from PyQt5.QtGui import QFont, QPixmap, QPainter, QColor
+from PyQt5.QtCore import Qt, pyqtSignal, QSize, QTimer
+from PyQt5.QtGui import QFont, QPixmap, QPainter, QColor, QPainterPath
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QGroupBox,
-    QScrollArea, QFrame, QTextEdit, QComboBox, QDoubleSpinBox,
+    QScrollArea, QFrame, QTextEdit, QComboBox, QDoubleSpinBox, QSpinBox,
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
     QTableWidget, QTableWidgetItem, QHeaderView, QSizePolicy,
-    QSplitter, QLineEdit, QMessageBox, QColorDialog
+    QSplitter, QLineEdit, QMessageBox, QColorDialog, QAbstractSpinBox
 )
 from PyQt5.QtGui import QPixmap, QPixmapCache
 from typing import Tuple, List, Dict, Optional
@@ -19,7 +19,7 @@ from typing import Tuple, List, Dict, Optional
 from pedi_oku_landslide.pipeline.runners.ui3_backend import (
     auto_paths, list_lines, compute_profile, render_profile_png,
     clamp_groups_to_slip, auto_group_profile_by_criteria, auto_group_profile,
-    estimate_slip_curve, fit_bezier_smooth_curve   # <-- thêm 2 hàm này
+    estimate_slip_curve, fit_bezier_smooth_curve, evaluate_nurbs_curve
 )
 from pedi_oku_landslide.pipeline.runners.ui3_backend import rdp_indices_from_profile, rdp_points_from_profile
 from PyQt5.QtGui import QPen, QColor
@@ -27,7 +27,10 @@ from PyQt5.QtGui import QPen, QColor
 from PyQt5.QtWidgets import QGraphicsView, QToolBar, QAction
 from typing import List, Tuple, Dict, Optional
 from PyQt5.QtGui import QPen, QColor
-from PyQt5.QtWidgets import QGraphicsLineItem, QGraphicsRectItem
+from PyQt5.QtWidgets import (
+    QGraphicsLineItem, QGraphicsRectItem, QGraphicsPathItem,
+    QGraphicsEllipseItem, QGraphicsSimpleTextItem
+)
 import csv
 import traceback
 import geopandas as gpd
@@ -126,6 +129,18 @@ class ZoomableGraphicsView(QGraphicsView):
         self._zoom -= 1
 
 
+class KeyboardOnlySpinBox(QSpinBox):
+    """Disable wheel changes; allow keyboard input only."""
+    def wheelEvent(self, event):
+        event.ignore()
+
+
+class KeyboardOnlyDoubleSpinBox(QDoubleSpinBox):
+    """Disable wheel changes; allow keyboard input only."""
+    def wheelEvent(self, event):
+        event.ignore()
+
+
 Section = Tuple[float, float, float, float]  # (x1, y1, x2, y2)
 
 
@@ -175,6 +190,20 @@ class CurveAnalyzeTab(QWidget):
         self._group_bands_bot: List[QGraphicsRectItem] = []
         self._img_ground: Optional[QGraphicsPixmapItem] = None
         self._img_rate0: Optional[QGraphicsPixmapItem] = None
+        self._curve_method_by_line: Dict[str, str] = {}
+        self._active_prof: Optional[dict] = None
+        self._active_groups: List[dict] = []
+        self._active_base_curve: Optional[dict] = None
+        self._active_curve: Optional[dict] = None
+        self._curve_overlay_item: Optional[QGraphicsPathItem] = None
+        self._cp_overlay_items: List[Any] = []
+        self._nurbs_params_by_line: Dict[str, Dict[str, Any]] = {}
+        self._group_table_updating: bool = False
+        self._nurbs_updating_ui: bool = False
+        self._nurbs_live_timer = QTimer(self)
+        self._nurbs_live_timer.setSingleShot(True)
+        self._nurbs_live_timer.setInterval(30)
+        self._nurbs_live_timer.timeout.connect(self._on_nurbs_live_tick)
 
         self._plot_x0_px = None  # ax_left_px trong PNG
         self._plot_w_px = None  # ax_width_px trong PNG
@@ -273,9 +302,59 @@ class CurveAnalyzeTab(QWidget):
     #     # Không tô band
     #     self._group_bands_bot.clear()
 
-    def _save_groups_to_ui(self, groups: list, prof: dict, line_id: str, log_text: Optional[str] = None) -> None:
+    @staticmethod
+    def _normalize_curve_method(method: Optional[str]) -> str:
+        m = str(method or "").strip().lower()
+        if m == "nurbs":
+            return "nurbs"
+        return "bezier"
+
+    @staticmethod
+    def _curve_method_from_group_method(group_method: Optional[str]) -> str:
+        gm = str(group_method or "").strip().lower()
+        if gm == "traditional":
+            return "nurbs"
+        return "bezier"
+
+    def _set_curve_method_for_line(self, line_id: str, curve_method: Optional[str]) -> str:
+        cm = self._normalize_curve_method(curve_method)
+        self._curve_method_by_line[line_id] = cm
+        return cm
+
+    def _get_curve_method_for_line(self, line_id: str) -> str:
+        cm = self._curve_method_by_line.get(line_id, "")
+        if cm:
+            return self._normalize_curve_method(cm)
+
+        js_path = self._groups_json_path_for(line_id)
+        if os.path.exists(js_path):
+            try:
+                with open(js_path, "r", encoding="utf-8") as f:
+                    js = json.load(f) or {}
+                cm = str(js.get("curve_method", "")).strip().lower()
+                if not cm:
+                    cm = self._curve_method_from_group_method(js.get("group_method"))
+                cm = self._set_curve_method_for_line(line_id, cm)
+                return cm
+            except Exception:
+                pass
+
+        return self._set_curve_method_for_line(line_id, "bezier")
+
+    def _save_groups_to_ui(
+        self,
+        groups: list,
+        prof: dict,
+        line_id: str,
+        log_text: Optional[str] = None,
+        curve_method: Optional[str] = None,
+        group_method: Optional[str] = None,
+    ) -> None:
+        cm = self._set_curve_method_for_line(line_id, curve_method or self._curve_method_by_line.get(line_id))
         try:
-            js = {"line": self.line_combo.currentText(), "groups": groups}
+            js = {"line": self.line_combo.currentText(), "groups": groups, "curve_method": cm}
+            if group_method:
+                js["group_method"] = str(group_method)
             with open(self._groups_json_path(), "w", encoding="utf-8") as f:
                 json.dump(js, f, ensure_ascii=False, indent=2)
             self._log(f"[✓] Saved group definition: {self._groups_json_path()}")
@@ -283,13 +362,17 @@ class CurveAnalyzeTab(QWidget):
             self._warn(f"[UI3] Cannot save groups JSON: {e}")
 
         if self.group_table is not None:
-            self.group_table.setRowCount(0)
-            for i, g in enumerate(groups, 1):
-                self.group_table.insertRow(self.group_table.rowCount())
-                self.group_table.setItem(i - 1, 0, QTableWidgetItem(str(g.get("id", f"G{i}"))))
-                self.group_table.setItem(i - 1, 1, QTableWidgetItem(f'{float(g.get("start", 0.0)):.3f}'))
-                self.group_table.setItem(i - 1, 2, QTableWidgetItem(f'{float(g.get("end", 0.0)):.3f}'))
-                self._set_color_cell(i - 1, str(g.get("color", "")).strip())
+            self._group_table_updating = True
+            try:
+                self.group_table.setRowCount(0)
+                for i, g in enumerate(groups, 1):
+                    self.group_table.insertRow(self.group_table.rowCount())
+                    self.group_table.setItem(i - 1, 0, QTableWidgetItem(str(g.get("id", f"G{i}"))))
+                    self.group_table.setItem(i - 1, 1, QTableWidgetItem(f'{float(g.get("start", 0.0)):.3f}'))
+                    self.group_table.setItem(i - 1, 2, QTableWidgetItem(f'{float(g.get("end", 0.0)):.3f}'))
+                    self._set_color_cell(i - 1, str(g.get("color", "")).strip())
+            finally:
+                self._group_table_updating = False
 
         if "length_m" in prof and prof["length_m"] is not None:
             length_m = float(prof["length_m"])
@@ -320,6 +403,573 @@ class CurveAnalyzeTab(QWidget):
 
         if log_text:
             self._ok(log_text)
+
+    def _load_axes_meta(self, png_path: str) -> None:
+        self._ax_top = None
+        self._ax_bot = None
+        try:
+            meta_path = png_path.rsplit(".", 1)[0] + ".json"
+            if not os.path.exists(meta_path):
+                return
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f) or {}
+            top = meta.get("top") or {}
+            bot = meta.get("bot") or {}
+            if top:
+                self._ax_top = top
+            if bot:
+                self._ax_bot = bot
+        except Exception:
+            self._ax_top = None
+            self._ax_bot = None
+
+    def _clear_curve_overlay(self) -> None:
+        it = self._curve_overlay_item
+        if it is not None:
+            try:
+                sc = it.scene()
+                if sc is not None:
+                    sc.removeItem(it)
+            except Exception:
+                pass
+        self._curve_overlay_item = None
+        self._clear_control_points_overlay()
+
+    def _clear_control_points_overlay(self) -> None:
+        for it in (self._cp_overlay_items or []):
+            try:
+                sc = it.scene()
+                if sc is not None:
+                    sc.removeItem(it)
+            except Exception:
+                pass
+        self._cp_overlay_items = []
+
+    def _chain_elev_to_scene_xy(self, chain_m: float, elev_m: float) -> Optional[Tuple[float, float]]:
+        if self._img_ground is None or self._ax_top is None:
+            return None
+        try:
+            ax = self._ax_top
+            x_min = float(ax.get("x_min"))
+            x_max = float(ax.get("x_max"))
+            y_min = float(ax.get("y_min"))
+            y_max = float(ax.get("y_max"))
+            left_px = float(ax.get("left_px"))
+            top_px = float(ax.get("top_px"))
+            w_px = float(ax.get("width_px"))
+            h_px = float(ax.get("height_px"))
+            if not (x_max > x_min and y_max > y_min and w_px > 0 and h_px > 0):
+                return None
+            xr = (float(chain_m) - x_min) / (x_max - x_min)
+            yr = (y_max - float(elev_m)) / (y_max - y_min)
+            x_local = left_px + xr * w_px
+            y_local = top_px + yr * h_px
+            x_scene = float(self._img_ground.pos().x()) + x_local
+            y_scene = float(self._img_ground.pos().y()) + y_local
+            return x_scene, y_scene
+        except Exception:
+            return None
+
+    def _draw_curve_overlay(self, chain_arr: np.ndarray, elev_arr: np.ndarray, color: str = "#bf00ff") -> None:
+        # keep control-point markers; only refresh curve path here
+        if self._curve_overlay_item is not None:
+            try:
+                sc = self._curve_overlay_item.scene()
+                if sc is not None:
+                    sc.removeItem(self._curve_overlay_item)
+            except Exception:
+                pass
+            self._curve_overlay_item = None
+        if self.scene is None:
+            return
+        ch = np.asarray(chain_arr, dtype=float)
+        zz = np.asarray(elev_arr, dtype=float)
+        m = np.isfinite(ch) & np.isfinite(zz)
+        ch = ch[m]
+        zz = zz[m]
+        if ch.size < 2:
+            return
+        order = np.argsort(ch)
+        ch = ch[order]
+        zz = zz[order]
+
+        path = QPainterPath()
+        started = False
+        for s, z in zip(ch, zz):
+            pt = self._chain_elev_to_scene_xy(float(s), float(z))
+            if pt is None:
+                continue
+            x, y = pt
+            if not started:
+                path.moveTo(x, y)
+                started = True
+            else:
+                path.lineTo(x, y)
+        if not started:
+            return
+        item = QGraphicsPathItem(path)
+        pen = QPen(QColor(color))
+        pen.setWidth(3)
+        pen.setCosmetic(True)
+        item.setPen(pen)
+        item.setZValue(120.0)
+        self.scene.addItem(item)
+        self._curve_overlay_item = item
+
+    def _draw_control_points_overlay(self, params: Optional[Dict[str, Any]] = None) -> None:
+        self._clear_control_points_overlay()
+        if self.scene is None:
+            return
+        p = params or self._collect_nurbs_params_from_ui()
+        if not p:
+            return
+        cps = np.asarray(p.get("control_points", []), dtype=float)
+        if cps.ndim != 2 or cps.shape[0] < 2:
+            return
+
+        for i, cp in enumerate(cps):
+            pt = self._chain_elev_to_scene_xy(float(cp[0]), float(cp[1]))
+            if pt is None:
+                continue
+            x, y = pt
+            r = 10.0  # 2.5x from previous 4.0
+            marker = QGraphicsEllipseItem(x - r, y - r, 2 * r, 2 * r)
+            if i in (0, cps.shape[0] - 1):
+                marker.setBrush(QColor("#ff4d4f"))
+            else:
+                marker.setBrush(QColor("#00a8ff"))
+            marker.setPen(QPen(QColor("#ffffff")))
+            marker.setZValue(130.0)
+            self.scene.addItem(marker)
+            self._cp_overlay_items.append(marker)
+
+            lbl = QGraphicsSimpleTextItem(f"P{i}")
+            lbl.setBrush(QColor("#111111"))
+            fnt = lbl.font()
+            psz = fnt.pointSizeF()
+            if psz <= 0:
+                psz = 10.0
+            fnt.setPointSizeF(psz * 2.5)
+            lbl.setFont(fnt)
+            lbl.setPos(x + 20.0, y - 34.0)
+            lbl.setZValue(131.0)
+            self.scene.addItem(lbl)
+            self._cp_overlay_items.append(lbl)
+
+    @staticmethod
+    def _profile_endpoints(prof: dict) -> Optional[Tuple[float, float, float, float]]:
+        chain = np.asarray(prof.get("chain", []), dtype=float)
+        elev = np.asarray(prof.get("elev_s", []), dtype=float)
+        m = np.isfinite(chain) & np.isfinite(elev)
+        chain = chain[m]
+        elev = elev[m]
+        if chain.size < 2:
+            return None
+        order = np.argsort(chain)
+        chain = chain[order]
+        elev = elev[order]
+        return float(chain[0]), float(elev[0]), float(chain[-1]), float(elev[-1])
+
+    def _build_default_nurbs_params(self, line_id: str, prof: dict, groups: list, base_curve: dict) -> Dict[str, Any]:
+        ends = self._profile_endpoints(prof)
+        if ends is None:
+            return {"degree": 1, "control_points": [], "weights": []}
+        s0, z0, s1, z1 = ends
+
+        gs = []
+        for g in (groups or []):
+            try:
+                st = float(g.get("start", g.get("start_chainage", np.nan)))
+                en = float(g.get("end", g.get("end_chainage", np.nan)))
+            except Exception:
+                continue
+            if not (np.isfinite(st) and np.isfinite(en)):
+                continue
+            if en < st:
+                st, en = en, st
+            gs.append((st, en))
+        gs.sort(key=lambda x: (x[0], x[1]))
+        # Default count rule: number of groups + 3
+        n_ctrl = max(2, len(gs) + 3)
+
+        # Default chainage: profile endpoints + group boundaries (end of each group).
+        # This keeps control points tied to group boundaries.
+        cp_chain = [float(s0)]
+        cp_chain.extend([float(e) for _, e in gs])
+        cp_chain.append(float(s1))
+        if len(cp_chain) != n_ctrl:
+            cp_chain = np.linspace(s0, s1, n_ctrl).tolist()
+
+        xb = np.asarray((base_curve or {}).get("chain", []), dtype=float)
+        zb = np.asarray((base_curve or {}).get("elev", []), dtype=float)
+        mb = np.isfinite(xb) & np.isfinite(zb)
+        xb = xb[mb]
+        zb = zb[mb]
+        if xb.size >= 2:
+            cp_elev = np.interp(np.asarray(cp_chain, dtype=float), xb, zb).tolist()
+        else:
+            chain = np.asarray(prof.get("chain", []), dtype=float)
+            elev = np.asarray(prof.get("elev_s", []), dtype=float)
+            m = np.isfinite(chain) & np.isfinite(elev)
+            chain = chain[m]
+            elev = elev[m]
+            if chain.size >= 2:
+                cp_elev = np.interp(np.asarray(cp_chain, dtype=float), chain, elev).tolist()
+            else:
+                cp_elev = np.linspace(z0, z1, len(cp_chain)).tolist()
+
+        # Keep default interior CP always below ground profile.
+        gch = np.asarray(prof.get("chain", []), dtype=float)
+        gz = np.asarray(prof.get("elev_s", []), dtype=float)
+        mg = np.isfinite(gch) & np.isfinite(gz)
+        gch = gch[mg]
+        gz = gz[mg]
+        clearance = 0.2
+        if gch.size >= 2 and len(cp_elev) >= 3:
+            g_at_cp = np.interp(np.asarray(cp_chain, dtype=float), gch, gz)
+            cp_elev_arr = np.asarray(cp_elev, dtype=float)
+            cp_elev_arr[1:-1] = np.minimum(cp_elev_arr[1:-1], g_at_cp[1:-1] - clearance)
+            cp_elev = cp_elev_arr.tolist()
+
+        # Endpoint lock to first/last vectors (profile endpoints).
+        cp_elev[0] = z0
+        cp_elev[-1] = z1
+        cps = [[float(s), float(z)] for s, z in zip(cp_chain, cp_elev)]
+        w = [1.0] * len(cps)
+        deg = min(3, max(1, len(cps) - 1))
+        params = {"degree": int(deg), "control_points": cps, "weights": w}
+        self._nurbs_params_by_line[line_id] = params
+        return params
+
+    def _get_nurbs_params_for_line(self, line_id: str) -> Optional[Dict[str, Any]]:
+        return self._nurbs_params_by_line.get(line_id)
+
+    def _set_nurbs_params_for_line(self, line_id: str, params: Dict[str, Any]) -> None:
+        self._nurbs_params_by_line[line_id] = params
+
+    def _try_load_nurbs_params_file(self, line_id: str) -> Optional[Dict[str, Any]]:
+        path = self._nurbs_json_path_for(line_id)
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                js = json.load(f) or {}
+            params = {
+                "degree": int(js.get("degree", 3)),
+                "control_points": js.get("control_points", []),
+                "weights": js.get("weights", []),
+            }
+            cps = np.asarray(params.get("control_points", []), dtype=float)
+            ws = np.asarray(params.get("weights", []), dtype=float)
+            if cps.ndim != 2 or cps.shape[0] < 2:
+                return None
+            if ws.ndim != 1 or ws.size != cps.shape[0]:
+                params["weights"] = np.ones(cps.shape[0], dtype=float).tolist()
+            return params
+        except Exception:
+            return None
+
+    def _sync_nurbs_panel_for_current_line(self, reset_defaults: bool = False) -> None:
+        if self.line_combo is None or self.line_combo.count() == 0:
+            return
+        line_id = self._line_id_current()
+        prof = self._active_prof
+        if not prof:
+            return
+        groups = self._active_groups or []
+        base = self._active_base_curve or {}
+
+        params = None if reset_defaults else self._get_nurbs_params_for_line(line_id)
+        if (not params) and (not reset_defaults):
+            params = self._try_load_nurbs_params_file(line_id)
+        if not params:
+            params = self._build_default_nurbs_params(line_id, prof, groups, base)
+
+        cps = params.get("control_points", []) or []
+        ww = params.get("weights", []) or []
+        deg = int(params.get("degree", 3))
+        n_ctrl = max(2, len(cps))
+        deg = max(1, min(deg, n_ctrl - 1))
+        params["degree"] = deg
+        if len(ww) != n_ctrl:
+            ww = [1.0] * n_ctrl
+            params["weights"] = ww
+        self._set_nurbs_params_for_line(line_id, params)
+
+        self._nurbs_updating_ui = True
+        try:
+            self.nurbs_cp_spin.setValue(n_ctrl)
+            self.nurbs_deg_spin.setMaximum(max(1, n_ctrl - 1))
+            self.nurbs_deg_spin.setValue(deg)
+            self._populate_nurbs_table(params)
+        finally:
+            self._nurbs_updating_ui = False
+        self._draw_control_points_overlay(params)
+
+    def _populate_nurbs_table(self, params: Dict[str, Any]) -> None:
+        cps = params.get("control_points", []) or []
+        ww = params.get("weights", []) or []
+        self.nurbs_table.setRowCount(0)
+        for i, cp in enumerate(cps):
+            r = self.nurbs_table.rowCount()
+            self.nurbs_table.insertRow(r)
+            item = QTableWidgetItem(f"P{i}")
+            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+            self.nurbs_table.setItem(r, 0, item)
+
+            sbox = KeyboardOnlyDoubleSpinBox()
+            sbox.setDecimals(3)
+            sbox.setRange(-1e6, 1e6)
+            sbox.setSingleStep(0.1)
+            sbox.setButtonSymbols(QAbstractSpinBox.NoButtons)
+            sbox.setValue(float(cp[0]))
+            sbox.valueChanged.connect(lambda _v, _r=r: self._on_nurbs_table_changed(_r))
+            self.nurbs_table.setCellWidget(r, 1, sbox)
+
+            zbox = KeyboardOnlyDoubleSpinBox()
+            zbox.setDecimals(3)
+            zbox.setRange(-1e6, 1e6)
+            zbox.setSingleStep(0.1)
+            zbox.setButtonSymbols(QAbstractSpinBox.NoButtons)
+            zbox.setValue(float(cp[1]))
+            zbox.valueChanged.connect(lambda _v, _r=r: self._on_nurbs_table_changed(_r))
+            self.nurbs_table.setCellWidget(r, 2, zbox)
+
+            wbox = KeyboardOnlyDoubleSpinBox()
+            wbox.setDecimals(3)
+            wbox.setRange(0.001, 1e6)
+            wbox.setSingleStep(0.1)
+            wbox.setButtonSymbols(QAbstractSpinBox.NoButtons)
+            wbox.setValue(float(ww[i] if i < len(ww) else 1.0))
+            wbox.valueChanged.connect(lambda _v, _r=r: self._on_nurbs_table_changed(_r))
+            self.nurbs_table.setCellWidget(r, 3, wbox)
+
+        self._enforce_nurbs_endpoint_lock()
+
+    def _collect_nurbs_params_from_ui(self) -> Optional[Dict[str, Any]]:
+        rc = self.nurbs_table.rowCount()
+        if rc < 2:
+            return None
+        cps = []
+        ws = []
+        for r in range(rc):
+            sbox = self.nurbs_table.cellWidget(r, 1)
+            zbox = self.nurbs_table.cellWidget(r, 2)
+            wbox = self.nurbs_table.cellWidget(r, 3)
+            if not isinstance(sbox, QDoubleSpinBox) or not isinstance(zbox, QDoubleSpinBox) or not isinstance(wbox, QDoubleSpinBox):
+                return None
+            cps.append([float(sbox.value()), float(zbox.value())])
+            ws.append(float(max(0.001, wbox.value())))
+        cps_arr = np.asarray(cps, dtype=float)
+        order = np.argsort(cps_arr[:, 0])
+        cps_arr = cps_arr[order]
+        ws_arr = np.asarray(ws, dtype=float)[order]
+        deg = int(self.nurbs_deg_spin.value())
+        deg = max(1, min(deg, len(cps) - 1))
+        return {
+            "degree": deg,
+            "control_points": cps_arr.tolist(),
+            "weights": ws_arr.tolist(),
+        }
+
+    def _enforce_nurbs_endpoint_lock(self) -> None:
+        prof = self._active_prof
+        if not prof:
+            return
+        ends = self._profile_endpoints(prof)
+        if ends is None:
+            return
+        s0, z0, s1, z1 = ends
+        rc = self.nurbs_table.rowCount()
+        if rc < 2:
+            return
+        for row, s_val, z_val in ((0, s0, z0), (rc - 1, s1, z1)):
+            sbox = self.nurbs_table.cellWidget(row, 1)
+            zbox = self.nurbs_table.cellWidget(row, 2)
+            if isinstance(sbox, QDoubleSpinBox):
+                sbox.blockSignals(True)
+                sbox.setValue(float(s_val))
+                sbox.setEnabled(False)
+                sbox.blockSignals(False)
+            if isinstance(zbox, QDoubleSpinBox):
+                zbox.blockSignals(True)
+                zbox.setValue(float(z_val))
+                zbox.setEnabled(False)
+                zbox.blockSignals(False)
+
+    def _resize_nurbs_control_points(self, new_count: int) -> None:
+        line_id = self._line_id_current()
+        params = self._get_nurbs_params_for_line(line_id)
+        prof = self._active_prof
+        if params is None or prof is None:
+            return
+        ends = self._profile_endpoints(prof)
+        if ends is None:
+            return
+        s0, z0, s1, z1 = ends
+        cps = np.asarray(params.get("control_points", []), dtype=float)
+        ws = np.asarray(params.get("weights", []), dtype=float)
+        if cps.ndim != 2 or cps.shape[0] < 2:
+            params = self._build_default_nurbs_params(line_id, prof, self._active_groups, self._active_base_curve or {})
+            cps = np.asarray(params.get("control_points", []), dtype=float)
+            ws = np.asarray(params.get("weights", []), dtype=float)
+        old_s = cps[:, 0]
+        old_z = cps[:, 1]
+        new_s = np.linspace(s0, s1, int(max(2, new_count)))
+        new_z = np.interp(new_s, old_s, old_z)
+        new_w = np.interp(new_s, old_s, ws if ws.size == old_s.size else np.ones_like(old_s))
+        new_z[0] = z0
+        new_z[-1] = z1
+        new_params = {
+            "degree": int(min(int(params.get("degree", 3)), len(new_s) - 1)),
+            "control_points": np.vstack([new_s, new_z]).T.tolist(),
+            "weights": np.where(np.isfinite(new_w) & (new_w > 0), new_w, 1.0).tolist(),
+        }
+        self._set_nurbs_params_for_line(line_id, new_params)
+        self._sync_nurbs_panel_for_current_line(reset_defaults=False)
+        self._schedule_nurbs_live_update()
+
+    def _schedule_nurbs_live_update(self) -> None:
+        if self._nurbs_updating_ui:
+            return
+        self._nurbs_live_timer.start()
+
+    def _on_nurbs_live_tick(self) -> None:
+        line_id = self._line_id_current()
+        params = self._collect_nurbs_params_from_ui()
+        if not params:
+            return
+        self._set_nurbs_params_for_line(line_id, params)
+        self._draw_control_points_overlay(params)
+        curve_method = self._get_curve_method_for_line(line_id)
+        if curve_method != "nurbs":
+            return
+        curve = self._compute_nurbs_curve_from_params(params)
+        if curve is None:
+            return
+        self._active_curve = curve
+        self._draw_curve_overlay(np.asarray(curve["chain"], dtype=float), np.asarray(curve["elev"], dtype=float))
+
+    def _compute_nurbs_curve_from_params(self, params: Dict[str, Any]) -> Optional[Dict[str, np.ndarray]]:
+        prof = self._active_prof
+        if not prof:
+            return None
+        p = dict(params or {})
+        cps = np.asarray(p.get("control_points", []), dtype=float)
+        ww = np.asarray(p.get("weights", []), dtype=float)
+        if cps.ndim != 2 or cps.shape[0] < 2:
+            return None
+        if ww.ndim != 1 or ww.size != cps.shape[0]:
+            ww = np.ones(cps.shape[0], dtype=float)
+
+        ends = self._profile_endpoints(prof)
+        if ends is None:
+            return None
+        s0, z0, s1, z1 = ends
+        cps = cps.copy()
+        cps[0, 0], cps[0, 1] = s0, z0
+        cps[-1, 0], cps[-1, 1] = s1, z1
+
+        deg = int(max(1, min(int(p.get("degree", 3)), cps.shape[0] - 1)))
+        ch = np.asarray(prof.get("chain", []), dtype=float)
+        n_samples = int(max(120, np.count_nonzero(np.isfinite(ch)) * 2))
+        out = evaluate_nurbs_curve(
+            chain_ctrl=cps[:, 0],
+            elev_ctrl=cps[:, 1],
+            weights=ww,
+            degree=deg,
+            n_samples=n_samples,
+        )
+        sx = np.asarray(out.get("chain", []), dtype=float)
+        sz = np.asarray(out.get("elev", []), dtype=float)
+        m = np.isfinite(sx) & np.isfinite(sz)
+        sx = sx[m]
+        sz = sz[m]
+        if sx.size < 2:
+            return None
+        return {"chain": sx, "elev": sz}
+
+    def _on_nurbs_cp_spin_changed(self, val: int) -> None:
+        if self._nurbs_updating_ui:
+            return
+        self.nurbs_deg_spin.setMaximum(max(1, int(val) - 1))
+        if self.nurbs_deg_spin.value() > self.nurbs_deg_spin.maximum():
+            self.nurbs_deg_spin.setValue(self.nurbs_deg_spin.maximum())
+        self._resize_nurbs_control_points(int(val))
+
+    def _on_nurbs_deg_spin_changed(self, val: int) -> None:
+        if self._nurbs_updating_ui:
+            return
+        max_deg = max(1, self.nurbs_cp_spin.value() - 1)
+        if val > max_deg:
+            self._nurbs_updating_ui = True
+            try:
+                self.nurbs_deg_spin.setValue(max_deg)
+            finally:
+                self._nurbs_updating_ui = False
+        self._schedule_nurbs_live_update()
+
+    def _on_nurbs_table_changed(self, _row: int) -> None:
+        self._enforce_nurbs_endpoint_lock()
+        self._schedule_nurbs_live_update()
+
+    def _on_nurbs_reset_defaults(self) -> None:
+        if not self._active_prof:
+            self._warn("[UI3] Render/Draw curve first to initialize NURBS.")
+            return
+        self._sync_nurbs_panel_for_current_line(reset_defaults=True)
+        self._schedule_nurbs_live_update()
+
+    def _nurbs_png_path_for(self, line_id: str) -> str:
+        return os.path.join(self._preview_dir(), f"profile_{line_id}_nurbs.png")
+
+    def _nurbs_json_path_for(self, line_id: str) -> str:
+        return os.path.join(self._preview_dir(), f"profile_{line_id}_nurbs.json")
+
+    def _on_nurbs_save(self) -> None:
+        if not self._active_prof:
+            self._warn("[UI3] No active profile to save NURBS.")
+            return
+        line_id = self._line_id_current()
+        params = self._collect_nurbs_params_from_ui()
+        if not params:
+            self._warn("[UI3] Invalid NURBS parameters.")
+            return
+        curve = self._compute_nurbs_curve_from_params(params)
+        if curve is None:
+            self._warn("[UI3] Cannot evaluate NURBS curve.")
+            return
+        out_png = self._nurbs_png_path_for(line_id)
+        msg, path = render_profile_png(
+            self._active_prof, out_png,
+            y_min=None, y_max=None,
+            x_min=None, x_max=None,
+            vec_scale=self.vscale.value(),
+            vec_width=self.vwidth.value(),
+            head_len=6.0, head_w=4.0,
+            highlight_theta=None,
+            group_ranges=self._active_groups if self._active_groups else None,
+            ungrouped_color=self._get_ungrouped_color(),
+            overlay_curves=[(curve["chain"], curve["elev"], "#bf00ff", "Slip curve")]
+        )
+        self._log(msg)
+        if path and os.path.exists(path):
+            payload = {
+                "line_id": line_id,
+                "curve_method": "nurbs",
+                "degree": int(params.get("degree", 3)),
+                "control_points": params.get("control_points", []),
+                "weights": params.get("weights", []),
+                "curve": {
+                    "chain": np.asarray(curve["chain"], dtype=float).tolist(),
+                    "elev": np.asarray(curve["elev"], dtype=float).tolist(),
+                },
+            }
+            jpath = self._nurbs_json_path_for(line_id)
+            with open(jpath, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            self._ok(f"[UI3] Saved NURBS: {path}")
+            self._log(f"[UI3] Saved NURBS params: {jpath}")
 
     def _on_auto_group(self) -> None:
         """Sinh group tự động như UI3, lưu JSON, cập nhật bảng, và vẽ guide (không re-render)."""
@@ -362,12 +1012,14 @@ class CurveAnalyzeTab(QWidget):
             clicked_text = clicked.text().strip() if clicked is not None else ""
             if clicked_text == "Traditional":
                 # Theo yêu cầu: Traditional -> hàm mới
-                self._log("[UI3] Auto Group method: Traditional -> new criteria")
+                self._log("[UI3] Auto Group method: Traditional -> new criteria (curve: NURBS)")
                 groups = auto_group_profile_by_criteria(prof)
+                group_method = "traditional"
             elif clicked_text == "New":
                 # Theo yêu cầu: New -> hàm/tiêu chí cũ
-                self._log("[UI3] Auto Group method: New -> legacy criteria")
+                self._log("[UI3] Auto Group method: New -> legacy criteria (curve: Bezier)")
                 groups = auto_group_profile(prof)
+                group_method = "new"
             else:
                 if clicked == btn_cancel:
                     self._log("[UI3] Auto Group canceled.")
@@ -384,6 +1036,8 @@ class CurveAnalyzeTab(QWidget):
                 prof,
                 line_id,
                 log_text=f"[UI3] Auto Group done for '{line_id}': {len(groups)} groups.",
+                curve_method=self._curve_method_from_group_method(group_method),
+                group_method=group_method,
             )
             # Re-render ngay để vẽ vector và tô màu theo group vừa tạo.
             self._render_current_safe()
@@ -393,6 +1047,10 @@ class CurveAnalyzeTab(QWidget):
     def _on_draw_curve(self) -> None:
         """Tính và vẽ đường cong (overlay) vào PNG preview hiện tại."""
         try:
+            line_id = self._line_id_current()
+            curve_method = self._get_curve_method_for_line(line_id)
+            self._log(f"[UI3] Curve method for '{line_id}': {curve_method.upper()}")
+
             # 1) Lấy line và profile TRONG slip-zone
             if not hasattr(self, "_gdf") or self._gdf is None or self._gdf.empty:
                 self._warn("[UI3] No lines.");
@@ -456,43 +1114,28 @@ class CurveAnalyzeTab(QWidget):
                 except Exception:
                     groups = []
             if not groups:
-                groups = auto_group_profile_by_criteria(prof)
+                if curve_method == "nurbs":
+                    groups = auto_group_profile_by_criteria(prof)
+                else:
+                    groups = auto_group_profile(prof)
                 groups = clamp_groups_to_slip(prof, groups)
                 if not groups:
                     self._warn("[UI3] Auto grouping produced no segments within slip zone.");
                     return
-                line_id = self._line_id_current()
                 self._save_groups_to_ui(
                     groups,
                     prof,
                     line_id,
                     log_text=f"[UI3] Auto Group (implicit) for '{line_id}': {len(groups)} groups.",
+                    curve_method=curve_method,
                 )
             else:
                 groups = clamp_groups_to_slip(prof, groups)
                 if not groups:
                     self._warn("[UI3] No groups within slip zone.");
                     return
-            #
-            # # 3) Base curve trong slip-zone (theo UI3 gốc)
-            # base = estimate_slip_curve(
-            #     prof, groups,
-            #     ds=0.2, smooth_factor=0.1,
-            #     depth_gain=8, min_depth=2
-            # )
-            # if len(base.get("chain", [])) < 6:
-            #     self._warn("[UI3] Not enough points to fit curve.");
-            #     return
-            #
-            # # 4) Fit Bezier “main” (đơn giản như nhánh main trong UI3 gốc)
-            # bez = fit_bezier_smooth_curve(
-            #     chain=np.asarray(prof["chain"]),
-            #     elevg=np.asarray(prof["elev_s"]),
-            #     target_s=np.asarray(base["chain"]),
-            #     target_z=np.asarray(base["elev"]),
-            #     c0=0.20, c1=0.40, clearance=0.20
-            # )
-            # 3) Base curve trong slip-zone (polyline đơn giản – giống backbone)
+
+            # 3) Base curve để lấy mục tiêu mặc định cho NURBS/Bezier
             base = estimate_slip_curve(
                 prof, groups,
                 ds=0.2, smooth_factor=0.1,
@@ -519,38 +1162,64 @@ class CurveAnalyzeTab(QWidget):
                 f"[UI3] Slip curve pts={x_base.size}, "
                 f"chain=[{x_base.min():.2f}, {x_base.max():.2f}]"
             )
-            # 4) Thử fit Bezier mượt giống UI3 cũ
-            x_smooth, z_smooth = x_base, z_base  # fallback mặc định
 
-            try:
-                bez = fit_bezier_smooth_curve(
-                    chain=np.asarray(prof["chain"], dtype=float),
-                    elevg=np.asarray(prof["elev_s"], dtype=float),
-                    target_s=x_base,
-                    target_z=z_base,
-                    c0=0.20,
-                    c1=0.40,
-                    clearance=0.20,
-                )
+            self._active_prof = prof
+            self._active_groups = groups
+            self._active_base_curve = {"chain": x_base, "elev": z_base}
+            self._sync_nurbs_panel_for_current_line(reset_defaults=False)
 
-                xb = np.asarray(bez.get("chain", []), dtype=float)
-                zb = np.asarray(bez.get("elev", []), dtype=float)
-                m2 = np.isfinite(xb) & np.isfinite(zb)
-                xb = xb[m2]
-                zb = zb[m2]
+            # 4) Fit curve theo method
+            curve = {"chain": x_base, "elev": z_base}  # fallback mặc định
 
-                if xb.size >= 2:
-                    x_smooth, z_smooth = xb, zb
-                    self._log(f"[UI3] Bezier slip curve OK: n={xb.size}")
+            def _fit_bezier_curve() -> Optional[dict]:
+                try:
+                    bez = fit_bezier_smooth_curve(
+                        chain=np.asarray(prof["chain"], dtype=float),
+                        elevg=np.asarray(prof["elev_s"], dtype=float),
+                        target_s=x_base,
+                        target_z=z_base,
+                        c0=0.20,
+                        c1=0.40,
+                        clearance=0.20,
+                    )
+
+                    xb = np.asarray(bez.get("chain", []), dtype=float)
+                    zb = np.asarray(bez.get("elev", []), dtype=float)
+                    m2 = np.isfinite(xb) & np.isfinite(zb)
+                    xb = xb[m2]
+                    zb = zb[m2]
+                    if xb.size >= 2:
+                        self._log(f"[UI3] Bezier slip curve OK: n={xb.size}")
+                        return {"chain": xb, "elev": zb}
+                except Exception as e:
+                    self._warn(f"[UI3] Bezier fit failed, using base curve. ({e})")
+                return None
+
+            if curve_method == "nurbs":
+                params = self._collect_nurbs_params_from_ui()
+                if params:
+                    nurbs_curve = self._compute_nurbs_curve_from_params(params)
+                    if nurbs_curve is not None:
+                        curve = nurbs_curve
+                        self._log(f"[UI3] NURBS slip curve OK: n={len(nurbs_curve['chain'])}")
+                    else:
+                        self._warn("[UI3] NURBS fit failed; fallback to Bezier.")
+                        bez_curve = _fit_bezier_curve()
+                        if bez_curve is not None:
+                            curve = bez_curve
+                else:
+                    self._warn("[UI3] Invalid NURBS params; fallback to Bezier.")
+                    bez_curve = _fit_bezier_curve()
+                    if bez_curve is not None:
+                        curve = bez_curve
+            else:
+                bez_curve = _fit_bezier_curve()
+                if bez_curve is not None:
+                    curve = bez_curve
                 else:
                     self._warn("[UI3] Bezier returned too few points; using base curve.")
 
-            except Exception as e:
-                # Lỗi DGELSD/SVD... thì báo warning nhưng vẫn không crash
-                self._warn(f"[UI3] Bezier fit failed, using base curve. ({e})")
-
-            # 5) Re-render PNG hiện tại + overlay curve
-            line_id = self._line_id_current()
+            # 5) Re-render base PNG (no curve baked-in), then draw overlay in scene
             out_png = self._profile_png_path_for(line_id)
 
             msg, path = render_profile_png(
@@ -562,8 +1231,7 @@ class CurveAnalyzeTab(QWidget):
                 head_len=6.0, head_w=4.0,
                 highlight_theta=None,
                 group_ranges=groups,
-                ungrouped_color=self._get_ungrouped_color(),
-                overlay_curves=[(x_smooth, z_smooth, "#bf00ff", "Slip curve")]
+                ungrouped_color=self._get_ungrouped_color()
             )
             self._log(msg)
             if not path or not os.path.exists(path):
@@ -577,6 +1245,13 @@ class CurveAnalyzeTab(QWidget):
             self.scene.addItem(item)
             self._img_ground = item
             self._img_rate0 = item
+            self._load_axes_meta(path)
+
+            self._active_curve = {
+                "chain": np.asarray(curve["chain"], dtype=float),
+                "elev": np.asarray(curve["elev"], dtype=float),
+            }
+            self._draw_curve_overlay(self._active_curve["chain"], self._active_curve["elev"])
 
             if getattr(self, "_first_show", True):
                 self.view.fit_to_scene()
@@ -669,43 +1344,40 @@ class CurveAnalyzeTab(QWidget):
             lb.setFixedWidth(proj_label_w)
             return lb
 
-        row1 = QHBoxLayout()
-        row1.addWidget(_fit_proj_label("Name:"))
+        row_proj = QHBoxLayout()
+        row_proj.addWidget(_fit_proj_label("Name:"))
         self.edit_project = QLineEdit()
         self.edit_project.setPlaceholderText("—")
         self.edit_project.setReadOnly(True)
         self.edit_project.setFixedHeight(proj_input_h)
         self.edit_project.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        row1.addWidget(self.edit_project, 1)
-        lp.addLayout(row1)
-
-        row2 = QHBoxLayout()
-        row2.addWidget(_fit_proj_label("Run label:"))
+        row_proj.addWidget(self.edit_project, 1)
+        row_proj.addSpacing(6)
+        row_proj.addWidget(_fit_proj_label("Run label:"))
         self.edit_runlabel = QLineEdit()
         self.edit_runlabel.setPlaceholderText("—")
         self.edit_runlabel.setReadOnly(True)
         self.edit_runlabel.setFixedHeight(proj_input_h)
         self.edit_runlabel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        row2.addWidget(self.edit_runlabel, 1)
-        lp.addLayout(row2)
+        row_proj.addWidget(self.edit_runlabel, 1)
+        lp.addLayout(row_proj)
 
         left.addWidget(box_proj)
 
-        # Line selection
-        box_sel = QGroupBox("Sections")
-        ls = QHBoxLayout(box_sel)
+        # Sections + Advanced display
+        box_sel = QGroupBox("Sections Display")
+        lsd = QVBoxLayout(box_sel)
+        ls = QHBoxLayout()
         self.line_combo = QComboBox()
         self.line_combo.currentIndexChanged.connect(self._on_line_changed)
         btn_render = QPushButton("Render Section")
         btn_render.clicked.connect(self._render_current_safe)
         ls.addWidget(self.line_combo)
         ls.addWidget(btn_render)
-        left.addWidget(box_sel)
+        lsd.addLayout(ls)
 
-        # Advanced (quiver + axes)
-        box_adv = QGroupBox("Advanced Display")
-        la = QHBoxLayout(box_adv)
-        la.setContentsMargins(8, 8, 8, 8)
+        # Advanced controls
+        la = QHBoxLayout()
         la.setSpacing(6)
 
         def _fit_adv_label(text: str) -> QLabel:
@@ -741,8 +1413,9 @@ class CurveAnalyzeTab(QWidget):
         self.vwidth.setMinimumWidth(56)
         self.vwidth.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         la.addWidget(self.vwidth, 1)
+        lsd.addLayout(la)
 
-        left.addWidget(box_adv)
+        left.addWidget(box_sel)
 
         # Group table
         box_grp = QGroupBox("Group")
@@ -755,6 +1428,8 @@ class CurveAnalyzeTab(QWidget):
         self.group_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.group_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self.group_table.cellDoubleClicked.connect(self._on_group_cell_double_clicked)
+        self.group_table.itemChanged.connect(self._on_group_table_item_changed)
+        self.group_table.setMinimumHeight(220)
         lg.addWidget(self.group_table)
 
         rowg = QHBoxLayout()
@@ -771,7 +1446,52 @@ class CurveAnalyzeTab(QWidget):
             btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             rowg.addWidget(btn, 1)
         lg.addLayout(rowg)
-        left.addWidget(box_grp)
+        left.addWidget(box_grp, 1)
+
+        # NURBS controls
+        box_nurbs = QGroupBox("NURBS")
+        ln = QVBoxLayout(box_nurbs)
+        ln.setContentsMargins(8, 8, 8, 8)
+        ln.setSpacing(6)
+
+        row_cfg = QHBoxLayout()
+        row_cfg.addWidget(QLabel("Control points:"))
+        self.nurbs_cp_spin = KeyboardOnlySpinBox()
+        self.nurbs_cp_spin.setRange(2, 20)
+        self.nurbs_cp_spin.setValue(4)
+        self.nurbs_cp_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        row_cfg.addWidget(self.nurbs_cp_spin)
+        row_cfg.addSpacing(8)
+        row_cfg.addWidget(QLabel("Degree:"))
+        self.nurbs_deg_spin = KeyboardOnlySpinBox()
+        self.nurbs_deg_spin.setRange(1, 10)
+        self.nurbs_deg_spin.setValue(3)
+        self.nurbs_deg_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        row_cfg.addWidget(self.nurbs_deg_spin)
+        ln.addLayout(row_cfg)
+
+        self.nurbs_table = QTableWidget(0, 4)
+        self.nurbs_table.setHorizontalHeaderLabels(["CP", "Chainage (m)", "Elev (m)", "Weight"])
+        self.nurbs_table.verticalHeader().setVisible(False)
+        self.nurbs_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.nurbs_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.nurbs_table.setMinimumHeight(120)
+        self.nurbs_table.setMaximumHeight(170)
+        ln.addWidget(self.nurbs_table)
+
+        row_nurbs_btn = QHBoxLayout()
+        self.btn_nurbs_reset = QPushButton("Reset NURBS")
+        self.btn_nurbs_save = QPushButton("Save")
+        row_nurbs_btn.addWidget(self.btn_nurbs_reset, 1)
+        row_nurbs_btn.addWidget(self.btn_nurbs_save, 1)
+        ln.addLayout(row_nurbs_btn)
+
+        self.nurbs_cp_spin.valueChanged.connect(self._on_nurbs_cp_spin_changed)
+        self.nurbs_deg_spin.valueChanged.connect(self._on_nurbs_deg_spin_changed)
+        self.btn_nurbs_reset.clicked.connect(self._on_nurbs_reset_defaults)
+        self.btn_nurbs_save.clicked.connect(self._on_nurbs_save)
+
+        left.addWidget(box_nurbs, 0)
 
         # Status
         box_st = QGroupBox("Status")
@@ -1027,6 +1747,11 @@ class CurveAnalyzeTab(QWidget):
         self._group_bands_bot.clear()
         self._img_ground = None
         self._img_rate0 = None
+        self._clear_curve_overlay()
+        self._active_prof = None
+        self._active_groups = []
+        self._active_base_curve = None
+        self._active_curve = None
         self._plot_x0_px = None
         self._plot_w_px = None
         self._x_min = None
@@ -1108,6 +1833,11 @@ class CurveAnalyzeTab(QWidget):
 
     def _on_line_changed(self, _idx: int) -> None:
         self._log("[i] Line changed. Click 'Render Section' to preview.")
+        self._clear_curve_overlay()
+        self._active_prof = None
+        self._active_groups = []
+        self._active_base_curve = None
+        self._active_curve = None
         self._populate_group_table_for_current_line()  # <-- đổi tên ở đây
 
     # def _groups_json_path(self) -> str:
@@ -1119,30 +1849,36 @@ class CurveAnalyzeTab(QWidget):
 
     def _populate_group_table_for_current_line(self) -> None:
         path = self._groups_json_path()
-        self.group_table.setRowCount(0)
-        loaded = 0
-        if os.path.exists(path):
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    js = json.load(f)
-                for g in js.get("groups", []):
+        self._group_table_updating = True
+        try:
+            self.group_table.setRowCount(0)
+            loaded = 0
+            if os.path.exists(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        js = json.load(f)
+                    cm = self._normalize_curve_method(js.get("curve_method"))
+                    self._set_curve_method_for_line(self._line_id_current(), cm)
+                    for g in js.get("groups", []):
+                        r = self.group_table.rowCount();
+                        self.group_table.insertRow(r)
+                        self.group_table.setItem(r, 0, QTableWidgetItem(str(g.get("id", ""))))
+                        self.group_table.setItem(r, 1, QTableWidgetItem(f'{float(g.get("start", 0.0)):.3f}'))
+                        self.group_table.setItem(r, 2, QTableWidgetItem(f'{float(g.get("end", 0.0)):.3f}'))
+                        self._set_color_cell(r, str(g.get("color", "")).strip())
+                        loaded += 1
+                except Exception as e:
+                    self._log(f"[!] Cannot read groups: {e}")
+            if loaded:
+                self._append_ungrouped_row(self._read_groups_from_table(), self._sec_len_m)
+            if loaded == 0:
+                # 3 dòng trống mặc định
+                for _ in range(3):
                     r = self.group_table.rowCount();
                     self.group_table.insertRow(r)
-                    self.group_table.setItem(r, 0, QTableWidgetItem(str(g.get("id", ""))))
-                    self.group_table.setItem(r, 1, QTableWidgetItem(f'{float(g.get("start", 0.0)):.3f}'))
-                    self.group_table.setItem(r, 2, QTableWidgetItem(f'{float(g.get("end", 0.0)):.3f}'))
-                    self._set_color_cell(r, str(g.get("color", "")).strip())
-                    loaded += 1
-            except Exception as e:
-                self._log(f"[!] Cannot read groups: {e}")
-        if loaded:
-            self._append_ungrouped_row(self._read_groups_from_table(), self._sec_len_m)
-        if loaded == 0:
-            # 3 dòng trống mặc định
-            for _ in range(3):
-                r = self.group_table.rowCount();
-                self.group_table.insertRow(r)
-                self.group_table.setItem(r, 0, QTableWidgetItem(""))
+                    self.group_table.setItem(r, 0, QTableWidgetItem(""))
+        finally:
+            self._group_table_updating = False
 
     def _read_group_table(self) -> List[dict]:
         out = []
@@ -1370,6 +2106,12 @@ class CurveAnalyzeTab(QWidget):
         self.scene.addItem(item)
         self._img_ground = item
         self._img_rate0 = item
+        self._clear_curve_overlay()
+        self._load_axes_meta(path)
+        self._active_prof = prof
+        self._active_groups = groups if groups else []
+        self._active_base_curve = None
+        self._active_curve = None
 
         # Fit lần đầu
         if getattr(self, "_first_show", True):
@@ -1412,6 +2154,33 @@ class CurveAnalyzeTab(QWidget):
             except Exception:
                 pass
 
+    def _sync_nurbs_defaults_from_group_table(self) -> None:
+        """Rebuild default NURBS control points when Group table changes."""
+        if self._group_table_updating:
+            return
+        if not self._active_prof:
+            return
+        try:
+            line_id = self._line_id_current()
+            groups = self._read_groups_from_table()
+            if groups:
+                groups = clamp_groups_to_slip(self._active_prof, groups)
+            self._active_groups = groups or []
+            params = self._build_default_nurbs_params(
+                line_id=line_id,
+                prof=self._active_prof,
+                groups=self._active_groups,
+                base_curve=self._active_base_curve or {},
+            )
+            self._set_nurbs_params_for_line(line_id, params)
+            self._sync_nurbs_panel_for_current_line(reset_defaults=False)
+            self._schedule_nurbs_live_update()
+        except Exception as e:
+            self._warn(f"[UI3] Cannot sync NURBS from groups: {e}")
+
+    def _on_group_table_item_changed(self, _item) -> None:
+        self._sync_nurbs_defaults_from_group_table()
+
     def _on_add_group(self):
         r = self._find_ungrouped_row()
         if r is None:
@@ -1419,6 +2188,7 @@ class CurveAnalyzeTab(QWidget):
         self.group_table.insertRow(r)
         n_groups = len(self._read_groups_from_table()) + 1
         self.group_table.setItem(r, 0, QTableWidgetItem(f"G{n_groups}"))
+        self._sync_nurbs_defaults_from_group_table()
 
     def _on_delete_group(self):
         rows = sorted({i.row() for i in self.group_table.selectedIndexes()}, reverse=True)
@@ -1430,6 +2200,7 @@ class CurveAnalyzeTab(QWidget):
             if gid and gid.text().strip().upper() == "UNGROUPED":
                 continue
             self.group_table.removeRow(r)
+        self._sync_nurbs_defaults_from_group_table()
 
 
     def _read_groups_from_table(self):
@@ -1588,6 +2359,7 @@ class CurveAnalyzeTab(QWidget):
 
     def _load_groups_for_current_line(self):
         """Ưu tiên đọc từ bảng (phản ánh chỉnh sửa/delete mới nhất); nếu trống thì đọc JSON."""
+        line_id = self._line_id_current()
         table_groups = self._read_groups_from_table()
         if table_groups:
             return table_groups
@@ -1598,6 +2370,8 @@ class CurveAnalyzeTab(QWidget):
                 import json
                 with open(js_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
+                cm = self._normalize_curve_method(data.get("curve_method"))
+                self._set_curve_method_for_line(line_id, cm)
                 gs = data.get("groups", [])
                 # chuẩn hoá khóa
                 norm = []
@@ -1657,7 +2431,9 @@ class CurveAnalyzeTab(QWidget):
             pass
 
         # save
-        js = {"line": self.line_combo.currentText(), "groups": groups}
+        line_id = self._line_id_current()
+        curve_method = self._get_curve_method_for_line(line_id)
+        js = {"line": self.line_combo.currentText(), "groups": groups, "curve_method": curve_method}
         try:
             with open(self._groups_json_path(), "w", encoding="utf-8") as f:
                 json.dump(js, f, ensure_ascii=False, indent=2)

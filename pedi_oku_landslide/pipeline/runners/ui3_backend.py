@@ -975,11 +975,12 @@ def render_profile_png(
         fig.canvas.draw()
         renderer = fig.canvas.get_renderer()
 
-        bbox_top = ax.get_window_extent(renderer=renderer).transformed(fig.dpi_scale_trans)
+        # get_window_extent is already in display pixels
+        bbox_top = ax.get_window_extent(renderer=renderer)
         x_top, y_top, w_top, h_top = map(float, bbox_top.bounds)
         x_min_top, x_max_top = ax.get_xlim()
 
-        bbox_bot = ax2.get_window_extent(renderer=renderer).transformed(fig.dpi_scale_trans)
+        bbox_bot = ax2.get_window_extent(renderer=renderer)
         x_bot, y_bot, w_bot, h_bot = map(float, bbox_bot.bounds)
         x_min_bot, x_max_bot = ax2.get_xlim()
 
@@ -991,18 +992,22 @@ def render_profile_png(
         crop_y0 = float(tight.y0) - pad_px
 
         top_left_px = x_top - crop_x0
-        top_top_px = y_top - crop_y0
         bot_left_px = x_bot - crop_x0
-        bot_top_px = y_bot - crop_y0
+        # Convert Matplotlib display-y (origin at bottom) to saved image y (origin at top).
+        crop_h = float(tight.height) + (2.0 * pad_px)
+        top_top_px = crop_h - ((y_top - crop_y0) + h_top)
+        bot_top_px = crop_h - ((y_bot - crop_y0) + h_bot)
 
         meta = {
             "top": {
                 "x_min": float(x_min_top), "x_max": float(x_max_top),
+                "y_min": float(min(ax.get_ylim())), "y_max": float(max(ax.get_ylim())),
                 "left_px": float(top_left_px), "top_px": float(top_top_px),
                 "width_px": float(w_top), "height_px": float(h_top)
             },
             "bot": {
                 "x_min": float(x_min_bot), "x_max": float(x_max_bot),
+                "y_min": float(min(ax2.get_ylim())), "y_max": float(max(ax2.get_ylim())),
                 "left_px": float(bot_left_px), "top_px": float(bot_top_px),
                 "width_px": float(w_bot), "height_px": float(h_bot)
             }
@@ -1476,6 +1481,272 @@ def fit_bezier_smooth_curve(chain, elevg, target_s, target_z,
     z_bez[-1] = zg[-1]
 
     return {"chain": s_bez, "elev": z_bez}
+
+def _make_open_uniform_knot(n_ctrl: int, degree: int) -> np.ndarray:
+    """Open-uniform clamped knot vector for B-spline/NURBS."""
+    m = int(n_ctrl) + int(degree) + 1
+    kv = np.zeros(m, dtype=float)
+    kv[: degree + 1] = 0.0
+    kv[-(degree + 1):] = 1.0
+    n_internal = m - 2 * (degree + 1)
+    if n_internal > 0:
+        kv[degree + 1: degree + 1 + n_internal] = np.linspace(0.0, 1.0, n_internal + 2)[1:-1]
+    return kv
+
+
+def _bspline_basis_all(u: float, degree: int, knot: np.ndarray, n_ctrl: int) -> np.ndarray:
+    """Compute all non-rational B-spline basis functions N_i,p(u)."""
+    N = np.zeros(n_ctrl, dtype=float)
+    for i in range(n_ctrl):
+        if (knot[i] <= u < knot[i + 1]) or (
+            u == 1.0 and knot[i] <= u <= knot[i + 1] and knot[i + 1] == 1.0
+        ):
+            N[i] = 1.0
+
+    for p in range(1, degree + 1):
+        Np = np.zeros(n_ctrl, dtype=float)
+        for i in range(n_ctrl):
+            left = 0.0
+            right = 0.0
+            left_den = knot[i + p] - knot[i]
+            right_den = knot[i + p + 1] - knot[i + 1]
+            if left_den != 0.0:
+                left = (u - knot[i]) / left_den * N[i]
+            if right_den != 0.0 and (i + 1) < n_ctrl:
+                right = (knot[i + p + 1] - u) / right_den * N[i + 1]
+            Np[i] = left + right
+        N = Np
+    return N
+
+
+def _eval_nurbs_curve(
+    ctrl_pts: np.ndarray,
+    weights: np.ndarray,
+    degree: int,
+    n_samples: int,
+    knot: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    n_ctrl = int(ctrl_pts.shape[0])
+    if knot is None:
+        knot = _make_open_uniform_knot(n_ctrl, degree)
+
+    us = np.linspace(0.0, 1.0, int(max(8, n_samples)))
+    curve = np.zeros((us.size, 2), dtype=float)
+    for j, u in enumerate(us):
+        N = _bspline_basis_all(float(u), degree, knot, n_ctrl)
+        wN = weights * N
+        denom = float(np.sum(wN))
+        if denom == 0.0:
+            curve[j, :] = np.nan
+        else:
+            curve[j, :] = (wN @ ctrl_pts) / denom
+    return curve
+
+
+def evaluate_nurbs_curve(
+    chain_ctrl,
+    elev_ctrl,
+    weights=None,
+    degree: int = 3,
+    n_samples: int = 300,
+) -> dict:
+    """Evaluate a global NURBS curve from control points in chain-elevation space."""
+    ch = np.asarray(chain_ctrl, dtype=float)
+    zz = np.asarray(elev_ctrl, dtype=float)
+    if ch.ndim != 1 or zz.ndim != 1 or ch.size != zz.size or ch.size < 2:
+        return {"chain": np.array([], dtype=float), "elev": np.array([], dtype=float)}
+    m = np.isfinite(ch) & np.isfinite(zz)
+    ch = ch[m]
+    zz = zz[m]
+    if ch.size < 2:
+        return {"chain": np.array([], dtype=float), "elev": np.array([], dtype=float)}
+    order = np.argsort(ch)
+    ch = ch[order]
+    zz = zz[order]
+
+    if weights is None:
+        ww = np.ones(ch.size, dtype=float)
+    else:
+        ww = np.asarray(weights, dtype=float)
+        if ww.ndim != 1 or ww.size != ch.size:
+            ww = np.ones(ch.size, dtype=float)
+        ww = np.where(np.isfinite(ww) & (ww > 0), ww, 1.0)
+
+    n_ctrl = int(ch.size)
+    deg = int(max(1, min(int(degree), n_ctrl - 1)))
+    curve = _eval_nurbs_curve(
+        np.vstack([ch, zz]).T,
+        ww,
+        degree=deg,
+        n_samples=int(max(8, n_samples)),
+    )
+    sx = curve[:, 0]
+    sz = curve[:, 1]
+    fin = np.isfinite(sx) & np.isfinite(sz)
+    sx = sx[fin]
+    sz = sz[fin]
+    if sx.size < 2:
+        return {"chain": np.array([], dtype=float), "elev": np.array([], dtype=float)}
+    o2 = np.argsort(sx)
+    return {"chain": sx[o2], "elev": sz[o2]}
+
+
+def _median_theta_deg(chain: np.ndarray, theta: np.ndarray, s0: float, s1: float) -> Optional[float]:
+    lo, hi = (s0, s1) if s0 <= s1 else (s1, s0)
+    m = np.isfinite(chain) & np.isfinite(theta) & (chain >= lo) & (chain <= hi)
+    if int(np.count_nonzero(m)) == 0:
+        return None
+    return float(np.nanmedian(theta[m]))
+
+
+def fit_nurbs_segmented_curve(
+    prof: dict,
+    groups: list,
+    target_s,
+    target_z,
+    degree: int = 3,
+    n_ctrl: int = 4,
+    samples_per_meter: float = 6.0,
+) -> dict:
+    """
+    Piecewise NURBS (C0-continuous) from slip crest -> toe by group boundaries.
+    For each segment, use median vector angle of the corresponding group.
+    """
+    chain = np.asarray(prof.get("chain", []), dtype=float)
+    elevg = np.asarray(prof.get("elev_s", []), dtype=float)
+    theta = np.asarray(prof.get("theta", []), dtype=float)
+    if chain.ndim != 1 or elevg.ndim != 1 or theta.ndim != 1:
+        return {"chain": [], "elev": []}
+    if chain.size < 3:
+        return {"chain": [], "elev": []}
+
+    ok = np.isfinite(chain) & np.isfinite(elevg)
+    if int(np.count_nonzero(ok)) < 3:
+        return {"chain": [], "elev": []}
+    chain = chain[ok]
+    elevg = elevg[ok]
+    theta = theta[ok]
+
+    if "slip_span" in prof and prof["slip_span"]:
+        smin, smax = map(float, prof["slip_span"])
+    else:
+        smin = float(np.nanmin(chain))
+        smax = float(np.nanmax(chain))
+    if smax <= smin:
+        return {"chain": [], "elev": []}
+
+    # Normalize and sort groups; keep only segments inside slip span.
+    norm_groups = []
+    for g in (groups or []):
+        try:
+            gs = float(g.get("start", g.get("start_chainage", np.nan)))
+            ge = float(g.get("end", g.get("end_chainage", np.nan)))
+        except Exception:
+            continue
+        if not np.isfinite(gs) or not np.isfinite(ge):
+            continue
+        if ge < gs:
+            gs, ge = ge, gs
+        gs = max(gs, smin)
+        ge = min(ge, smax)
+        if ge > gs:
+            norm_groups.append((gs, ge))
+    if not norm_groups:
+        return {"chain": [], "elev": []}
+    norm_groups.sort(key=lambda x: (x[0], x[1]))
+
+    target_s = np.asarray(target_s, dtype=float)
+    target_z = np.asarray(target_z, dtype=float)
+    target_ok = np.isfinite(target_s) & np.isfinite(target_z)
+    target_s = target_s[target_ok]
+    target_z = target_z[target_ok]
+    has_target = target_s.size >= 2
+
+    degree = int(max(1, degree))
+    n_ctrl = int(max(4, n_ctrl))
+    if n_ctrl != 4:
+        n_ctrl = 4  # current implementation uses fixed 4 control points per group segment
+    degree = min(degree, n_ctrl - 1)
+
+    # Start point at slip crest.
+    cur_s = float(smin)
+    cur_z = float(np.interp(cur_s, target_s, target_z)) if has_target else float(np.interp(cur_s, chain, elevg))
+
+    out_s = []
+    out_z = []
+    last_theta = _median_theta_deg(chain, theta, smin, smax)
+    if last_theta is None:
+        last_theta = 0.0
+
+    for gs, ge in norm_groups:
+        seg_s = float(cur_s)
+        seg_e = float(max(seg_s, ge))
+        if seg_e <= seg_s:
+            continue
+
+        theta_med = _median_theta_deg(chain, theta, gs, ge)
+        if theta_med is None:
+            theta_med = last_theta
+        last_theta = theta_med
+
+        theta_clip = float(np.clip(theta_med, -85.0, 85.0))
+        slope = float(np.tan(np.radians(theta_clip)))
+        L = float(seg_e - seg_s)
+
+        # Segment anchor at right boundary; if target is available, anchor to it.
+        z_end_anchor = (
+            float(np.interp(seg_e, target_s, target_z))
+            if has_target
+            else float(cur_z + slope * L)
+        )
+
+        cp_x = np.array([seg_s, seg_s + (L / 3.0), seg_s + (2.0 * L / 3.0), seg_e], dtype=float)
+        cp_z = np.array(
+            [
+                cur_z,
+                cur_z + slope * (L / 3.0),
+                z_end_anchor - slope * (L / 3.0),
+                z_end_anchor,
+            ],
+            dtype=float,
+        )
+        ctrl = np.vstack([cp_x, cp_z]).T
+        weights = np.ones(ctrl.shape[0], dtype=float)
+        n_samples = int(max(24, math.ceil(L * float(max(samples_per_meter, 2.0)))))
+
+        try:
+            seg_curve = _eval_nurbs_curve(ctrl, weights, degree=degree, n_samples=n_samples)
+            sx = seg_curve[:, 0]
+            sz = seg_curve[:, 1]
+            fin = np.isfinite(sx) & np.isfinite(sz)
+            sx = sx[fin]
+            sz = sz[fin]
+            if sx.size < 2:
+                raise ValueError("invalid NURBS segment")
+        except Exception:
+            sx = np.linspace(seg_s, seg_e, n_samples)
+            sz = np.linspace(cur_z, z_end_anchor, n_samples)
+
+        # Keep direction along chainage.
+        order = np.argsort(sx)
+        sx = sx[order]
+        sz = sz[order]
+
+        if not out_s:
+            out_s.extend(sx.tolist())
+            out_z.extend(sz.tolist())
+        else:
+            out_s.extend(sx[1:].tolist())
+            out_z.extend(sz[1:].tolist())
+
+        # Group boundary intersection for next segment (progressive chainage).
+        cur_s = float(seg_e)
+        cur_z = float(np.interp(cur_s, sx, sz))
+
+    if len(out_s) < 2:
+        return {"chain": [], "elev": []}
+
+    return {"chain": np.asarray(out_s, dtype=float), "elev": np.asarray(out_z, dtype=float)}
 
 """
 def fit_bezier_with_intersection(chain, elevg,
