@@ -570,35 +570,98 @@ class CurveAnalyzeTab(QWidget):
         elev = elev[order]
         return float(chain[0]), float(elev[0]), float(chain[-1]), float(elev[-1])
 
+    @staticmethod
+    def _grouped_vector_endpoints(prof: dict, groups: list) -> Optional[Tuple[float, float, float, float]]:
+        chain = np.asarray(prof.get("chain", []), dtype=float)
+        elev = np.asarray(prof.get("elev_s", []), dtype=float)
+        finite = np.isfinite(chain) & np.isfinite(elev)
+        if int(np.count_nonzero(finite)) < 2:
+            return None
+        chain = chain[finite]
+        elev = elev[finite]
+        if chain.size < 2:
+            return None
+        order = np.argsort(chain)
+        chain = chain[order]
+        elev = elev[order]
+
+        grouped_mask = np.zeros(chain.shape, dtype=bool)
+        for g in (groups or []):
+            try:
+                s = float(g.get("start", g.get("start_chainage", np.nan)))
+                e = float(g.get("end", g.get("end_chainage", np.nan)))
+            except Exception:
+                continue
+            if not (np.isfinite(s) and np.isfinite(e)):
+                continue
+            if e < s:
+                s, e = e, s
+            grouped_mask |= ((chain >= s) & (chain <= e))
+
+        idx = np.flatnonzero(grouped_mask)
+        if idx.size < 2:
+            return None
+        i0 = int(idx[0])
+        i1 = int(idx[-1])
+        return float(chain[i0]), float(elev[i0]), float(chain[i1]), float(elev[i1])
+
+    def _nurbs_endpoint_targets(
+        self,
+        prof: dict,
+        groups: Optional[list] = None,
+        line_id: Optional[str] = None,
+    ) -> Optional[Tuple[float, float, float, float]]:
+        lid = line_id or self._line_id_current()
+        curve_method = self._get_curve_method_for_line(lid)
+        if curve_method == "nurbs":
+            grouped = self._grouped_vector_endpoints(prof, groups or self._active_groups or [])
+            if grouped is not None:
+                return grouped
+        return self._profile_endpoints(prof)
+
+    @staticmethod
+    def _normalize_group_spans(groups: list) -> List[Tuple[float, float]]:
+        spans: List[Tuple[float, float]] = []
+        for g in (groups or []):
+            try:
+                s = float(g.get("start", g.get("start_chainage", np.nan)))
+                e = float(g.get("end", g.get("end_chainage", np.nan)))
+            except Exception:
+                continue
+            if not (np.isfinite(s) and np.isfinite(e)):
+                continue
+            if e < s:
+                s, e = e, s
+            spans.append((float(s), float(e)))
+        spans.sort(key=lambda x: (x[0], x[1]))
+        return spans
+
+    def _build_default_nurbs_chainage(self, s0: float, s1: float, groups: list) -> List[float]:
+        spans = self._normalize_group_spans(groups)
+        n_ctrl = max(2, len(spans) + 1)
+        if not spans:
+            return np.linspace(float(s0), float(s1), n_ctrl).tolist()
+
+        inner: List[float] = []
+        for i in range(max(0, len(spans) - 1)):
+            b = float(spans[i][1])  # shared boundary: end(i) == start(i+1)
+            b = max(float(s0), min(float(s1), b))
+            inner.append(b)
+
+        cp_chain = [float(s0)] + inner + [float(s1)]
+        if len(cp_chain) != n_ctrl:
+            cp_chain = np.linspace(float(s0), float(s1), n_ctrl).tolist()
+        return cp_chain
+
     def _build_default_nurbs_params(self, line_id: str, prof: dict, groups: list, base_curve: dict) -> Dict[str, Any]:
-        ends = self._profile_endpoints(prof)
+        ends = self._nurbs_endpoint_targets(prof, groups, line_id=line_id)
         if ends is None:
             return {"degree": 1, "control_points": [], "weights": []}
         s0, z0, s1, z1 = ends
 
-        gs = []
-        for g in (groups or []):
-            try:
-                st = float(g.get("start", g.get("start_chainage", np.nan)))
-                en = float(g.get("end", g.get("end_chainage", np.nan)))
-            except Exception:
-                continue
-            if not (np.isfinite(st) and np.isfinite(en)):
-                continue
-            if en < st:
-                st, en = en, st
-            gs.append((st, en))
-        gs.sort(key=lambda x: (x[0], x[1]))
-        # Default count rule: number of groups + 3
-        n_ctrl = max(2, len(gs) + 3)
-
-        # Default chainage: profile endpoints + group boundaries (end of each group).
-        # This keeps control points tied to group boundaries.
-        cp_chain = [float(s0)]
-        cp_chain.extend([float(e) for _, e in gs])
-        cp_chain.append(float(s1))
-        if len(cp_chain) != n_ctrl:
-            cp_chain = np.linspace(s0, s1, n_ctrl).tolist()
+        # Default count rule: number of groups + 1.
+        # CP0/CP_last are NURBS endpoints; interior CPs sit on group boundaries.
+        cp_chain = self._build_default_nurbs_chainage(float(s0), float(s1), groups)
 
         xb = np.asarray((base_curve or {}).get("chain", []), dtype=float)
         zb = np.asarray((base_curve or {}).get("elev", []), dtype=float)
@@ -631,7 +694,7 @@ class CurveAnalyzeTab(QWidget):
             cp_elev_arr[1:-1] = np.minimum(cp_elev_arr[1:-1], g_at_cp[1:-1] - clearance)
             cp_elev = cp_elev_arr.tolist()
 
-        # Endpoint lock to first/last vectors (profile endpoints).
+        # Endpoint lock to first/last grouped vectors (fallback: profile endpoints).
         cp_elev[0] = z0
         cp_elev[-1] = z1
         cps = [[float(s), float(z)] for s, z in zip(cp_chain, cp_elev)]
@@ -776,7 +839,7 @@ class CurveAnalyzeTab(QWidget):
         prof = self._active_prof
         if not prof:
             return
-        ends = self._profile_endpoints(prof)
+        ends = self._nurbs_endpoint_targets(prof, self._active_groups, line_id=self._line_id_current())
         if ends is None:
             return
         s0, z0, s1, z1 = ends
@@ -803,7 +866,7 @@ class CurveAnalyzeTab(QWidget):
         prof = self._active_prof
         if params is None or prof is None:
             return
-        ends = self._profile_endpoints(prof)
+        ends = self._nurbs_endpoint_targets(prof, self._active_groups, line_id=line_id)
         if ends is None:
             return
         s0, z0, s1, z1 = ends
@@ -862,7 +925,7 @@ class CurveAnalyzeTab(QWidget):
         if ww.ndim != 1 or ww.size != cps.shape[0]:
             ww = np.ones(cps.shape[0], dtype=float)
 
-        ends = self._profile_endpoints(prof)
+        ends = self._nurbs_endpoint_targets(prof, self._active_groups, line_id=self._line_id_current())
         if ends is None:
             return None
         s0, z0, s1, z1 = ends
@@ -885,6 +948,10 @@ class CurveAnalyzeTab(QWidget):
         m = np.isfinite(sx) & np.isfinite(sz)
         sx = sx[m]
         sz = sz[m]
+        # Keep rendered NURBS strictly inside locked endpoint span.
+        m_span = (sx >= min(s0, s1)) & (sx <= max(s0, s1))
+        sx = sx[m_span]
+        sz = sz[m_span]
         if sx.size < 2:
             return None
         return {"chain": sx, "elev": sz}
@@ -968,8 +1035,103 @@ class CurveAnalyzeTab(QWidget):
             jpath = self._nurbs_json_path_for(line_id)
             with open(jpath, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
+
+            curve_dir = self._curve_dir()
+
+            # 1) nurbs_Line_n__(n_m).json -> x,y,z of slip curve
+            curve_chain = np.asarray(curve.get("chain", []), dtype=float)
+            curve_elev = np.asarray(curve.get("elev", []), dtype=float)
+            m_curve = np.isfinite(curve_chain) & np.isfinite(curve_elev)
+            curve_chain = curve_chain[m_curve]
+            curve_elev = curve_elev[m_curve]
+
+            x_curve = np.full(curve_chain.shape, np.nan, dtype=float)
+            y_curve = np.full(curve_chain.shape, np.nan, dtype=float)
+            prof_chain = np.asarray(self._active_prof.get("chain", []), dtype=float)
+            prof_x = np.asarray(self._active_prof.get("x", []), dtype=float)
+            prof_y = np.asarray(self._active_prof.get("y", []), dtype=float)
+            if prof_chain.size == prof_x.size and prof_chain.size == prof_y.size:
+                m_xy = np.isfinite(prof_chain) & np.isfinite(prof_x) & np.isfinite(prof_y)
+                if int(np.count_nonzero(m_xy)) >= 2 and curve_chain.size > 0:
+                    ch = prof_chain[m_xy]
+                    xx = prof_x[m_xy]
+                    yy = prof_y[m_xy]
+                    order = np.argsort(ch)
+                    ch = ch[order]
+                    xx = xx[order]
+                    yy = yy[order]
+                    ch_u, uniq_idx = np.unique(ch, return_index=True)
+                    xx_u = xx[uniq_idx]
+                    yy_u = yy[uniq_idx]
+                    if ch_u.size >= 2:
+                        x_curve = np.interp(curve_chain, ch_u, xx_u)
+                        y_curve = np.interp(curve_chain, ch_u, yy_u)
+
+            curve_rows = []
+            for i, (s, x, y, z) in enumerate(zip(curve_chain, x_curve, y_curve, curve_elev)):
+                curve_rows.append({
+                    "index": int(i),
+                    "chainage_m": float(s),
+                    "x": (float(x) if np.isfinite(x) else None),
+                    "y": (float(y) if np.isfinite(y) else None),
+                    "z": float(z),
+                })
+            nurbs_curve_payload = {
+                "line_id": line_id,
+                "curve_method": "nurbs",
+                "count": int(len(curve_rows)),
+                "points": curve_rows,
+            }
+            curve_json = os.path.join(curve_dir, f"nurbs_{line_id}.json")
+            with open(curve_json, "w", encoding="utf-8") as f:
+                json.dump(nurbs_curve_payload, f, ensure_ascii=False, indent=2)
+
+            # 2) group_Line_n__(n_m).json -> group ID, start, end
+            table_groups = self._read_groups_from_table()
+            group_rows = []
+            for g in (table_groups or []):
+                group_rows.append({
+                    "group_id": str(g.get("id", "")),
+                    "start": float(g.get("start")),
+                    "end": float(g.get("end")),
+                })
+            group_payload = {
+                "line_id": line_id,
+                "count": int(len(group_rows)),
+                "groups": group_rows,
+            }
+            group_json = os.path.join(curve_dir, f"group_{line_id}.json")
+            with open(group_json, "w", encoding="utf-8") as f:
+                json.dump(group_payload, f, ensure_ascii=False, indent=2)
+
+            # 3) nurbs_info_Line_n__(n_m).json -> NURBS panel info
+            cps = np.asarray(params.get("control_points", []), dtype=float)
+            ww = np.asarray(params.get("weights", []), dtype=float)
+            if ww.ndim != 1 or ww.size != cps.shape[0]:
+                ww = np.ones(cps.shape[0], dtype=float)
+            cp_rows = []
+            for i in range(cps.shape[0]):
+                cp_rows.append({
+                    "cp_index": int(i),
+                    "chainage_m": float(cps[i, 0]),
+                    "elev_m": float(cps[i, 1]),
+                    "weight": float(ww[i]),
+                })
+            nurbs_info_payload = {
+                "line_id": line_id,
+                "control_points_count": int(cps.shape[0]),
+                "degree": int(params.get("degree", 3)),
+                "control_points": cp_rows,
+            }
+            nurbs_info_json = os.path.join(curve_dir, f"nurbs_info_{line_id}.json")
+            with open(nurbs_info_json, "w", encoding="utf-8") as f:
+                json.dump(nurbs_info_payload, f, ensure_ascii=False, indent=2)
+
             self._ok(f"[UI3] Saved NURBS: {path}")
             self._log(f"[UI3] Saved NURBS params: {jpath}")
+            self._log(f"[UI3] Saved NURBS curve: {curve_json}")
+            self._log(f"[UI3] Saved group table: {group_json}")
+            self._log(f"[UI3] Saved NURBS info: {nurbs_info_json}")
 
     def _on_auto_group(self) -> None:
         """Sinh group tự động như UI3, lưu JSON, cập nhật bảng, và vẽ guide (không re-render)."""
@@ -1929,6 +2091,11 @@ class CurveAnalyzeTab(QWidget):
         os.makedirs(path, exist_ok=True)
         return path
 
+    def _curve_dir(self) -> str:
+        path = os.path.join(self._ui3_run_dir(), "curve")
+        os.makedirs(path, exist_ok=True)
+        return path
+
     def _line_id_current(self) -> str:
         # dùng id ổn định để tên file không đụng nhau (ưu tiên tên trong combo)
         if hasattr(self, "line_combo"):
@@ -2178,8 +2345,66 @@ class CurveAnalyzeTab(QWidget):
         except Exception as e:
             self._warn(f"[UI3] Cannot sync NURBS from groups: {e}")
 
+    def _set_group_chainage_cell(self, row: int, col: int, val: float) -> None:
+        item = self.group_table.item(row, col)
+        if item is None:
+            item = QTableWidgetItem("")
+            self.group_table.setItem(row, col, item)
+        item.setText(f"{float(val):.3f}")
+
+    def _nearest_group_row(self, row: int, step: int) -> Optional[int]:
+        r = int(row) + int(step)
+        while 0 <= r < self.group_table.rowCount():
+            gid_item = self.group_table.item(r, 0)
+            gid = gid_item.text().strip().upper() if gid_item and gid_item.text() else ""
+            if gid != "UNGROUPED":
+                return r
+            r += int(step)
+        return None
+
+    def _link_adjacent_group_boundaries(self, row: int, col: int) -> None:
+        if col not in (1, 2):
+            return
+        gid_item = self.group_table.item(row, 0)
+        gid = gid_item.text().strip().upper() if gid_item and gid_item.text() else ""
+        if gid == "UNGROUPED":
+            return
+        cur_item = self.group_table.item(row, col)
+        txt = cur_item.text().strip() if cur_item and cur_item.text() else ""
+        if not txt:
+            return
+        try:
+            val = float(txt)
+        except Exception:
+            return
+
+        # Keep the edited value normalized.
+        self._set_group_chainage_cell(row, col, val)
+
+        # Enforce shared boundary: end(i) == start(i+1).
+        if col == 2:  # end changed -> next start
+            nxt = self._nearest_group_row(row, +1)
+            if nxt is not None:
+                self._set_group_chainage_cell(nxt, 1, val)
+        elif col == 1:  # start changed -> previous end
+            prv = self._nearest_group_row(row, -1)
+            if prv is not None:
+                self._set_group_chainage_cell(prv, 2, val)
+
     def _on_group_table_item_changed(self, _item) -> None:
+        if self._group_table_updating:
+            return
+        changed_group_chainage = bool(_item is not None and _item.column() in (1, 2))
+        if _item is not None and _item.column() in (1, 2):
+            self._group_table_updating = True
+            try:
+                self._link_adjacent_group_boundaries(_item.row(), _item.column())
+            finally:
+                self._group_table_updating = False
         self._sync_nurbs_defaults_from_group_table()
+        # Re-render immediately so dashed group boundaries update with table edits.
+        if changed_group_chainage and self._active_prof:
+            self._render_current_safe()
 
     def _on_add_group(self):
         r = self._find_ungrouped_row()

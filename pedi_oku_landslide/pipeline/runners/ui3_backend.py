@@ -492,7 +492,7 @@ def render_profile_png(
 ) -> Tuple[str, Optional[str]]:
 
     if not prof:
-        return "[Γ£ù] Empty profile", None
+        return "Empty profile", None
 
     # UI3 global font scale: shrink all legend/axis/tick text to 80%
     font_scale = 0.8
@@ -500,6 +500,8 @@ def render_profile_png(
     label_font = max(1, int(round(label_font * font_scale)))
     tick_font = max(1, int(round(tick_font * font_scale)))
     legend_font = max(1, int(round(legend_font * font_scale)))
+    # Additional 10% reduction for legend fonts.
+    legend_font = max(1, int(round(legend_font * 0.9)))
 
     def _dump_ground_json(out_png_path: str, prof_dict: Dict[str, np.ndarray]) -> None:
         try:
@@ -805,6 +807,29 @@ def render_profile_png(
                 for x in bounds:
                     ax.axvline(x, **vkw)
                     ax2.axvline(x, **vkw)
+                # Number group intervals between adjacent dashed boundaries.
+                try:
+                    import matplotlib.transforms as mtransforms
+                    trans = mtransforms.blended_transform_factory(ax.transData, ax.transAxes)
+                    label_fs = max(8, int(round(tick_font * 0.9)))
+                    idx = 1
+                    for x0, x1 in zip(bounds[:-1], bounds[1:]):
+                        if not (np.isfinite(x0) and np.isfinite(x1)):
+                            continue
+                        if x1 <= x0:
+                            continue
+                        xm = 0.5 * (x0 + x1)
+                        ax.text(
+                            float(xm), 0.995, str(idx),
+                            transform=trans,
+                            ha="center", va="top",
+                            fontsize=label_fs,
+                            color="#333333",
+                            zorder=60,
+                        )
+                        idx += 1
+                except Exception:
+                    pass
         # --- draw slip curve if requested ---
         # --- draw slip curve if requested (make it pop on top of vectors) ---
         # --- draw slip curve if requested (robust overlay) ---
@@ -931,6 +956,13 @@ def render_profile_png(
         if user_x_fixed:
             ax.set_xlim(float(x_user_min), float(x_user_max))
             ax2.set_xlim(float(x_user_min), float(x_user_max))
+        # Force chainage major ticks every 10 m on both panels.
+        try:
+            from matplotlib.ticker import MultipleLocator
+            ax.xaxis.set_major_locator(MultipleLocator(10.0))
+            ax2.xaxis.set_major_locator(MultipleLocator(10.0))
+        except Exception:
+            pass
         # --- OVERLAY SLIP CURVES
         if overlay_curves:
             for item in overlay_curves:
@@ -1747,63 +1779,3 @@ def fit_nurbs_segmented_curve(
         return {"chain": [], "elev": []}
 
     return {"chain": np.asarray(out_s, dtype=float), "elev": np.asarray(out_z, dtype=float)}
-
-"""
-def fit_bezier_with_intersection(chain, elevg,
-                                 target_s, target_z,
-                                 sA, sB,                 
-                                 pass_point,             
-                                 c0=0.30, c1=0.30,
-                                 clearance=0.12,
-                                 hard_weight=2000.0):
-    sA, sB = float(sA), float(sB)
-    if not np.isfinite(sA) or not np.isfinite(sB) or sB <= sA:
-        return {"chain": [], "elev": []}
-    L = sB - sA
-
-    # Endpoints tr├¬n ground
-    zA = float(np.interp(sA, chain, elevg))
-    zB = float(np.interp(sB, chain, elevg))
-
-    # Control x cß╗æ ─æß╗ïnh theo tß╗ë lß╗ç
-    P0x, P3x = sA, sB
-    P1x, P2x = sA + c0*L, sB - c1*L
-
-    # Dß╗» liß╗çu mß╗Ñc ti├¬u trong [sA,sB]
-    ts = np.asarray(target_s, float)
-    tz = np.asarray(target_z, float)
-    m  = (ts >= sA) & (ts <= sB) & np.isfinite(tz)
-    ts, tz = ts[m], tz[m]
-    if ts.size < 6:
-        return {"chain": ts, "elev": tz}
-
-    u  = (ts - sA)/L
-    B0 = (1-u)**3
-    B1 = 3*(1-u)**2*u
-    B2 = 3*(1-u)*u**2
-    B3 = u**3
-    A   = np.vstack([B1, B2]).T
-    rhs = tz - (B0*zA + B3*zB)
-
-    # r├áng buß╗Öc (sM,zM)
-    sM, zM = float(pass_point[0]), float(pass_point[1])
-    uM = np.clip((sM - sA)/L, 0.0, 1.0)
-    b0 = (1-uM)**3; b1 = 3*(1-uM)**2*uM; b2 = 3*(1-uM)*uM**2; b3 = uM**3
-    A_aug   = np.vstack([A, [hard_weight*b1, hard_weight*b2]])
-    rhs_aug = np.hstack([rhs, hard_weight*(zM - (b0*zA + b3*zB))])
-
-    z1, z2 = np.linalg.lstsq(A_aug, rhs_aug, rcond=None)[0]
-
-    # Mß║½u h├│a
-    uu = np.linspace(0, 1, max(200, int(L*5)))
-    C0 = (1-uu)**3; C1 = 3*(1-uu)**2*uu; C2 = 3*(1-uu)*uu**2; C3 = uu**3
-    s_bez = C0*P0x + C1*P1x + C2*P2x + C3*P3x
-    z_bez = C0*zA  + C1*z1  + C2*z2  + C3*zB
-
-    zg = np.interp(s_bez, chain, elevg)
-    if z_bez.size > 2:
-        z_bez[1:-1] = np.minimum(z_bez[1:-1], zg[1:-1] - float(clearance))
-    z_bez[0]  = zg[0]
-    z_bez[-1] = zg[-1]
-    return {"chain": s_bez, "elev": z_bez}
-"""
