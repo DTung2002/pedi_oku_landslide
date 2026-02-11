@@ -15,7 +15,7 @@ from PyQt5.QtWidgets import (
     QTableWidget, QTableWidgetItem, QTextEdit, QSplitter, QSlider,
     QGraphicsPixmapItem, QGraphicsLineItem, QGraphicsEllipseItem, QGraphicsPathItem,
     QGraphicsSimpleTextItem, QGraphicsView, QMessageBox, QDialog, QDialogButtonBox,
-    QSpinBox, QDoubleSpinBox, QGridLayout, QSizePolicy,
+    QSpinBox, QDoubleSpinBox, QGridLayout, QSizePolicy, QComboBox,
 )
 
 from .ui.ui1_viewer import UI1Viewer
@@ -774,10 +774,12 @@ class SectionSelectionTab(QWidget):
         self._mask: Optional[np.ndarray] = None  # uint8 0/1 aligned to dz grid
         self._dem_path: Optional[str] = None
 
-        # vector drawing params (sync với UI1)
+        # vector drawing params (UI2-local, độc lập UI1)
         self._vec_step: int = 25
-        self._vec_scale: float = 0.5
+        self._vec_scale: float = 1.0
         self._vec_size_pct: int = 100
+        self._vec_opacity_pct: int = 100
+        self._vec_color: str = "blue"
         self._vec_pen_base: int = 1
         self._vec_arrow_base: float = 12.0
 
@@ -805,11 +807,9 @@ class SectionSelectionTab(QWidget):
         self._ui1_dir = os.path.join(run_dir, "ui1")
         self._ui2_dir = os.path.join(run_dir, "ui2")
 
-        # cập nhật thông số vector nếu được truyền từ UI1
-        if vec_step is not None:
-            self._vec_step = int(vec_step)
-        if vec_scale is not None:
-            self._vec_scale = float(vec_scale)
+        # UI2 dùng bộ thông số Vector Display riêng; không sync từ UI1.
+        _ = vec_step
+        _ = vec_scale
 
         # ✨ lưu vào các thuộc tính public để các hàm khác đọc
         self.project = self._ctx_project
@@ -878,28 +878,99 @@ class SectionSelectionTab(QWidget):
         lbl_gf = QLabel("Grid font size:")
         lbl_hs = QLabel("Hillshade opacity:")
         lbl_hm = QLabel("Heatmap opacity:")
-        lbl_vs = QLabel("Vector size:")
-        lbl_vc = QLabel("Vectors opacity:")
         ll.setColumnMinimumWidth(0, max(
             lbl_gf.sizeHint().width(),
             lbl_hs.sizeHint().width(),
             lbl_hm.sizeHint().width(),
-            lbl_vs.sizeHint().width(),
-            lbl_vc.sizeHint().width(),
         ))
 
         self.sld_grid_font = QSlider(Qt.Horizontal); self.sld_grid_font.setRange(8, 72); self.sld_grid_font.setValue(12)
         self.sld_hill = QSlider(Qt.Horizontal); self.sld_hill.setRange(0, 100); self.sld_hill.setValue(100)
         self.sld_heat = QSlider(Qt.Horizontal); self.sld_heat.setRange(0, 100); self.sld_heat.setValue(75)
-        self.sld_vec_size = QSlider(Qt.Horizontal); self.sld_vec_size.setRange(50, 200); self.sld_vec_size.setValue(50)
-        self.sld_vec = QSlider(Qt.Horizontal); self.sld_vec.setRange(0, 100); self.sld_vec.setValue(100)
 
         ll.addWidget(lbl_gf, 0, 0); ll.addWidget(self.sld_grid_font, 0, 1)
         ll.addWidget(lbl_hs, 1, 0); ll.addWidget(self.sld_hill, 1, 1)
         ll.addWidget(lbl_hm, 2, 0); ll.addWidget(self.sld_heat, 2, 1)
-        ll.addWidget(lbl_vs, 3, 0); ll.addWidget(self.sld_vec_size, 3, 1)
-        ll.addWidget(lbl_vc, 4, 0); ll.addWidget(self.sld_vec, 4, 1)
         left_lo.addWidget(grp_layers)
+
+        grp_vec = QGroupBox("Vector Display"); vvl = QVBoxLayout(grp_vec)
+        grid_vec_top = QGridLayout()
+        grid_vec_top.setHorizontalSpacing(8)
+        grid_vec_top.setVerticalSpacing(6)
+        grid_vec_top.setColumnStretch(1, 1)
+        grid_vec_top.setColumnStretch(3, 1)
+        grid_vec_top.setColumnStretch(5, 1)
+
+        lbl_step = QLabel("Step:")
+        lbl_scale = QLabel("Scale:")
+        lbl_color = QLabel("Color:")
+        lbl_size = QLabel("Size:")
+        lbl_opacity = QLabel("Opacity:")
+
+        self.spin_vec_step = QSpinBox()
+        self.spin_vec_step.setRange(1, 200)
+        self.spin_vec_step.setValue(self._vec_step)
+        self.spin_vec_step.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        self.spin_vec_scale = QDoubleSpinBox()
+        self.spin_vec_scale.setRange(0.01, 10.0)
+        self.spin_vec_scale.setSingleStep(1.0)
+        self.spin_vec_scale.setValue(self._vec_scale)
+        self.spin_vec_scale.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        self.combo_vec_color = QComboBox()
+        self.combo_vec_color.addItems(["Blue", "Red", "Green", "White", "Yellow", "Magenta"])
+        self.combo_vec_color.setCurrentText("Blue")
+        self.combo_vec_color.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        self.sld_vec_size = QSlider(Qt.Horizontal)
+        self.sld_vec_size.setRange(80, 500)
+        self.sld_vec_size.setValue(self._vec_size_pct)
+        self.sld_vec_size.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        self.sld_vec_opacity = QSlider(Qt.Horizontal)
+        self.sld_vec_opacity.setRange(0, 100)
+        self.sld_vec_opacity.setValue(self._vec_opacity_pct)
+        self.sld_vec_opacity.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        label_col_w = max(
+            lbl_step.sizeHint().width(),
+            lbl_scale.sizeHint().width(),
+            lbl_color.sizeHint().width(),
+        )
+        for col in (0, 2, 4):
+            grid_vec_top.setColumnMinimumWidth(col, label_col_w)
+        input_min_w = max(
+            self.spin_vec_step.sizeHint().width(),
+            self.spin_vec_scale.sizeHint().width(),
+            self.combo_vec_color.sizeHint().width(),
+        )
+        for w in (self.spin_vec_step, self.spin_vec_scale, self.combo_vec_color):
+            w.setMinimumWidth(input_min_w)
+
+        grid_vec_top.addWidget(lbl_step, 0, 0)
+        grid_vec_top.addWidget(self.spin_vec_step, 0, 1)
+        grid_vec_top.addWidget(lbl_scale, 0, 2)
+        grid_vec_top.addWidget(self.spin_vec_scale, 0, 3)
+        grid_vec_top.addWidget(lbl_color, 0, 4)
+        grid_vec_top.addWidget(self.combo_vec_color, 0, 5)
+        vvl.addLayout(grid_vec_top)
+
+        grid_vec_sliders = QGridLayout()
+        grid_vec_sliders.setHorizontalSpacing(8)
+        grid_vec_sliders.setVerticalSpacing(6)
+        grid_vec_sliders.setColumnStretch(1, 1)
+        grid_vec_sliders.addWidget(lbl_size, 0, 0)
+        grid_vec_sliders.addWidget(self.sld_vec_size, 0, 1)
+        grid_vec_sliders.addWidget(lbl_opacity, 1, 0)
+        grid_vec_sliders.addWidget(self.sld_vec_opacity, 1, 1)
+        vvl.addLayout(grid_vec_sliders)
+
+        row_vec_btn = HBox()
+        self.btn_render_vectors = QPushButton("Render Vectors")
+        row_vec_btn.addWidget(self.btn_render_vectors, 1)
+        vvl.addLayout(row_vec_btn)
+        left_lo.addWidget(grp_vec)
 
         grp_secs = QGroupBox("Sections");
         sl = QVBoxLayout(grp_secs)
@@ -913,22 +984,17 @@ class SectionSelectionTab(QWidget):
         self.tbl.itemChanged.connect(self._on_table_item_changed)
         sl.addWidget(self.tbl)
 
-        # Hàng trên: Auto Line Generation + Preview + Clear (dàn đều chiều ngang)
-        row_top = HBox()
-        self.btn_auto = QPushButton("Auto Line Generation")
-        self.btn_prev = QPushButton("Preview Line")
+        # Một hàng nút thao tác Section: Auto Line, Draw Line, Clear All, Confirm
+        row_actions = HBox()
+        self.btn_auto = QPushButton("Auto Line")
+        self.btn_prev = QPushButton("Draw Line")
         self.btn_clear = QPushButton("Clear All")
+        self.btn_confirm = QPushButton("Confirm")
 
-        for b in (self.btn_auto, self.btn_prev, self.btn_clear):
-            # stretch=1 → 3 nút chia đều chiều ngang
-            row_top.addWidget(b, 1)
-        sl.addLayout(row_top)
-
-        # Hàng dưới: Confirm sections, nút kéo dài hết chiều ngang layout
-        row_confirm = HBox()
-        self.btn_confirm = QPushButton("Confirm sections")
-        row_confirm.addWidget(self.btn_confirm, 1)  # stretch=1 → full width
-        sl.addLayout(row_confirm)
+        for b in (self.btn_auto, self.btn_prev, self.btn_clear, self.btn_confirm):
+            # stretch=1 → 4 nút chia đều chiều ngang
+            row_actions.addWidget(b, 1)
+        sl.addLayout(row_actions)
 
         left_lo.addWidget(grp_secs)
 
@@ -1041,11 +1107,12 @@ class SectionSelectionTab(QWidget):
         # self.setStyleSheet(style)
 
     def _wire(self) -> None:
-        self.sld_vec_size.valueChanged.connect(self._on_vec_size_changed)
         self.sld_grid_font.valueChanged.connect(self.viewer.set_grid_font_size)
         self.sld_hill.valueChanged.connect(lambda v: self.viewer.set_hillshade_opacity(v / 100.0))
         self.sld_heat.valueChanged.connect(lambda v: self.viewer.set_heatmap_opacity(v / 100.0))
-        self.sld_vec.valueChanged.connect(lambda v: self.viewer.set_vector_opacity(v / 100.0))
+        self.sld_vec_size.valueChanged.connect(self._on_vec_size_changed)
+        self.sld_vec_opacity.valueChanged.connect(self._on_vec_opacity_changed)
+        self.btn_render_vectors.clicked.connect(self._on_render_vectors)
         self.btn_clear.clicked.connect(self._on_clear)
         self.btn_prev.clicked.connect(self._on_preview)
         self.btn_confirm.clicked.connect(self._on_confirm_sections)
@@ -1054,10 +1121,35 @@ class SectionSelectionTab(QWidget):
         self.viewer.sectionPicked.connect(self._on_section_picked)
         self.viewer.cursorMoved.connect(lambda x, y: self.lbl_cursor.setText(f"Cursor: X={x:.2f}, Y={y:.2f}"))
 
+    def _on_render_vectors(self) -> None:
+        self._vec_step = int(self.spin_vec_step.value())
+        self._vec_scale = float(self.spin_vec_scale.value())
+        self._vec_size_pct = int(self.sld_vec_size.value())
+        self._vec_opacity_pct = int(self.sld_vec_opacity.value())
+        self._vec_color = str(self.combo_vec_color.currentText() or "Blue").strip().lower()
+
+        if not self._ctx_ready:
+            self._info("[UI2] Vector display updated (no active context yet).")
+            return
+
+        self._load_dx_dy_and_draw(self._ui1_dir, step=self._vec_step, scale=self._vec_scale)
+        self._ok(
+            f"[UI2] Vectors rendered (step={self._vec_step}, scale={self._vec_scale:.2f}, "
+            f"size={self._vec_size_pct}%, opacity={self._vec_opacity_pct}%, color={self._vec_color})."
+        )
+
     def _on_vec_size_changed(self, v: int) -> None:
         self._vec_size_pct = int(v)
+        # đồng bộ các input hiện tại trước khi redraw
+        self._vec_step = int(self.spin_vec_step.value())
+        self._vec_scale = float(self.spin_vec_scale.value())
+        self._vec_color = str(self.combo_vec_color.currentText() or "Blue").strip().lower()
         if self._ctx_ready:
             self._load_dx_dy_and_draw(self._ui1_dir, step=self._vec_step, scale=self._vec_scale)
+
+    def _on_vec_opacity_changed(self, v: int) -> None:
+        self._vec_opacity_pct = int(v)
+        self.viewer.set_vector_opacity(float(self._vec_opacity_pct) / 100.0)
 
     # ---- core loading/drawing ----
     def _load_layers_and_show(self) -> None:
@@ -1162,7 +1254,7 @@ class SectionSelectionTab(QWidget):
         )
         self.viewer.set_heatmap_rgba(rgba, alpha)
 
-        # --- 7) Vẽ vector (dùng dx/dy vừa đọc) theo tham số từ UI1 ---
+        # --- 7) Vẽ vector (dùng dx/dy vừa đọc) theo tham số Vector Display của UI2 ---
         self._load_dx_dy_and_draw(
             ui1,
             step=self._vec_step,
@@ -1262,49 +1354,68 @@ class SectionSelectionTab(QWidget):
         pix_h = float(abs(self._tr.e)) if self._tr is not None else 1.0
 
         # scale càng lớn → vector càng dài, giống UI1
+        # size_pct cũng scale theo cả chiều dài + chiều ngang (to lên đồng đều)
+        size_mul = max(0.2, float(self._vec_size_pct) / 100.0)
         k = 0.4  # hệ số hiệu chỉnh, có thể chỉnh 0.3–0.6 tuỳ mắt nhìn
-        vx_pix = (dx / (pix_w + 1e-9)) * scale * k
-        vy_pix = (-dy / (pix_h + 1e-9)) * scale * k  # y pixel hướng xuống
+        vx_pix = (dx / (pix_w + 1e-9)) * scale * k * size_mul
+        vy_pix = (-dy / (pix_h + 1e-9)) * scale * k * size_mul  # y pixel hướng xuống
 
         pts_pix = np.stack([xs, ys], axis=1).astype("float32")
         vec_pix = np.stack([vx_pix, vy_pix], axis=1).astype("float32")
-        # vẽ vector có mũi tên — giống UI1
-        # vẽ vector màu magenta
-        pen = QPen(QColor("#ffffff"))  # hoặc QColor(191, 0, 255)
-        pen.setCosmetic(True)
-        pen.setWidth(max(1, int(round(self._vec_pen_base * (self._vec_size_pct / 100.0)))))
+        # vẽ vector liền khối (thân + đầu mũi tên là một polygon)
+        color_name = str(getattr(self, "_vec_color", "blue") or "blue").strip().lower()
+        color = QColor(color_name)
+        if not color.isValid():
+            color = QColor("blue")
+        shaft_half_w = max(1.2, float(self._vec_pen_base) * 0.5 * size_mul)
+        base_head_len = max(3.0, shaft_half_w * 3.2)
+        base_head_half_w = max(2.0, shaft_half_w * 2.75)
 
         for (x, y), (vx, vy) in zip(pts_pix, vec_pix):
             # đảo hướng y vì raster y+ xuống
             end_x = float(x + vx)
             end_y = float(y - vy)
-            # thân vector
-            line = QGraphicsLineItem(float(x), float(y), end_x, end_y)
-            line.setPen(pen)
-            line.setZValue(2)
-            self.viewer.scene.addItem(line)
-            self.viewer._vec_items.append(line)
+            dxv = end_x - float(x)
+            dyv = end_y - float(y)
+            length = float(np.hypot(dxv, dyv))
+            if not np.isfinite(length) or length <= 1e-6:
+                continue
 
-            # mũi tên (tam giác nhỏ)
-            arr_len = float(self._vec_arrow_base) * (self._vec_size_pct / 100.0)
-            arr_ang = np.deg2rad(45)
-            dx, dy = end_x - x, end_y - y
-            ang = np.arctan2(dy, dx)
-            p1 = QPointF(end_x - arr_len * np.cos(ang - arr_ang),
-                         end_y - arr_len * np.sin(ang - arr_ang))
-            p2 = QPointF(end_x - arr_len * np.cos(ang + arr_ang),
-                         end_y - arr_len * np.sin(ang + arr_ang))
-            arrow = QGraphicsPathItem()
-            path = QPainterPath(QPointF(end_x, end_y))
+            ux = dxv / length
+            uy = dyv / length
+            nx = -uy
+            ny = ux
+
+            head_len = min(base_head_len, length * 0.45); head_len = max(head_len, shaft_half_w * 1.8)
+            head_half_w = max(base_head_half_w, shaft_half_w * 1.05)
+            neck_x = end_x - ux * head_len
+            neck_y = end_y - uy * head_len
+
+            p0 = QPointF(float(x + nx * shaft_half_w), float(y + ny * shaft_half_w))
+            p1 = QPointF(neck_x + nx * shaft_half_w, neck_y + ny * shaft_half_w)
+            p2 = QPointF(neck_x + nx * head_half_w, neck_y + ny * head_half_w)
+            p3 = QPointF(end_x, end_y)
+            p4 = QPointF(neck_x - nx * head_half_w, neck_y - ny * head_half_w)
+            p5 = QPointF(neck_x - nx * shaft_half_w, neck_y - ny * shaft_half_w)
+            p6 = QPointF(float(x - nx * shaft_half_w), float(y - ny * shaft_half_w))
+
+            path = QPainterPath(p0)
             path.lineTo(p1)
             path.lineTo(p2)
-            path.lineTo(QPointF(end_x, end_y))
-            arrow.setPath(path)
+            path.lineTo(p3)
+            path.lineTo(p4)
+            path.lineTo(p5)
+            path.lineTo(p6)
+            path.closeSubpath()
+
+            arrow = QGraphicsPathItem(path)
             arrow.setPen(QPen(Qt.NoPen))
-            arrow.setBrush(QBrush(QColor("#ffffff")))  # cùng màu với thân
+            arrow.setBrush(QBrush(color))
             arrow.setZValue(2)
             self.viewer.scene.addItem(arrow)
             self.viewer._vec_items.append(arrow)
+
+        self.viewer.set_vector_opacity(float(self._vec_opacity_pct) / 100.0)
 
     # ---- section picking ----
     def _on_section_picked(self, x1: float, y1: float, x2: float, y2: float) -> None:
@@ -1782,7 +1893,20 @@ class SectionSelectionTab(QWidget):
 
         # reset vector params về mặc định
         self._vec_step = 25
-        self._vec_scale = 0.5
+        self._vec_scale = 1.0
+        self._vec_size_pct = 100
+        self._vec_opacity_pct = 100
+        self._vec_color = "blue"
+        if hasattr(self, "spin_vec_step"):
+            self.spin_vec_step.setValue(25)
+        if hasattr(self, "spin_vec_scale"):
+            self.spin_vec_scale.setValue(1.0)
+        if hasattr(self, "combo_vec_color"):
+            self.combo_vec_color.setCurrentText("Blue")
+        if hasattr(self, "sld_vec_size"):
+            self.sld_vec_size.setValue(100)
+        if hasattr(self, "sld_vec_opacity"):
+            self.sld_vec_opacity.setValue(100)
 
         # Xoá sections & line
         if hasattr(self, "tbl"):

@@ -1,10 +1,10 @@
 # pedi_oku_landslide/ui/views/analyze_tab.py
 from typing import Optional
-from PyQt5.QtCore import QObject, QThread, pyqtSignal, Qt
+from PyQt5.QtCore import QObject, QThread, pyqtSignal, Qt, QTimer
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QMessageBox, QGroupBox, QTextEdit, QSplitter, QSizePolicy,
-    QDoubleSpinBox, QComboBox, QSpinBox, QFileDialog, QScrollArea, QGridLayout
+    QDoubleSpinBox, QComboBox, QSpinBox, QFileDialog, QScrollArea, QGridLayout, QSlider
 )
 import os, sys
 from datetime import datetime
@@ -36,6 +36,10 @@ class AnalyzeTab(QWidget):
         self._left_min_w = 380
         self._left_default_w = 490
         self._pending_init_splitter = True
+        self._vec_live_timer = QTimer(self)
+        self._vec_live_timer.setSingleShot(True)
+        self._vec_live_timer.setInterval(80)
+        self._vec_live_timer.timeout.connect(self._on_vec_live_tick)
         self._build_ui()
 
     # ---------- UI ----------
@@ -180,19 +184,21 @@ class AnalyzeTab(QWidget):
         grid_detect.addWidget(self.spin_detect_thr, 2, 1)
         grid_detect.addWidget(self.btn_detect, 2, 2)
         lay_detect.addLayout(grid_detect)
-        # ---- Vectors Adjustment ----
-        grp_vectors = QGroupBox("Vectors Adjustment")
+        # ---- Vector Display ----
+        grp_vectors = QGroupBox("Vector Display")
         lay_vectors = QVBoxLayout(grp_vectors)
-        grid_vec = QGridLayout()
-        grid_vec.setHorizontalSpacing(8)
-        grid_vec.setVerticalSpacing(6)
-        grid_vec.setColumnStretch(1, 1)
-        grid_vec.setColumnStretch(3, 1)
+        grid_vec_top = QGridLayout()
+        grid_vec_top.setHorizontalSpacing(8)
+        grid_vec_top.setVerticalSpacing(6)
+        grid_vec_top.setColumnStretch(1, 1)
+        grid_vec_top.setColumnStretch(3, 1)
+        grid_vec_top.setColumnStretch(5, 1)
 
         lab_step = QLabel("Step:")
         lab_scale = QLabel("Scale:")
-        lab_size = QLabel("Size:")
         lab_color = QLabel("Color:")
+        lab_size = QLabel("Size:")
+        lab_opacity = QLabel("Opacity:")
 
         self.spin_vec_step = QSpinBox()
         self.spin_vec_step.setRange(1, 200)
@@ -204,29 +210,54 @@ class AnalyzeTab(QWidget):
         self.spin_vec_scale.setValue(1.0)  # theo mét
         self.spin_vec_scale.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
-        self.spin_vec_width = QDoubleSpinBox()
-        self.spin_vec_width.setDecimals(4)
-        self.spin_vec_width.setRange(0.0002, 0.02)
-        self.spin_vec_width.setSingleStep(0.0002)
-        self.spin_vec_width.setValue(0.001)
-        self.spin_vec_width.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        # Size slider giống UI2
+        self.sld_vec_size = QSlider(Qt.Horizontal)
+        self.sld_vec_size.setRange(80, 500)
+        self.sld_vec_size.setValue(100)
+        self.sld_vec_size.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        # Opacity slider giống UI2
+        self.sld_vec_opacity = QSlider(Qt.Horizontal)
+        self.sld_vec_opacity.setRange(0, 100)
+        self.sld_vec_opacity.setValue(100)
+        self.sld_vec_opacity.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.sld_vec_size.valueChanged.connect(lambda _v: self._on_vec_display_slider_changed())
+        self.sld_vec_opacity.valueChanged.connect(lambda _v: self._on_vec_display_slider_changed())
 
         self.combo_vec_color = QComboBox()
-        self.combo_vec_color.addItems(["Blue", "Red", "Green", "Black", "Yellow", "Magenta"])
+        self.combo_vec_color.addItems(["Blue", "Red", "Green", "White", "Yellow", "Magenta"])
         self.combo_vec_color.setCurrentText("Blue")
         self.combo_vec_color.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
-        # Row 1: Step + Scale
-        grid_vec.addWidget(lab_step, 0, 0)
-        grid_vec.addWidget(self.spin_vec_step, 0, 1)
-        grid_vec.addWidget(lab_scale, 0, 2)
-        grid_vec.addWidget(self.spin_vec_scale, 0, 3)
-        # Row 2: Size + Color
-        grid_vec.addWidget(lab_size, 1, 0)
-        grid_vec.addWidget(self.spin_vec_width, 1, 1)
-        grid_vec.addWidget(lab_color, 1, 2)
-        grid_vec.addWidget(self.combo_vec_color, 1, 3)
-        lay_vectors.addLayout(grid_vec)
+        # Step/Scale/Color trên 1 hàng, input width bằng nhau
+        label_col_w = max(lab_step.sizeHint().width(), lab_scale.sizeHint().width(), lab_color.sizeHint().width())
+        for col in (0, 2, 4):
+            grid_vec_top.setColumnMinimumWidth(col, label_col_w)
+        input_min_w = max(
+            self.spin_vec_step.sizeHint().width(),
+            self.spin_vec_scale.sizeHint().width(),
+            self.combo_vec_color.sizeHint().width(),
+        )
+        for w in (self.spin_vec_step, self.spin_vec_scale, self.combo_vec_color):
+            w.setMinimumWidth(input_min_w)
+
+        grid_vec_top.addWidget(lab_step, 0, 0)
+        grid_vec_top.addWidget(self.spin_vec_step, 0, 1)
+        grid_vec_top.addWidget(lab_scale, 0, 2)
+        grid_vec_top.addWidget(self.spin_vec_scale, 0, 3)
+        grid_vec_top.addWidget(lab_color, 0, 4)
+        grid_vec_top.addWidget(self.combo_vec_color, 0, 5)
+        lay_vectors.addLayout(grid_vec_top)
+
+        grid_vec_sliders = QGridLayout()
+        grid_vec_sliders.setHorizontalSpacing(8)
+        grid_vec_sliders.setVerticalSpacing(6)
+        grid_vec_sliders.setColumnStretch(1, 1)
+        grid_vec_sliders.addWidget(lab_size, 0, 0)
+        grid_vec_sliders.addWidget(self.sld_vec_size, 0, 1)
+        grid_vec_sliders.addWidget(lab_opacity, 1, 0)
+        grid_vec_sliders.addWidget(self.sld_vec_opacity, 1, 1)
+        lay_vectors.addLayout(grid_vec_sliders)
 
         row_v3 = QHBoxLayout()
         self.btn_vectors = QPushButton("Render Vectors")
@@ -645,15 +676,18 @@ class AnalyzeTab(QWidget):
         except Exception as e:
             self._err(f"Detect error: {e}")
 
-    def _on_render_vectors(self) -> None:
+    def _on_render_vectors(self, quiet: bool = False, emit_signal: bool = True) -> None:
         if not self._last_run_dir:
-            self._warn("Please run 'Confirm Input' first.")
+            if not quiet:
+                self._warn("Please run 'Confirm Input' first.")
             return
         try:
             step = int(self.spin_vec_step.value())
             scale = float(self.spin_vec_scale.value())
             color = str(self.combo_vec_color.currentText())
-            width = float(self.spin_vec_width.value())
+            size_mul = max(0.2, float(self.sld_vec_size.value()) / 100.0)
+            width = 0.003 * size_mul
+            opacity = max(0.0, min(1.0, float(self.sld_vec_opacity.value()) / 100.0))
 
             # reconstruct ctx
             parts = os.path.normpath(self._last_run_dir).split(os.sep)
@@ -680,6 +714,7 @@ class AnalyzeTab(QWidget):
                 scale=scale,
                 vector_color=color,
                 vector_width=width,
+                vector_opacity=opacity,
             )
 
             # Hiển thị: trái = overlay (nếu có) hoặc dz, phải = vectors overlay
@@ -687,15 +722,33 @@ class AnalyzeTab(QWidget):
             left_img = overlay if os.path.exists(overlay) else os.path.join(ctx.out_ui1, "dz.png")
             self.viewer.show_pair(left_img, out["vectors_png"])
 
-            self._ok(f"Vectors rendered (step={step}, scale={scale}).")
+            if not quiet:
+                self._ok(
+                    f"Vectors rendered (step={step}, scale={scale}, "
+                    f"size={self.sld_vec_size.value()}%, opacity={self.sld_vec_opacity.value()}%)."
+                )
 
             # emit để MainWindow enable tab Section Selection
-            project = (self.edit_project.text() or "").strip()
-            run_label = (self.edit_runlabel.text() or "").strip()
-            self.vectors_rendered.emit(project, run_label, self._last_run_dir)
+            if emit_signal:
+                project = (self.edit_project.text() or "").strip()
+                run_label = (self.edit_runlabel.text() or "").strip()
+                self.vectors_rendered.emit(project, run_label, self._last_run_dir)
 
         except Exception as e:
-            self._err(f"Render vectors error: {e}")
+            if quiet:
+                self._append_status(f"WARN: Live render vectors skipped: {e}")
+            else:
+                self._err(f"Render vectors error: {e}")
+
+    def _on_vec_display_slider_changed(self) -> None:
+        if not self._last_run_dir:
+            return
+        if not hasattr(self, "btn_vectors") or not self.btn_vectors.isEnabled():
+            return
+        self._vec_live_timer.start()
+
+    def _on_vec_live_tick(self) -> None:
+        self._on_render_vectors(quiet=True, emit_signal=False)
 
     def _on_open_existing_run(self) -> None:
         """
@@ -845,6 +898,18 @@ class AnalyzeTab(QWidget):
             pass
         try:
             self.spin_vec_scale.setValue(1.0)
+        except Exception:
+            pass
+        try:
+            self.combo_vec_color.setCurrentText("Blue")
+        except Exception:
+            pass
+        try:
+            self.sld_vec_size.setValue(100)
+        except Exception:
+            pass
+        try:
+            self.sld_vec_opacity.setValue(100)
         except Exception:
             pass
 
