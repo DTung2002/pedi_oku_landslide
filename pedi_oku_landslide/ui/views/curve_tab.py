@@ -19,6 +19,7 @@ from typing import Tuple, List, Dict, Optional
 from pedi_oku_landslide.pipeline.runners.ui3_backend import (
     auto_paths, list_lines, compute_profile, render_profile_png,
     clamp_groups_to_slip, auto_group_profile_by_criteria, auto_group_profile,
+    auto_group_profile_by_theta_anchor,
     estimate_slip_curve, fit_bezier_smooth_curve, evaluate_nurbs_curve
 )
 from pedi_oku_landslide.pipeline.runners.ui3_backend import rdp_indices_from_profile, rdp_points_from_profile
@@ -314,7 +315,7 @@ class CurveAnalyzeTab(QWidget):
     @staticmethod
     def _curve_method_from_group_method(group_method: Optional[str]) -> str:
         gm = str(group_method or "").strip().lower()
-        if gm == "traditional":
+        if gm in ("traditional", "test"):
             return "nurbs"
         return "bezier"
 
@@ -354,7 +355,8 @@ class CurveAnalyzeTab(QWidget):
     ) -> None:
         cm = self._set_curve_method_for_line(line_id, curve_method or self._curve_method_by_line.get(line_id))
         try:
-            js = {"line": self.line_combo.currentText(), "groups": groups, "curve_method": cm}
+            groups_for_json = self._groups_with_median_theta(groups, prof)
+            js = {"line": self.line_combo.currentText(), "groups": groups_for_json, "curve_method": cm}
             if group_method:
                 js["group_method"] = str(group_method)
             with open(self._groups_json_path(), "w", encoding="utf-8") as f:
@@ -1111,6 +1113,28 @@ class CurveAnalyzeTab(QWidget):
             with open(group_json, "w", encoding="utf-8") as f:
                 json.dump(group_payload, f, ensure_ascii=False, indent=2)
 
+            # 2b) ui3/groups/Line_n__(n_m).json -> canonical groups file for UI3
+            groups_ui3_json = self._groups_json_path_for(line_id)
+            groups_for_json = self._groups_with_median_theta(table_groups, self._active_prof)
+            group_method = None
+            if os.path.exists(groups_ui3_json):
+                try:
+                    with open(groups_ui3_json, "r", encoding="utf-8") as f:
+                        old_js = json.load(f) or {}
+                    if old_js.get("group_method", None):
+                        group_method = str(old_js.get("group_method"))
+                except Exception:
+                    pass
+            groups_ui3_payload = {
+                "line": self.line_combo.currentText(),
+                "groups": groups_for_json,
+                "curve_method": self._get_curve_method_for_line(line_id),
+            }
+            if group_method:
+                groups_ui3_payload["group_method"] = group_method
+            with open(groups_ui3_json, "w", encoding="utf-8") as f:
+                json.dump(groups_ui3_payload, f, ensure_ascii=False, indent=2)
+
             # 3) nurbs_info_Line_n__(n_m).json -> NURBS panel info
             cps = np.asarray(params.get("control_points", []), dtype=float)
             ww = np.asarray(params.get("weights", []), dtype=float)
@@ -1138,6 +1162,7 @@ class CurveAnalyzeTab(QWidget):
             self._log(f"[UI3] Saved NURBS params: {jpath}")
             self._log(f"[UI3] Saved NURBS curve: {curve_json}")
             self._log(f"[UI3] Saved group table: {group_json}")
+            self._log(f"[UI3] Saved groups JSON: {groups_ui3_json}")
             self._log(f"[UI3] Saved NURBS info: {nurbs_info_json}")
 
     def _on_auto_group(self) -> None:
@@ -1174,7 +1199,7 @@ class CurveAnalyzeTab(QWidget):
             dlg.setStandardButtons(QMessageBox.NoButton)
             btn_traditional = dlg.addButton("Traditional", QMessageBox.ActionRole)
             btn_new = dlg.addButton("New", QMessageBox.ActionRole)
-            btn_cancel = dlg.addButton("Cancel", QMessageBox.RejectRole)
+            btn_test = dlg.addButton("Test", QMessageBox.ActionRole)
             dlg.exec_()
 
             clicked = dlg.clickedButton()
@@ -1189,9 +1214,12 @@ class CurveAnalyzeTab(QWidget):
                 self._log("[UI3] Auto Group method: New -> legacy criteria (curve: Bezier)")
                 groups = auto_group_profile(prof)
                 group_method = "new"
+            elif clicked_text == "Test":
+                self._log("[UI3] Auto Group method: Test -> theta anchor split (curve: NURBS)")
+                groups = auto_group_profile_by_theta_anchor(prof)
+                group_method = "test"
             else:
-                if clicked == btn_cancel:
-                    self._log("[UI3] Auto Group canceled.")
+                self._log("[UI3] Auto Group canceled.")
                 return
 
             groups = clamp_groups_to_slip(prof, groups)
@@ -1587,6 +1615,15 @@ class CurveAnalyzeTab(QWidget):
 
         left.addWidget(box_sel)
 
+        def _set_table_visible_rows(tbl: QTableWidget, rows: int, row_h: int) -> None:
+            """Fix table height to show exactly `rows` data rows (+ header)."""
+            tbl.verticalHeader().setDefaultSectionSize(int(row_h))
+            header_h = int(tbl.horizontalHeader().sizeHint().height())
+            frame_h = int(tbl.frameWidth()) * 2
+            total_h = header_h + frame_h + int(rows) * int(row_h) + 2
+            tbl.setMinimumHeight(total_h)
+            tbl.setMaximumHeight(total_h)
+
         # Group table
         box_grp = QGroupBox("Group")
         lg = QVBoxLayout(box_grp)
@@ -1599,7 +1636,7 @@ class CurveAnalyzeTab(QWidget):
         self.group_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self.group_table.cellDoubleClicked.connect(self._on_group_cell_double_clicked)
         self.group_table.itemChanged.connect(self._on_group_table_item_changed)
-        self.group_table.setMinimumHeight(220)
+        _set_table_visible_rows(self.group_table, rows=4, row_h=24)
         lg.addWidget(self.group_table)
 
         rowg = QHBoxLayout()
@@ -1645,8 +1682,7 @@ class CurveAnalyzeTab(QWidget):
         self.nurbs_table.verticalHeader().setVisible(False)
         self.nurbs_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.nurbs_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.nurbs_table.setMinimumHeight(120)
-        self.nurbs_table.setMaximumHeight(170)
+        _set_table_visible_rows(self.nurbs_table, rows=4, row_h=34)
         ln.addWidget(self.nurbs_table)
 
         row_nurbs_btn = QHBoxLayout()
@@ -2323,6 +2359,41 @@ class CurveAnalyzeTab(QWidget):
                 continue
         return None, None
 
+    @staticmethod
+    def _groups_with_median_theta(groups: List[dict], prof: Optional[dict]) -> List[dict]:
+        """Return groups enriched with median vector angle (theta_deg) per chainage range."""
+        out: List[dict] = []
+        if not groups:
+            return out
+
+        chain = np.asarray((prof or {}).get("chain", []), dtype=float)
+        theta = np.asarray((prof or {}).get("theta", []), dtype=float)
+        n = int(min(chain.size, theta.size))
+        if n > 0:
+            chain = chain[:n]
+            theta = theta[:n]
+
+        for g in groups:
+            gg = dict(g or {})
+            med_theta = None
+            try:
+                if n > 0:
+                    s = float(gg.get("start", gg.get("start_chainage", 0.0)))
+                    e = float(gg.get("end", gg.get("end_chainage", 0.0)))
+                    if e < s:
+                        s, e = e, s
+                    mask = (chain >= s) & (chain <= e)
+                    if np.any(mask):
+                        vals = theta[mask]
+                        vals = vals[np.isfinite(vals)]
+                        if vals.size > 0:
+                            med_theta = float(np.median(vals))
+            except Exception:
+                med_theta = None
+            gg["median_theta_deg"] = med_theta
+            out.append(gg)
+        return out
+
     def _save_vectors_json_for_line(self, line_id: str, prof: dict, groups: Optional[List[dict]]) -> Optional[str]:
         def _to_float(arr, i: int) -> Optional[float]:
             if arr is None:
@@ -2342,10 +2413,6 @@ class CurveAnalyzeTab(QWidget):
         y = np.asarray(prof.get("y", []), dtype=float) if prof.get("y", None) is not None else None
         elev = np.asarray(prof.get("elev", []), dtype=float) if prof.get("elev", None) is not None else None
         elev_s = np.asarray(prof.get("elev_s", []), dtype=float) if prof.get("elev_s", None) is not None else None
-        dx = np.asarray(prof.get("dx", []), dtype=float) if prof.get("dx", None) is not None else None
-        dy = np.asarray(prof.get("dy", []), dtype=float) if prof.get("dy", None) is not None else None
-        dz = np.asarray(prof.get("dz", []), dtype=float) if prof.get("dz", None) is not None else None
-        d_para = np.asarray(prof.get("d_para", []), dtype=float) if prof.get("d_para", None) is not None else None
         theta = np.asarray(prof.get("theta", []), dtype=float) if prof.get("theta", None) is not None else None
         slip_mask = np.asarray(prof.get("slip_mask", [])) if prof.get("slip_mask", None) is not None else None
 
@@ -2354,7 +2421,7 @@ class CurveAnalyzeTab(QWidget):
             ch = _to_float(chain, i)
             if ch is None:
                 continue
-            gid, gcolor = self._group_for_chainage(groups or [], ch)
+            gid, _ = self._group_for_chainage(groups or [], ch)
             in_slip = None
             if slip_mask is not None and i < slip_mask.size:
                 try:
@@ -2368,14 +2435,9 @@ class CurveAnalyzeTab(QWidget):
                 "y": _to_float(y, i),
                 "elev_raw_m": _to_float(elev, i),
                 "elev_s_m": _to_float(elev_s, i),
-                "dx_m": _to_float(dx, i),
-                "dy_m": _to_float(dy, i),
-                "dz_m": _to_float(dz, i),
-                "d_para_m": _to_float(d_para, i),
                 "theta_deg": _to_float(theta, i),
                 "in_slip_zone": in_slip,
                 "group_id": gid,
-                "group_color": gcolor,
             })
 
         payload = {
@@ -2820,6 +2882,7 @@ class CurveAnalyzeTab(QWidget):
             self._log("[!] No line.");
             return
         groups = self._read_group_table()
+        prof_for_stats = None
         # nếu trống → auto
         if not groups:
             # cần profile để auto
@@ -2845,6 +2908,7 @@ class CurveAnalyzeTab(QWidget):
                 slip_mask_path=self.slip_path, slip_only=True
             )
             if prof:
+                prof_for_stats = prof
                 groups = clamp_groups_to_slip(prof, groups)
         except Exception:
             pass
@@ -2852,7 +2916,8 @@ class CurveAnalyzeTab(QWidget):
         # save
         line_id = self._line_id_current()
         curve_method = self._get_curve_method_for_line(line_id)
-        js = {"line": self.line_combo.currentText(), "groups": groups, "curve_method": curve_method}
+        groups_for_json = self._groups_with_median_theta(groups, prof_for_stats)
+        js = {"line": self.line_combo.currentText(), "groups": groups_for_json, "curve_method": curve_method}
         try:
             with open(self._groups_json_path(), "w", encoding="utf-8") as f:
                 json.dump(js, f, ensure_ascii=False, indent=2)

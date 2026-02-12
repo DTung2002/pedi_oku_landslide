@@ -1305,6 +1305,95 @@ def auto_group_profile_by_criteria(
         }]
     return groups
 
+
+def auto_group_profile_by_theta_anchor(
+    prof: dict,
+    angle_threshold_deg: float = 20.0,
+    min_len_m: float = 2,
+) -> list:
+    """
+    Split groups by scanning vectors from left to right:
+    - Keep the first vector angle of the current group as anchor.
+    - When |theta(i) - theta(anchor)| > threshold, close current group and start a new one.
+    """
+    chain = np.asarray(prof.get("chain"), dtype=float)
+    theta = np.asarray(prof.get("theta"), dtype=float)
+    if chain.ndim != 1 or theta.ndim != 1:
+        return []
+    n = int(min(chain.size, theta.size))
+    if n < 2:
+        return []
+    chain = chain[:n]
+    theta = theta[:n]
+
+    if "slip_span" in prof and prof["slip_span"]:
+        smin, smax = map(float, prof["slip_span"])
+    else:
+        finite_all = np.isfinite(chain) & np.isfinite(theta)
+        if int(np.count_nonzero(finite_all)) < 2:
+            return []
+        smin = float(np.nanmin(chain[finite_all]))
+        smax = float(np.nanmax(chain[finite_all]))
+    if smax < smin:
+        smin, smax = smax, smin
+    if smax <= smin:
+        return []
+
+    mask = np.isfinite(chain) & np.isfinite(theta) & (chain >= smin) & (chain <= smax)
+    if int(np.count_nonzero(mask)) < 2:
+        return []
+
+    chain_v = chain[mask]
+    theta_v = theta[mask]
+    order = np.argsort(chain_v)
+    chain_v = chain_v[order]
+    theta_v = theta_v[order]
+    if chain_v.size < 2:
+        return []
+
+    boundaries = [float(chain_v[0])]
+    anchor_theta = float(theta_v[0])
+    thr = float(max(0.0, angle_threshold_deg))
+
+    for i in range(1, chain_v.size):
+        d = abs(((float(theta_v[i]) - anchor_theta + 180.0) % 360.0) - 180.0)
+        if d > thr:
+            b = 0.5 * (float(chain_v[i - 1]) + float(chain_v[i]))
+            if b > boundaries[-1] + 1e-9:
+                boundaries.append(float(b))
+            anchor_theta = float(theta_v[i])
+
+    end_b = float(chain_v[-1])
+    if end_b > boundaries[-1] + 1e-9:
+        boundaries.append(end_b)
+    if len(boundaries) < 2:
+        return []
+
+    colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+              "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"]
+    groups = []
+    for s, e in zip(boundaries[:-1], boundaries[1:]):
+        s = float(max(s, smin))
+        e = float(min(e, smax))
+        if (e - s) < float(min_len_m):
+            continue
+        i = len(groups) + 1
+        groups.append({
+            "id": f"G{i}",
+            "start": s,
+            "end": e,
+            "color": colors[(i - 1) % len(colors)],
+        })
+
+    if not groups and (smax - smin) >= float(min_len_m):
+        groups = [{
+            "id": "G1",
+            "start": float(smin),
+            "end": float(smax),
+            "color": colors[0],
+        }]
+    return groups
+
 def _mean_angle_deg(d_para_seg, dz_seg):
     V = np.vstack([d_para_seg, dz_seg]).T
     V = V[np.all(np.isfinite(V), axis=1)]
