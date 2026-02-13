@@ -19,7 +19,7 @@ from typing import Tuple, List, Dict, Optional
 from pedi_oku_landslide.pipeline.runners.ui3_backend import (
     auto_paths, list_lines, compute_profile, render_profile_png,
     clamp_groups_to_slip, auto_group_profile_by_criteria, auto_group_profile,
-    auto_group_profile_by_theta_anchor,
+    auto_group_profile_adaptive_hybrid,
     estimate_slip_curve, fit_bezier_smooth_curve, evaluate_nurbs_curve
 )
 from pedi_oku_landslide.pipeline.runners.ui3_backend import rdp_indices_from_profile, rdp_points_from_profile
@@ -1215,8 +1215,8 @@ class CurveAnalyzeTab(QWidget):
                 groups = auto_group_profile(prof)
                 group_method = "new"
             elif clicked_text == "Test":
-                self._log("[UI3] Auto Group method: Test -> theta anchor split (curve: NURBS)")
-                groups = auto_group_profile_by_theta_anchor(prof)
+                self._log("[UI3] Auto Group method: Test -> adaptive hybrid split (curve: NURBS)")
+                groups = auto_group_profile_adaptive_hybrid(prof)
                 group_method = "test"
             else:
                 self._log("[UI3] Auto Group canceled.")
