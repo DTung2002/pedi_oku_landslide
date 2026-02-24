@@ -15,7 +15,7 @@ from PyQt5.QtWidgets import (
     QTableWidget, QTableWidgetItem, QTextEdit, QSplitter, QSlider,
     QGraphicsPixmapItem, QGraphicsLineItem, QGraphicsEllipseItem, QGraphicsPathItem,
     QGraphicsSimpleTextItem, QGraphicsView, QMessageBox, QDialog, QDialogButtonBox,
-    QSpinBox, QDoubleSpinBox, QGridLayout, QSizePolicy, QComboBox,
+    QSpinBox, QDoubleSpinBox, QGridLayout, QSizePolicy, QComboBox, QMenu,
 )
 
 from .ui.ui1_viewer import UI1Viewer
@@ -625,6 +625,7 @@ class _LayeredViewer(UI1Viewer):
             if ev.type() == QEvent.MouseButtonPress and ev.button() == Qt.RightButton:
                 if self._picking and self._p1_pix is not None:
                     self.cancel_pick()
+                    return True
                 return True
 
             if ev.type() == QEvent.MouseButtonPress and ev.button() == Qt.LeftButton:
@@ -667,6 +668,7 @@ class _LayeredViewer(UI1Viewer):
         self.view.translate(delta.x(), delta.y())
         # Restore expected anchor for other interactions
         self.view.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+
 
 from PyQt5.QtWidgets import QDialog, QGridLayout, QSpinBox, QDoubleSpinBox
 
@@ -977,6 +979,9 @@ class SectionSelectionTab(QWidget):
         sl = QVBoxLayout(grp_secs)
         self.tbl = QTableWidget(0, 3)
         self.tbl.setHorizontalHeaderLabels(["#", "Start (x,y)", "End (x,y)"])
+        self.tbl.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tbl.viewport().setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tbl.verticalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
         hdr = self.tbl.horizontalHeader()
         hdr.setStretchLastSection(False)
         hdr.setSectionResizeMode(0, hdr.Fixed)  # cột #
@@ -1118,6 +1123,9 @@ class SectionSelectionTab(QWidget):
         self.btn_prev.clicked.connect(self._on_preview)
         self.btn_confirm.clicked.connect(self._on_confirm_sections)
         self.btn_auto.clicked.connect(self._on_auto_lines)
+        self.tbl.customContextMenuRequested.connect(self._on_sections_table_context_menu)
+        self.tbl.viewport().customContextMenuRequested.connect(self._on_sections_table_context_menu)
+        self.tbl.verticalHeader().customContextMenuRequested.connect(self._on_sections_table_header_context_menu)
 
         self.viewer.sectionPicked.connect(self._on_section_picked)
         self.viewer.cursorMoved.connect(lambda x, y: self.lbl_cursor.setText(f"Cursor: X={x:.2f}, Y={y:.2f}"))
@@ -1482,6 +1490,82 @@ class SectionSelectionTab(QWidget):
         self._section_lines.append(line_item)
         self._section_line_labels.append(label_item)
         self._ok("Section line drawn on map.")
+
+    def _delete_section_row(self, row: int, log_msg: Optional[str] = None) -> bool:
+        if row < 0 or row >= self.tbl.rowCount():
+            return False
+
+        # remove map line
+        if 0 <= row < len(self._section_lines):
+            it = self._section_lines[row]
+            if it is not None:
+                self.viewer.scene.removeItem(it)
+            self._section_lines.pop(row)
+
+        # remove map label
+        if 0 <= row < len(self._section_line_labels):
+            it = self._section_line_labels[row]
+            if it is not None:
+                self.viewer.scene.removeItem(it)
+            self._section_line_labels.pop(row)
+
+        # remove section data/meta
+        if 0 <= row < len(self._sections):
+            self._sections.pop(row)
+        if 0 <= row < len(self._section_meta):
+            self._section_meta.pop(row)
+
+        # remove preview if this row was previewed
+        if self._preview_line is not None:
+            try:
+                self.viewer.scene.removeItem(self._preview_line)
+            except Exception:
+                pass
+            self._preview_line = None
+        if self._preview_label is not None:
+            try:
+                self.viewer.scene.removeItem(self._preview_label)
+            except Exception:
+                pass
+            self._preview_label = None
+
+        self.tbl.removeRow(row)
+        if log_msg:
+            self._ok(log_msg)
+        return True
+
+    def _on_sections_table_context_menu(self, pos) -> None:
+        if self.tbl is None:
+            return
+        idx = self.tbl.indexAt(pos)
+        if not idx.isValid():
+            item = self.tbl.itemAt(pos)
+            if item is None:
+                return
+            row = int(item.row())
+        else:
+            row = int(idx.row())
+        if row < 0 or row >= self.tbl.rowCount():
+            return
+        self.tbl.selectRow(row)
+        menu = QMenu(self.tbl)
+        act_delete = menu.addAction("Delete")
+        chosen = menu.exec_(self.tbl.viewport().mapToGlobal(pos))
+        if chosen is act_delete:
+            self._delete_section_row(row, log_msg=f"Deleted section #{row + 1}.")
+
+    def _on_sections_table_header_context_menu(self, pos) -> None:
+        if self.tbl is None:
+            return
+        row = int(self.tbl.rowAt(pos.y()))
+        if row < 0 or row >= self.tbl.rowCount():
+            return
+        self.tbl.selectRow(row)
+        menu = QMenu(self.tbl)
+        act_delete = menu.addAction("Delete")
+        chosen = menu.exec_(self.tbl.verticalHeader().viewport().mapToGlobal(pos))
+        if chosen is act_delete:
+            self._delete_section_row(row, log_msg=f"Deleted section #{row + 1}.")
 
     def _add_line_label(
             self,
