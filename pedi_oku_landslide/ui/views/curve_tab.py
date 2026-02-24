@@ -1898,7 +1898,7 @@ class CurveAnalyzeTab(QWidget):
         self.group_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self.group_table.cellDoubleClicked.connect(self._on_group_cell_double_clicked)
         self.group_table.itemChanged.connect(self._on_group_table_item_changed)
-        _set_table_visible_rows(self.group_table, rows=4, row_h=24)
+        _set_table_visible_rows(self.group_table, rows=4, row_h=30)
         lg.addWidget(self.group_table)
 
         rowg = QHBoxLayout()
@@ -2629,9 +2629,9 @@ class CurveAnalyzeTab(QWidget):
             return "main"
         if role in ("cross", "aux", "cl"):
             return "cross"
-        if lid.startswith("ml-") or lid.startswith("main"):
+        if lid.startswith("ml") or lid.startswith("main"):
             return "main"
-        if lid.startswith("cl-") or lid.startswith("cross"):
+        if lid.startswith("cl") or lid.startswith("cross"):
             return "cross"
         return ""
 

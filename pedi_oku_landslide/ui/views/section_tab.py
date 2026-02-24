@@ -24,6 +24,13 @@ from .ui.ui1_viewer import UI1Viewer
 def HBox():
     return QHBoxLayout()
 
+
+class _NoWheelComboBox(QComboBox):
+    """Ignore mouse wheel to avoid accidental role changes while scrolling."""
+    def wheelEvent(self, event):
+        event.ignore()
+
+
 # ---------- helpers ----------
 
 def _file_exists(p: str) -> bool:
@@ -261,14 +268,14 @@ def generate_auto_lines_from_arrays(
     ang_cross = float(np.degrees(np.arctan2(u_norm[1], u_norm[0])))
 
     feats_main.append({
-        "name": "ML-001",
+        "name": "ML1",
         "type": "main",
         "offset_m": 0.0,
         "angle_deg": ang_main,
         "geom": main1,
     })
     feats_cross.append({
-        "name": "CL-001",
+        "name": "CL1",
         "type": "cross",
         "offset_m": 0.0,
         "angle_deg": ang_cross,
@@ -284,7 +291,7 @@ def generate_auto_lines_from_arrays(
             cy = center[1] + off * u_norm[1]
             geom = _build_line((cx, cy), u_main, L)
             feats_main.append({
-                "name": f"ML-{idx:03d}",
+                "name": f"ML{idx}",
                 "type": "main",
                 "offset_m": off,
                 "angle_deg": ang_main,
@@ -301,7 +308,7 @@ def generate_auto_lines_from_arrays(
             cy = center[1] + off * u_main[1]
             geom = _build_line((cx, cy), u_norm, L)
             feats_cross.append({
-                "name": f"CL-{idx:03d}",
+                "name": f"CL{idx}",
                 "type": "cross",
                 "offset_m": off,
                 "angle_deg": ang_cross,
@@ -977,16 +984,20 @@ class SectionSelectionTab(QWidget):
 
         grp_secs = QGroupBox("Sections");
         sl = QVBoxLayout(grp_secs)
-        self.tbl = QTableWidget(0, 3)
-        self.tbl.setHorizontalHeaderLabels(["#", "Start (x,y)", "End (x,y)"])
+        self.tbl = QTableWidget(0, 4)
+        self.tbl.setHorizontalHeaderLabels(["ID", "Start (x,y)", "End (x,y)", "Role"])
         self.tbl.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tbl.viewport().setContextMenuPolicy(Qt.CustomContextMenu)
         self.tbl.verticalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tbl.verticalHeader().setVisible(False)
         hdr = self.tbl.horizontalHeader()
         hdr.setStretchLastSection(False)
         hdr.setSectionResizeMode(0, hdr.Fixed)  # cột #
         hdr.setSectionResizeMode(1, hdr.Stretch)  # Start
         hdr.setSectionResizeMode(2, hdr.Stretch)  # End
+        hdr.setSectionResizeMode(3, hdr.Fixed)    # Role
+        self.tbl.setColumnWidth(0, 56)
+        self.tbl.setColumnWidth(3, 100)
         self.tbl.itemChanged.connect(self._on_table_item_changed)
         sl.addWidget(self.tbl)
 
@@ -1306,7 +1317,6 @@ class SectionSelectionTab(QWidget):
         self.tbl.setRowCount(0)
         self._sections.clear()
         self._section_meta.clear()
-        self._section_meta.clear()
 
         # Xoá line cũ trên map (nếu có)
         for it in self._section_lines:
@@ -1457,20 +1467,35 @@ class SectionSelectionTab(QWidget):
         hdr.setSectionResizeMode(0, hdr.Fixed)
         hdr.setSectionResizeMode(1, hdr.Stretch)
         hdr.setSectionResizeMode(2, hdr.Stretch)
+        hdr.setSectionResizeMode(3, hdr.Fixed)
 
-        line_label = label if label is not None else str(r + 1)
+        meta_row = dict(meta or {})
+        role_txt = self._role_combo_text_from_value(str(meta_row.get("line_role", "") or ""), str(meta_row.get("line_id", "") or ""))
+        meta_row["line_role"] = self._role_value_from_combo_text(role_txt)
+        line_id = str(meta_row.get("line_id", "") or "").strip()
+        if not line_id:
+            line_id = self._next_line_id_for_role(meta_row["line_role"])
+        meta_row["line_id"] = line_id
+        line_label = label if label is not None else line_id
+
         self.tbl.setItem(r, 0, QTableWidgetItem(line_label))
         self.tbl.setItem(r, 1, QTableWidgetItem(f"{p0[0]:.2f}, {p0[1]:.2f}"))
         self.tbl.setItem(r, 2, QTableWidgetItem(f"{p1[0]:.2f}, {p1[1]:.2f}"))
-        self.tbl.verticalHeader().setDefaultSectionSize(22)  # chiều cao mỗi row
-        self.tbl.setColumnWidth(0, 40)  # cột chỉ số
+        role_combo = _NoWheelComboBox(self.tbl)
+        role_combo.addItems(["Main", "Cross"])
+        role_combo.setCurrentText(role_txt)
+        self.tbl.setCellWidget(r, 3, role_combo)
+        self.tbl.verticalHeader().setDefaultSectionSize(30)  # chiều cao mỗi row
+        self.tbl.setColumnWidth(0, 56)
+        self.tbl.setColumnWidth(3, 100)
 
         self._updating_table = False
         # cột cuối cùng đang stretch, giữ nguyên
 
         # lưu section
         self._sections.append((p0, p1))
-        self._section_meta.append(dict(meta or {}))
+        self._section_meta.append(meta_row)
+        role_combo.currentIndexChanged.connect(self._on_role_combo_changed)
 
         # 2) vẽ line lên viewer (map → pixel)
         line_item = None
@@ -1636,6 +1661,12 @@ class SectionSelectionTab(QWidget):
         # cập nhật list _sections
         if 0 <= row < len(self._sections):
             self._sections[row] = (p0, p1)
+        if col == 0:
+            while len(self._section_meta) <= row:
+                self._section_meta.append({})
+            if not isinstance(self._section_meta[row], dict):
+                self._section_meta[row] = {}
+            self._section_meta[row]["line_id"] = (self.tbl.item(row, 0).text().strip() if self.tbl.item(row, 0) else "")
 
         # cập nhật line xanh trên map
         if 0 <= row < len(self._section_lines):
@@ -1854,6 +1885,7 @@ class SectionSelectionTab(QWidget):
 
         self.tbl.setRowCount(0)
         self._sections.clear()
+        self._section_meta.clear()
 
         # xoá line khỏi scene
         for it in self._section_lines:
@@ -1881,11 +1913,96 @@ class SectionSelectionTab(QWidget):
             return "main"
         if role in ("cross", "aux", "cl"):
             return "cross"
-        if lid.startswith("ml-") or lid.startswith("main"):
+        if lid.startswith("ml") or lid.startswith("main"):
             return "main"
-        if lid.startswith("cl-") or lid.startswith("cross"):
+        if lid.startswith("cl") or lid.startswith("cross"):
             return "cross"
         return ""
+
+    @staticmethod
+    def _role_combo_text_from_value(line_role: str, line_id: str = "") -> str:
+        role = SectionSelectionTab._normalize_line_role(line_role, line_id)
+        return "Cross" if role == "cross" else "Main"
+
+    @staticmethod
+    def _role_value_from_combo_text(text: str) -> str:
+        t = str(text or "").strip().lower()
+        return "cross" if t == "cross" else "main"
+
+    @staticmethod
+    def _parse_auto_line_id(line_id: str) -> Tuple[str, int]:
+        txt = str(line_id or "").strip().upper()
+        if txt.startswith("ML") and txt[2:].isdigit():
+            return "main", int(txt[2:])
+        if txt.startswith("CL") and txt[2:].isdigit():
+            return "cross", int(txt[2:])
+        return "", 0
+
+    def _next_line_id_for_role(self, line_role: str, exclude_row: int = -1) -> str:
+        role = self._normalize_line_role(line_role, "")
+        prefix = "CL" if role == "cross" else "ML"
+        used = set()
+        for r in range(self.tbl.rowCount()):
+            if r == exclude_row:
+                continue
+            cand = ""
+            if 0 <= r < len(self._section_meta) and isinstance(self._section_meta[r], dict):
+                cand = str(self._section_meta[r].get("line_id", "") or "").strip()
+            if not cand:
+                item = self.tbl.item(r, 0)
+                cand = item.text().strip() if item else ""
+            parsed_role, parsed_idx = self._parse_auto_line_id(cand)
+            if parsed_role == role and parsed_idx > 0:
+                used.add(parsed_idx)
+        n = 1
+        while n in used:
+            n += 1
+        return f"{prefix}{n}"
+
+    def _find_role_combo_row(self, combo: QComboBox) -> int:
+        for r in range(self.tbl.rowCount()):
+            if self.tbl.cellWidget(r, 3) is combo:
+                return r
+        return -1
+
+    def _on_role_combo_changed(self, _index: int) -> None:
+        combo = self.sender()
+        if not isinstance(combo, QComboBox):
+            return
+        row = self._find_role_combo_row(combo)
+        if row < 0:
+            return
+        while len(self._section_meta) <= row:
+            self._section_meta.append({})
+        meta = self._section_meta[row]
+        if not isinstance(meta, dict):
+            meta = {}
+            self._section_meta[row] = meta
+        label = (self.tbl.item(row, 0).text().strip() if self.tbl.item(row, 0) else f"{row + 1}")
+        cur_line_id = str(meta.get("line_id", "") or "").strip() or label
+        new_role = self._role_value_from_combo_text(combo.currentText())
+        auto_role, auto_idx = self._parse_auto_line_id(cur_line_id)
+        if (not cur_line_id) or (auto_idx > 0 and auto_role in ("main", "cross")):
+            new_line_id = self._next_line_id_for_role(new_role, exclude_row=row)
+            if new_line_id != cur_line_id:
+                item0 = self.tbl.item(row, 0)
+                if item0 is None:
+                    item0 = QTableWidgetItem(new_line_id)
+                    self.tbl.setItem(row, 0, item0)
+                else:
+                    item0.setText(new_line_id)
+                cur_line_id = new_line_id
+        meta["line_id"] = cur_line_id
+        meta["line_role"] = new_role
+        self._ok(f"[UI2] Line role set: row {row + 1} -> {meta['line_role']}")
+
+    def _get_row_line_role(self, row: int) -> str:
+        combo = self.tbl.cellWidget(row, 3) if self.tbl is not None else None
+        if isinstance(combo, QComboBox):
+            return self._role_value_from_combo_text(combo.currentText())
+        meta = self._section_meta[row] if 0 <= row < len(self._section_meta) else {}
+        line_id = str((meta or {}).get("line_id", "")).strip()
+        return self._normalize_line_role(str((meta or {}).get("line_role", "")).strip(), line_id)
 
     @staticmethod
     def _line_order_key(line_id: str, fallback_idx: int) -> Tuple[int, str]:
@@ -1938,10 +2055,14 @@ class SectionSelectionTab(QWidget):
                 continue
             meta = self._section_meta[r] if 0 <= r < len(self._section_meta) else {}
             line_id = str((meta or {}).get("line_id", "")).strip()
-            line_role = self._normalize_line_role(str((meta or {}).get("line_role", "")).strip(), line_id)
             label = (self.tbl.item(r, 0).text().strip() if self.tbl.item(r, 0) else f"{r + 1}")
             if not line_id:
                 line_id = label
+                if 0 <= r < len(self._section_meta) and isinstance(self._section_meta[r], dict):
+                    self._section_meta[r]["line_id"] = line_id
+            line_role = self._normalize_line_role(self._get_row_line_role(r), line_id)
+            if 0 <= r < len(self._section_meta) and isinstance(self._section_meta[r], dict):
+                self._section_meta[r]["line_role"] = line_role
             try:
                 geom = LineString([p0, p1])
             except Exception:
@@ -2040,7 +2161,14 @@ class SectionSelectionTab(QWidget):
                     p1 = tuple(map(float, self.tbl.item(r, 2).text().split(",")))
                     meta = self._section_meta[r] if 0 <= r < len(self._section_meta) else {}
                     line_id = str((meta or {}).get("line_id", "")).strip()
-                    line_role = self._normalize_line_role(str((meta or {}).get("line_role", "")).strip(), line_id)
+                    if not line_id:
+                        label = (self.tbl.item(r, 0).text().strip() if self.tbl.item(r, 0) else f"{r + 1}")
+                        line_id = label
+                        if 0 <= r < len(self._section_meta) and isinstance(self._section_meta[r], dict):
+                            self._section_meta[r]["line_id"] = line_id
+                    line_role = self._normalize_line_role(self._get_row_line_role(r), line_id)
+                    if 0 <= r < len(self._section_meta) and isinstance(self._section_meta[r], dict):
+                        self._section_meta[r]["line_role"] = line_role
                     w.writerow([r + 1, p0[0], p0[1], p1[0], p1[1], line_id, line_role])
 
             self._ok(f"Sections saved: {csv_path}")
