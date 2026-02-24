@@ -1,12 +1,12 @@
 # pedi_oku_landslide/ui/views/section_tab.py
-import os, math
-from typing import Optional, Tuple, List
+import os, math, json
+from typing import Optional, Tuple, List, Dict, Any
 
 import numpy as np
 import rasterio
 from rasterio.enums import Resampling
 from rasterio.transform import Affine, xy as rio_xy
-from shapely.geometry import LineString
+from shapely.geometry import LineString, Point
 from PyQt5.QtWidgets import QPlainTextEdit
 from PyQt5.QtCore import Qt, pyqtSignal, QPointF, QEvent
 from PyQt5.QtGui import QPen, QBrush, QColor, QImage, QPixmap, QPainterPath, QPainter, QFont, QFontMetrics
@@ -784,6 +784,7 @@ class SectionSelectionTab(QWidget):
         self._vec_arrow_base: float = 12.0
 
         self._sections: List[Tuple[Tuple[float, float], Tuple[float, float]]] = []
+        self._section_meta: List[Dict[str, Any]] = []
 
         self._updating_table: bool = False
 
@@ -1296,6 +1297,8 @@ class SectionSelectionTab(QWidget):
         # Xoá mọi thứ hiện tại trước khi load lại
         self.tbl.setRowCount(0)
         self._sections.clear()
+        self._section_meta.clear()
+        self._section_meta.clear()
 
         # Xoá line cũ trên map (nếu có)
         for it in self._section_lines:
@@ -1314,7 +1317,13 @@ class SectionSelectionTab(QWidget):
             except Exception:
                 continue
 
-            self._append_section((x1, y1), (x2, y2))
+            meta = {
+                "line_id": str(row.get("line_id", "")).strip(),
+                "line_role": str(row.get("line_role", "")).strip(),
+            }
+            if not meta["line_id"]:
+                meta["line_id"] = str(row.get("name", "")).strip()
+            self._append_section((x1, y1), (x2, y2), meta=meta)
             count += 1
 
         self._ok(f"[UI2] Loaded {count} sections from sections.csv")
@@ -1427,6 +1436,7 @@ class SectionSelectionTab(QWidget):
             p0: Tuple[float, float],
             p1: Tuple[float, float],
             label: Optional[str] = None,
+            meta: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Lưu section vào bảng + vẽ line cố định trên map."""
         # tránh trigger _on_table_item_changed khi đang chèn row
@@ -1452,6 +1462,7 @@ class SectionSelectionTab(QWidget):
 
         # lưu section
         self._sections.append((p0, p1))
+        self._section_meta.append(dict(meta or {}))
 
         # 2) vẽ line lên viewer (map → pixel)
         line_item = None
@@ -1666,6 +1677,7 @@ class SectionSelectionTab(QWidget):
         # 4) Xoá tất cả section cũ (bảng + line trên map)
         self.tbl.setRowCount(0)
         self._sections.clear()
+        self._section_meta.clear()
         for it in getattr(self, "_section_lines", []):
             if it is not None:
                 self.viewer.scene.removeItem(it)
@@ -1688,7 +1700,15 @@ class SectionSelectionTab(QWidget):
                 return
             x1, y1 = geom.coords[0]
             x2, y2 = geom.coords[-1]
-            self._append_section((x1, y1), (x2, y2))
+            self._append_section(
+                (x1, y1), (x2, y2),
+                meta={
+                    "line_id": str(feat.get("name", "")).strip(),
+                    "line_role": str(feat.get("type", "")).strip(),
+                    "offset_m": float(feat.get("offset_m", 0.0)) if feat.get("offset_m", None) is not None else None,
+                    "angle_deg": float(feat.get("angle_deg", 0.0)) if feat.get("angle_deg", None) is not None else None,
+                }
+            )
 
         for f in mains:
             _add_feat(f)
@@ -1769,6 +1789,138 @@ class SectionSelectionTab(QWidget):
             self.viewer.scene.removeItem(self._preview_label)
             self._preview_label = None
 
+    @staticmethod
+    def _normalize_line_role(line_role: str, line_id: str = "") -> str:
+        role = (line_role or "").strip().lower()
+        lid = (line_id or "").strip().lower()
+        if role in ("main", "ml"):
+            return "main"
+        if role in ("cross", "aux", "cl"):
+            return "cross"
+        if lid.startswith("ml-") or lid.startswith("main"):
+            return "main"
+        if lid.startswith("cl-") or lid.startswith("cross"):
+            return "cross"
+        return ""
+
+    @staticmethod
+    def _line_order_key(line_id: str, fallback_idx: int) -> Tuple[int, str]:
+        txt = str(line_id or "").strip()
+        digits = "".join(ch for ch in txt if ch.isdigit())
+        if digits:
+            try:
+                return int(digits), txt
+            except Exception:
+                pass
+        return int(fallback_idx), txt
+
+    @staticmethod
+    def _pick_intersection_point(geom_a: LineString, geom_b: LineString) -> Tuple[Optional[Point], str]:
+        try:
+            inter = geom_a.intersection(geom_b)
+        except Exception:
+            return None, "error"
+        if inter is None or getattr(inter, "is_empty", True):
+            return None, "no_intersection"
+        gtype = getattr(inter, "geom_type", "")
+        if gtype == "Point":
+            return inter, "ok"
+        if gtype == "MultiPoint":
+            pts = [p for p in getattr(inter, "geoms", []) if getattr(p, "geom_type", "") == "Point"]
+            if not pts:
+                return None, "multi_no_point"
+            try:
+                mid = geom_a.interpolate(0.5 * float(geom_a.length))
+                pts = sorted(pts, key=lambda p: p.distance(mid))
+            except Exception:
+                pass
+            return pts[0], "multi_point"
+        # Fallback for unexpected overlap geometries (unlikely for current auto-line layout)
+        try:
+            rp = inter.representative_point()
+            if rp is not None and not rp.is_empty:
+                return rp, f"{gtype.lower()}_repr"
+        except Exception:
+            pass
+        return None, f"unsupported_{gtype or 'unknown'}"
+
+    def _save_main_cross_intersections(self, ui2_dir: str) -> Optional[str]:
+        records: List[Dict[str, Any]] = []
+        for r in range(self.tbl.rowCount()):
+            try:
+                p0 = tuple(map(float, self.tbl.item(r, 1).text().split(",")))
+                p1 = tuple(map(float, self.tbl.item(r, 2).text().split(",")))
+            except Exception:
+                continue
+            meta = self._section_meta[r] if 0 <= r < len(self._section_meta) else {}
+            line_id = str((meta or {}).get("line_id", "")).strip()
+            line_role = self._normalize_line_role(str((meta or {}).get("line_role", "")).strip(), line_id)
+            label = (self.tbl.item(r, 0).text().strip() if self.tbl.item(r, 0) else f"{r + 1}")
+            if not line_id:
+                line_id = label
+            try:
+                geom = LineString([p0, p1])
+            except Exception:
+                continue
+            records.append({
+                "row_index": int(r),
+                "table_label": label,
+                "line_id": line_id,
+                "line_role": line_role,
+                "x1": float(p0[0]),
+                "y1": float(p0[1]),
+                "x2": float(p1[0]),
+                "y2": float(p1[1]),
+                "geom": geom,
+            })
+
+        mains = [rec for rec in records if rec.get("line_role") == "main"]
+        crosses = [rec for rec in records if rec.get("line_role") == "cross"]
+        mains.sort(key=lambda d: self._line_order_key(d.get("line_id", ""), d.get("row_index", 0)))
+        crosses.sort(key=lambda d: self._line_order_key(d.get("line_id", ""), d.get("row_index", 0)))
+
+        payload_items: List[Dict[str, Any]] = []
+        for mi, mrec in enumerate(mains, start=1):
+            for ci, crec in enumerate(crosses, start=1):
+                pt, status = self._pick_intersection_point(mrec["geom"], crec["geom"])
+                x = y = s_m = s_c = None
+                if pt is not None:
+                    try:
+                        x = float(pt.x)
+                        y = float(pt.y)
+                        s_m = float(mrec["geom"].project(pt))
+                        s_c = float(crec["geom"].project(pt))
+                    except Exception:
+                        x = y = s_m = s_c = None
+                        status = "project_error"
+                payload_items.append({
+                    "main_line_id": str(mrec["line_id"]),
+                    "cross_line_id": str(crec["line_id"]),
+                    "main_row_index": int(mrec["row_index"]),
+                    "cross_row_index": int(crec["row_index"]),
+                    "main_label_fixed": f"L{mi}",
+                    "main_order": int(mi),
+                    "cross_order": int(ci),
+                    "x": x,
+                    "y": y,
+                    "s_on_main": s_m,
+                    "s_on_cross": s_c,
+                    "status": status,
+                })
+
+        out_path = os.path.join(ui2_dir, "intersections_main_cross.json")
+        payload = {
+            "version": 1,
+            "main_count": int(len(mains)),
+            "cross_count": int(len(crosses)),
+            "intersection_count": int(len(payload_items)),
+            "ok_count": int(sum(1 for it in payload_items if it.get("status") in ("ok", "multi_point"))),
+            "items": payload_items,
+        }
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        return out_path
+
     def _on_confirm_sections(self) -> None:
         """Ghi ui2/sections.csv và phát 1 signal sang MainWindow/Curve tab."""
         # Bắt buộc phải có context (Analyze tab đã chạy)
@@ -1798,13 +1950,22 @@ class SectionSelectionTab(QWidget):
             import csv
             with open(csv_path, "w", newline="", encoding="utf-8") as f:
                 w = csv.writer(f)
-                w.writerow(["idx", "x1", "y1", "x2", "y2"])
+                w.writerow(["idx", "x1", "y1", "x2", "y2", "line_id", "line_role"])
                 for r in range(self.tbl.rowCount()):
                     p0 = tuple(map(float, self.tbl.item(r, 1).text().split(",")))
                     p1 = tuple(map(float, self.tbl.item(r, 2).text().split(",")))
-                    w.writerow([r + 1, p0[0], p0[1], p1[0], p1[1]])
+                    meta = self._section_meta[r] if 0 <= r < len(self._section_meta) else {}
+                    line_id = str((meta or {}).get("line_id", "")).strip()
+                    line_role = self._normalize_line_role(str((meta or {}).get("line_role", "")).strip(), line_id)
+                    w.writerow([r + 1, p0[0], p0[1], p1[0], p1[1], line_id, line_role])
 
             self._ok(f"Sections saved: {csv_path}")
+            try:
+                inter_path = self._save_main_cross_intersections(ui2_dir)
+                if inter_path:
+                    self._ok(f"[UI2] Intersections saved: {inter_path}")
+            except Exception as e:
+                self._err(f"[UI2] Save intersections error: {e}")
 
         except Exception as e:
             self._err(f"Confirm Sections error: {e}")
@@ -1843,6 +2004,8 @@ class SectionSelectionTab(QWidget):
 
                     if 0 <= r < len(self._sections):
                         self._sections.pop(r)
+                    if 0 <= r < len(self._section_meta):
+                        self._section_meta.pop(r)
 
                     self.tbl.removeRow(r)
 
@@ -1911,6 +2074,7 @@ class SectionSelectionTab(QWidget):
         # Xoá sections & line
         if hasattr(self, "tbl"):
             self.tbl.setRowCount(0)
+        self._section_meta.clear()
 
         # Xoá line section đã vẽ
         if hasattr(self, "_section_lines"):

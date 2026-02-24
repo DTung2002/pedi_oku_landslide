@@ -595,6 +595,16 @@ def render_profile_png(
 
 
         finite = np.isfinite(chain) & np.isfinite(elev_s) & np.isfinite(d_para) & np.isfinite(dz)
+        slip_mask_arr = None
+        try:
+            sm = prof.get("slip_mask", None)
+            if sm is not None:
+                sm = np.asarray(sm)
+                if sm.shape == chain.shape:
+                    # Only True values are considered "inside mask"; all others default to ungrouped.
+                    slip_mask_arr = (sm == True)
+        except Exception:
+            slip_mask_arr = None
         if group_ranges:
             if "slip_span" in prof and prof["slip_span"]:
                 smin, smax = prof["slip_span"]
@@ -620,6 +630,8 @@ def render_profile_png(
             gidx = np.full(chain.shape, -1, dtype=int)
             for gi, gid, s, e, color in prepared:
                 m = (chain >= s) & (chain <= e)
+                if slip_mask_arr is not None:
+                    m = m & slip_mask_arr
                 gidx[m] = gi
 
             for gi, gid, s, e, color in prepared:

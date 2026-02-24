@@ -1,7 +1,7 @@
 ﻿# --- ADD/UPDATE imports ở đầu file ---
 import math
 import os, json
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Callable
 import os
 import numpy as np
 from PyQt5.QtCore import Qt, pyqtSignal, QSize, QTimer
@@ -19,7 +19,6 @@ from typing import Tuple, List, Dict, Optional
 from pedi_oku_landslide.pipeline.runners.ui3_backend import (
     auto_paths, list_lines, compute_profile, render_profile_png,
     clamp_groups_to_slip, auto_group_profile_by_criteria, auto_group_profile,
-    auto_group_profile_adaptive_hybrid,
     estimate_slip_curve, fit_bezier_smooth_curve, evaluate_nurbs_curve
 )
 from pedi_oku_landslide.pipeline.runners.ui3_backend import rdp_indices_from_profile, rdp_points_from_profile
@@ -58,10 +57,12 @@ def _build_gdf_from_sections_csv(csv_path: str, dem_path: str) -> gpd.GeoDataFra
                 y2 = float(row["y2"])
             except Exception:
                 continue
-            rows.append((idx, x1, y1, x2, y2))
+            line_id = str(row.get("line_id", row.get("name", "")) or "").strip()
+            line_role = str(row.get("line_role", row.get("role", "")) or "").strip()
+            rows.append((idx, x1, y1, x2, y2, line_id, line_role))
 
     if not rows:
-        return gpd.GeoDataFrame(columns=["idx", "name", "length_m", "geometry"], geometry="geometry")
+        return gpd.GeoDataFrame(columns=["idx", "name", "line_id", "line_role", "length_m", "geometry"], geometry="geometry")
 
     # Lấy CRS từ DEM
     crs = None
@@ -71,8 +72,8 @@ def _build_gdf_from_sections_csv(csv_path: str, dem_path: str) -> gpd.GeoDataFra
     except Exception:
         pass
 
-    idxs, xs1, ys1, xs2, ys2 = zip(*rows)
-    geoms = [LineString([(x1, y1), (x2, y2)]) for (_, x1, y1, x2, y2) in rows]
+    idxs, xs1, ys1, xs2, ys2, line_ids, line_roles = zip(*rows)
+    geoms = [LineString([(x1, y1), (x2, y2)]) for (_, x1, y1, x2, y2, _, _) in rows]
 
     lengths = []
     for g in geoms:
@@ -82,14 +83,43 @@ def _build_gdf_from_sections_csv(csv_path: str, dem_path: str) -> gpd.GeoDataFra
             L = float("nan")
         lengths.append(L)
 
-    names = [f"Line {i}" for i in idxs]
+    names = [lid if str(lid).strip() else f"Line {i}" for i, lid in zip(idxs, line_ids)]
 
     gdf = gpd.GeoDataFrame(
-        {"idx": list(idxs), "name": names, "length_m": lengths},
+        {
+            "idx": list(idxs),
+            "name": names,
+            "line_id": [str(v or "").strip() for v in line_ids],
+            "line_role": [str(v or "").strip() for v in line_roles],
+            "length_m": lengths,
+        },
         geometry=geoms,
         crs=crs,
     )
     return gdf
+
+
+class AnchorMarkerItem(QGraphicsEllipseItem):
+    def __init__(
+        self,
+        x: float,
+        y: float,
+        r: float,
+        tooltip: str,
+        on_click: Optional[Callable[[], None]] = None,
+    ):
+        super().__init__(x - r, y - r, 2 * r, 2 * r)
+        self._on_click = on_click
+        self.setAcceptHoverEvents(True)
+        self.setToolTip(tooltip)
+
+    def mousePressEvent(self, event):
+        try:
+            if self._on_click is not None:
+                self._on_click()
+        except Exception:
+            pass
+        super().mousePressEvent(event)
 
 class ZoomableGraphicsView(QGraphicsView):
     def __init__(self, *a, **kw):
@@ -198,6 +228,9 @@ class CurveAnalyzeTab(QWidget):
         self._active_curve: Optional[dict] = None
         self._curve_overlay_item: Optional[QGraphicsPathItem] = None
         self._cp_overlay_items: List[Any] = []
+        self._anchor_overlay_items: List[Any] = []
+        self._ui2_intersections_cache: Optional[Dict[str, Any]] = None
+        self._anchors_xyz_cache: Optional[Dict[str, Any]] = None
         self._nurbs_params_by_line: Dict[str, Dict[str, Any]] = {}
         self._group_table_updating: bool = False
         self._nurbs_updating_ui: bool = False
@@ -315,9 +348,10 @@ class CurveAnalyzeTab(QWidget):
     @staticmethod
     def _curve_method_from_group_method(group_method: Optional[str]) -> str:
         gm = str(group_method or "").strip().lower()
-        if gm in ("traditional", "test"):
+        # Auto Group method only controls grouping strategy. Curve editing/rendering is NURBS for all methods.
+        if gm in ("traditional", "new", "test"):
             return "nurbs"
-        return "bezier"
+        return "nurbs"
 
     def _set_curve_method_for_line(self, line_id: str, curve_method: Optional[str]) -> str:
         cm = self._normalize_curve_method(curve_method)
@@ -365,6 +399,12 @@ class CurveAnalyzeTab(QWidget):
         except Exception as e:
             self._warn(f"[UI3] Cannot save groups JSON: {e}")
 
+        if "length_m" in prof and prof["length_m"] is not None:
+            length_m = float(prof["length_m"])
+        else:
+            ch = prof.get("chain")
+            length_m = float(ch[-1] - ch[0]) if ch is not None and len(ch) >= 2 else None
+
         if self.group_table is not None:
             self._group_table_updating = True
             try:
@@ -375,15 +415,10 @@ class CurveAnalyzeTab(QWidget):
                     self.group_table.setItem(i - 1, 1, QTableWidgetItem(f'{float(g.get("start", 0.0)):.3f}'))
                     self.group_table.setItem(i - 1, 2, QTableWidgetItem(f'{float(g.get("end", 0.0)):.3f}'))
                     self._set_color_cell(i - 1, str(g.get("color", "")).strip())
+                # IMPORTANT: keep itemChanged suppressed for the synthetic UNGROUPED row too.
+                self._append_ungrouped_row(groups, length_m)
             finally:
                 self._group_table_updating = False
-
-        if "length_m" in prof and prof["length_m"] is not None:
-            length_m = float(prof["length_m"])
-        else:
-            ch = prof.get("chain")
-            length_m = float(ch[-1] - ch[0]) if ch is not None and len(ch) >= 2 else None
-        self._append_ungrouped_row(groups, length_m)
 
         bounds_set = set()
         for g in groups:
@@ -438,6 +473,7 @@ class CurveAnalyzeTab(QWidget):
                 pass
         self._curve_overlay_item = None
         self._clear_control_points_overlay()
+        self._clear_anchor_overlay()
 
     def _clear_control_points_overlay(self) -> None:
         for it in (self._cp_overlay_items or []):
@@ -448,6 +484,16 @@ class CurveAnalyzeTab(QWidget):
             except Exception:
                 pass
         self._cp_overlay_items = []
+
+    def _clear_anchor_overlay(self) -> None:
+        for it in (self._anchor_overlay_items or []):
+            try:
+                sc = it.scene()
+                if sc is not None:
+                    sc.removeItem(it)
+            except Exception:
+                pass
+        self._anchor_overlay_items = []
 
     def _chain_elev_to_scene_xy(self, chain_m: float, elev_m: float) -> Optional[Tuple[float, float]]:
         if self._img_ground is None or self._ax_top is None:
@@ -473,6 +519,78 @@ class CurveAnalyzeTab(QWidget):
             return x_scene, y_scene
         except Exception:
             return None
+
+    def _on_anchor_marker_clicked(self, anchor: dict) -> None:
+        try:
+            lbl = str(anchor.get("main_label_fixed", "")).strip() or "Anchor"
+            self._log(
+                f"[UI3] {lbl}: x={float(anchor.get('x')):.3f}, "
+                f"y={float(anchor.get('y')):.3f}, z={float(anchor.get('z')):.3f}, "
+                f"s_aux={float(anchor.get('s_on_cross')):.3f}"
+            )
+        except Exception:
+            pass
+
+    def _refresh_anchor_overlay(self) -> None:
+        self._clear_anchor_overlay()
+        if self.scene is None or self._img_ground is None or self._ax_top is None:
+            return
+        if self._current_ui2_line_role() != "cross":
+            return
+        cross_id = self._current_ui2_line_id()
+        anchors = self._anchors_for_cross_line(cross_id, require_ready=True)
+        if len(anchors) < 3:
+            return
+
+        colors = {
+            1: "#e74c3c",  # L1
+            2: "#2ecc71",  # L2
+            3: "#3498db",  # L3
+        }
+        for a in anchors:
+            try:
+                s = float(a.get("s_on_cross"))
+                z = float(a.get("z"))
+            except Exception:
+                continue
+            pt = self._chain_elev_to_scene_xy(s, z)
+            if pt is None:
+                continue
+            x, y = pt
+            main_order = int(a.get("main_order", 0)) if str(a.get("main_order", "")).strip() else 0
+            label = str(a.get("main_label_fixed", "")).strip() or f"L{main_order if main_order > 0 else '?'}"
+            col = colors.get(main_order, "#f39c12")
+            tip = (
+                f"{label}\n"
+                f"x={float(a.get('x')):.3f}\n"
+                f"y={float(a.get('y')):.3f}\n"
+                f"z={float(a.get('z')):.3f}\n"
+                f"s_aux={float(a.get('s_on_cross')):.3f}"
+            )
+            marker = AnchorMarkerItem(
+                x=x, y=y, r=7.0, tooltip=tip,
+                on_click=lambda aa=dict(a): self._on_anchor_marker_clicked(aa)
+            )
+            marker.setBrush(QColor(col))
+            pen = QPen(QColor("#ffffff"))
+            pen.setWidth(2)
+            pen.setCosmetic(True)
+            marker.setPen(pen)
+            marker.setZValue(145.0)
+            self.scene.addItem(marker)
+            self._anchor_overlay_items.append(marker)
+
+            lbl = QGraphicsSimpleTextItem(label)
+            lbl.setBrush(QColor("#111111"))
+            fnt = lbl.font()
+            psz = fnt.pointSizeF() if fnt.pointSizeF() > 0 else 9.0
+            fnt.setPointSizeF(psz * 1.35)
+            lbl.setFont(fnt)
+            lbl.setToolTip(tip)
+            lbl.setPos(x + 10.0, y - 22.0)
+            lbl.setZValue(146.0)
+            self.scene.addItem(lbl)
+            self._anchor_overlay_items.append(lbl)
 
     def _draw_curve_overlay(self, chain_arr: np.ndarray, elev_arr: np.ndarray, color: str = "#bf00ff") -> None:
         # keep control-point markers; only refresh curve path here
@@ -519,6 +637,7 @@ class CurveAnalyzeTab(QWidget):
         item.setZValue(120.0)
         self.scene.addItem(item)
         self._curve_overlay_item = item
+        self._refresh_anchor_overlay()
 
     def _draw_control_points_overlay(self, params: Optional[Dict[str, Any]] = None) -> None:
         self._clear_control_points_overlay()
@@ -559,6 +678,7 @@ class CurveAnalyzeTab(QWidget):
             lbl.setZValue(131.0)
             self.scene.addItem(lbl)
             self._cp_overlay_items.append(lbl)
+        self._refresh_anchor_overlay()
 
     @staticmethod
     def _profile_endpoints(prof: dict) -> Optional[Tuple[float, float, float, float]]:
@@ -620,8 +740,123 @@ class CurveAnalyzeTab(QWidget):
         if curve_method == "nurbs":
             grouped = self._grouped_vector_endpoints(prof, groups or self._active_groups or [])
             if grouped is not None:
-                return grouped
-        return self._profile_endpoints(prof)
+                return self._extend_endpoint_targets_with_cross_anchors(prof, grouped, line_id=lid)
+        base = self._profile_endpoints(prof)
+        return self._extend_endpoint_targets_with_cross_anchors(prof, base, line_id=lid)
+
+    def _extend_endpoint_targets_with_cross_anchors(
+        self,
+        prof: dict,
+        endpoints: Optional[Tuple[float, float, float, float]],
+        line_id: Optional[str] = None,
+    ) -> Optional[Tuple[float, float, float, float]]:
+        if endpoints is None:
+            return None
+        lid = str(line_id or self._line_id_current())
+        row_meta = self._line_row_meta()
+        if str(row_meta.get("line_id", "")) != lid:
+            # line_id passed here is save-path id (combo text-derived), not UI2 line_id. Use current role only.
+            pass
+        if self._current_ui2_line_role() != "cross":
+            return endpoints
+        anchors = self._anchors_for_cross_line(self._current_ui2_line_id(), require_ready=True)
+        if not anchors:
+            return endpoints
+        s_vals = [float(a.get("s_on_cross")) for a in anchors if a.get("s_on_cross", None) is not None]
+        s_vals = [s for s in s_vals if np.isfinite(s)]
+        if not s_vals:
+            return endpoints
+        s0, z0, s1, z1 = map(float, endpoints)
+        lo = min(s0, s1)
+        hi = max(s0, s1)
+        new_lo = min(lo, min(s_vals))
+        new_hi = max(hi, max(s_vals))
+        if not (new_hi > new_lo):
+            return endpoints
+        if abs(new_lo - lo) < 1e-9 and abs(new_hi - hi) < 1e-9:
+            return endpoints
+        chain = np.asarray(prof.get("chain", []), dtype=float)
+        elev = np.asarray(prof.get("elev_s", []), dtype=float)
+        m = np.isfinite(chain) & np.isfinite(elev)
+        if int(np.count_nonzero(m)) < 2:
+            return endpoints
+        chain = chain[m]
+        elev = elev[m]
+        order = np.argsort(chain)
+        chain = chain[order]
+        elev = elev[order]
+        z_lo = float(np.interp(new_lo, chain, elev))
+        z_hi = float(np.interp(new_hi, chain, elev))
+        return (new_lo, z_lo, new_hi, z_hi)
+
+    def _constrain_curve_to_cross_anchors(self, curve: Optional[Dict[str, np.ndarray]]) -> Optional[Dict[str, np.ndarray]]:
+        if not curve:
+            return curve
+        if self._current_ui2_line_role() != "cross":
+            return curve
+        anchors = self._anchors_for_cross_line(self._current_ui2_line_id(), require_ready=True)
+        if len(anchors) < 3:
+            return curve
+
+        ch = np.asarray((curve or {}).get("chain", []), dtype=float)
+        zz = np.asarray((curve or {}).get("elev", []), dtype=float)
+        m = np.isfinite(ch) & np.isfinite(zz)
+        ch = ch[m]
+        zz = zz[m]
+        if ch.size < 2:
+            return curve
+        order = np.argsort(ch)
+        ch = ch[order]
+        zz = zz[order]
+
+        a_s = []
+        a_z = []
+        for a in anchors:
+            try:
+                s = float(a.get("s_on_cross"))
+                z = float(a.get("z"))
+            except Exception:
+                continue
+            if np.isfinite(s) and np.isfinite(z):
+                a_s.append(s)
+                a_z.append(z)
+        if len(a_s) < 3:
+            return curve
+        a_s = np.asarray(a_s, dtype=float)
+        a_z = np.asarray(a_z, dtype=float)
+        o = np.argsort(a_s)
+        a_s = a_s[o]
+        a_z = a_z[o]
+
+        # If anchors sit outside the current curve span (should be rare after endpoint extension),
+        # expand sampled domain by inserting anchor chainages before applying correction.
+        ch_aug = np.unique(np.concatenate([ch, a_s]))
+        if ch_aug.size < 2:
+            return curve
+        base_zz = np.interp(ch_aug, ch, zz)
+
+        base_at_anchor = np.interp(a_s, ch_aug, base_zz)
+        residual = a_z - base_at_anchor
+        node_x = np.concatenate([[float(ch_aug[0])], a_s, [float(ch_aug[-1])]])
+        node_r = np.concatenate([[0.0], residual, [0.0]])
+        # Monotonic x for interpolation (deduplicate if anchor hits endpoint exactly)
+        keep = np.ones(node_x.shape, dtype=bool)
+        for i in range(1, node_x.size):
+            if not (node_x[i] > node_x[i - 1]):
+                keep[i] = False
+        node_x = node_x[keep]
+        node_r = node_r[keep]
+        if node_x.size < 2:
+            return {"chain": ch_aug, "elev": base_zz}
+
+        corr = np.interp(ch_aug, node_x, node_r)
+        zz_adj = base_zz + corr
+        for s, z in zip(a_s, a_z):
+            hit = np.isclose(ch_aug, s, rtol=0.0, atol=1e-9)
+            if np.any(hit):
+                zz_adj[hit] = z
+
+        return {"chain": ch_aug, "elev": zz_adj}
 
     @staticmethod
     def _normalize_group_spans(groups: list) -> List[Tuple[float, float]]:
@@ -963,7 +1198,9 @@ class CurveAnalyzeTab(QWidget):
         sz = sz[m_span]
         if sx.size < 2:
             return None
-        return {"chain": sx, "elev": sz}
+        out = {"chain": sx, "elev": sz}
+        out = self._constrain_curve_to_cross_anchors(out)
+        return out
 
     def _on_nurbs_cp_spin_changed(self, val: int) -> None:
         if self._nurbs_updating_ui:
@@ -1164,10 +1401,21 @@ class CurveAnalyzeTab(QWidget):
             self._log(f"[UI3] Saved group table: {group_json}")
             self._log(f"[UI3] Saved groups JSON: {groups_ui3_json}")
             self._log(f"[UI3] Saved NURBS info: {nurbs_info_json}")
+            try:
+                anchor_path, n_upd = self._update_anchors_xyz_for_saved_main_curve(curve)
+                if anchor_path and n_upd > 0:
+                    self._log(f"[UI3] Updated anchors_xyz: {anchor_path} (n={n_upd})")
+            except Exception as e:
+                self._warn(f"[UI3] Cannot update anchors_xyz: {e}")
+            self._refresh_anchor_overlay()
 
     def _on_auto_group(self) -> None:
         """Sinh group tự động như UI3, lưu JSON, cập nhật bảng, và vẽ guide (không re-render)."""
         try:
+            try:
+                self._nurbs_live_timer.stop()
+            except Exception:
+                pass
             # 1) Dữ liệu tuyến
             if not hasattr(self, "_gdf") or self._gdf is None or self._gdf.empty:
                 self._warn("[UI3] No lines loaded from UI2.")
@@ -1196,28 +1444,26 @@ class CurveAnalyzeTab(QWidget):
             dlg.setIcon(QMessageBox.Question)
             dlg.setWindowTitle("Auto Group Method")
             dlg.setText("Select grouping method:")
+            dlg.setWindowFlag(Qt.WindowCloseButtonHint, True)
+            dlg.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
             dlg.setStandardButtons(QMessageBox.NoButton)
-            btn_traditional = dlg.addButton("Traditional", QMessageBox.ActionRole)
+            btn_old = dlg.addButton("Old", QMessageBox.ActionRole)
             btn_new = dlg.addButton("New", QMessageBox.ActionRole)
-            btn_test = dlg.addButton("Test", QMessageBox.ActionRole)
+            btn_cancel = dlg.addButton("Cancel", QMessageBox.RejectRole)
             dlg.exec_()
 
             clicked = dlg.clickedButton()
             clicked_text = clicked.text().strip() if clicked is not None else ""
-            if clicked_text == "Traditional":
-                # Theo yêu cầu: Traditional -> hàm mới
-                self._log("[UI3] Auto Group method: Traditional -> new criteria (curve: NURBS)")
+            if clicked_text == "New":
+                # UI label "New" = criteria mới (internal legacy key kept as "traditional")
+                self._log("[UI3] Auto Group method: New -> new criteria (curve: NURBS)")
                 groups = auto_group_profile_by_criteria(prof)
                 group_method = "traditional"
-            elif clicked_text == "New":
-                # Theo yêu cầu: New -> hàm/tiêu chí cũ
-                self._log("[UI3] Auto Group method: New -> legacy criteria (curve: Bezier)")
+            elif clicked_text == "Old":
+                # UI label "Old" = tiêu chí cũ (internal legacy key kept as "new")
+                self._log("[UI3] Auto Group method: Old -> legacy criteria (curve: Bezier)")
                 groups = auto_group_profile(prof)
                 group_method = "new"
-            elif clicked_text == "Test":
-                self._log("[UI3] Auto Group method: Test -> adaptive hybrid split (curve: NURBS)")
-                groups = auto_group_profile_adaptive_hybrid(prof)
-                group_method = "test"
             else:
                 self._log("[UI3] Auto Group canceled.")
                 return
@@ -1238,6 +1484,10 @@ class CurveAnalyzeTab(QWidget):
             )
             # Re-render ngay để vẽ vector và tô màu theo group vừa tạo.
             self._render_current_safe()
+            try:
+                self._nurbs_live_timer.stop()
+            except Exception:
+                pass
         except Exception as e:
             self._err(f"[UI3] Auto Group error: {e}")
 
@@ -1245,8 +1495,12 @@ class CurveAnalyzeTab(QWidget):
         """Tính và vẽ đường cong (overlay) vào PNG preview hiện tại."""
         try:
             line_id = self._line_id_current()
-            curve_method = self._get_curve_method_for_line(line_id)
-            self._log(f"[UI3] Curve method for '{line_id}': {curve_method.upper()}")
+            _prev_curve_method = self._get_curve_method_for_line(line_id)
+            curve_method = self._set_curve_method_for_line(line_id, "nurbs")
+            if _prev_curve_method != "nurbs":
+                self._log(f"[UI3] Curve method for '{line_id}': forced to NURBS (Bezier-like seed)")
+            else:
+                self._log(f"[UI3] Curve method for '{line_id}': NURBS (Bezier-like seed)")
 
             # 1) Lấy line và profile TRONG slip-zone
             if not hasattr(self, "_gdf") or self._gdf is None or self._gdf.empty:
@@ -1360,13 +1614,8 @@ class CurveAnalyzeTab(QWidget):
                 f"chain=[{x_base.min():.2f}, {x_base.max():.2f}]"
             )
 
-            self._active_prof = prof
-            self._active_groups = groups
-            self._active_base_curve = {"chain": x_base, "elev": z_base}
-            self._sync_nurbs_panel_for_current_line(reset_defaults=False)
-
             # 4) Fit curve theo method
-            curve = {"chain": x_base, "elev": z_base}  # fallback mặc định
+            curve = {"chain": x_base, "elev": z_base}  # fallback mặc định (base target)
 
             def _fit_bezier_curve() -> Optional[dict]:
                 try:
@@ -1386,35 +1635,46 @@ class CurveAnalyzeTab(QWidget):
                     xb = xb[m2]
                     zb = zb[m2]
                     if xb.size >= 2:
-                        self._log(f"[UI3] Bezier slip curve OK: n={xb.size}")
+                        self._log(f"[UI3] Bezier-like seed curve OK: n={xb.size}")
                         return {"chain": xb, "elev": zb}
                 except Exception as e:
-                    self._warn(f"[UI3] Bezier fit failed, using base curve. ({e})")
+                    self._warn(f"[UI3] Bezier-like seed fit failed, using base target. ({e})")
                 return None
 
-            if curve_method == "nurbs":
-                params = self._collect_nurbs_params_from_ui()
-                if params:
-                    nurbs_curve = self._compute_nurbs_curve_from_params(params)
-                    if nurbs_curve is not None:
-                        curve = nurbs_curve
-                        self._log(f"[UI3] NURBS slip curve OK: n={len(nurbs_curve['chain'])}")
-                    else:
-                        self._warn("[UI3] NURBS fit failed; fallback to Bezier.")
-                        bez_curve = _fit_bezier_curve()
-                        if bez_curve is not None:
-                            curve = bez_curve
-                else:
-                    self._warn("[UI3] Invalid NURBS params; fallback to Bezier.")
-                    bez_curve = _fit_bezier_curve()
-                    if bez_curve is not None:
-                        curve = bez_curve
+            bez_curve = _fit_bezier_curve()
+            if bez_curve is not None:
+                curve = bez_curve
             else:
-                bez_curve = _fit_bezier_curve()
-                if bez_curve is not None:
-                    curve = bez_curve
-                else:
-                    self._warn("[UI3] Bezier returned too few points; using base curve.")
+                self._warn("[UI3] Bezier-like seed has too few points; using base target.")
+
+            # Seed NURBS defaults from Bezier-like curve, but keep user's existing NURBS if already present.
+            self._active_prof = prof
+            self._active_groups = groups
+            self._active_base_curve = {
+                "chain": np.asarray(curve["chain"], dtype=float),
+                "elev": np.asarray(curve["elev"], dtype=float),
+            }
+            self._sync_nurbs_panel_for_current_line(reset_defaults=False)
+
+            def _eval_current_nurbs() -> Optional[dict]:
+                params_now = self._collect_nurbs_params_from_ui()
+                if not params_now:
+                    return None
+                return self._compute_nurbs_curve_from_params(params_now)
+
+            nurbs_curve = _eval_current_nurbs()
+            if nurbs_curve is None:
+                # If current UI params are invalid (or stale), regenerate NURBS defaults from Bezier-like seed once.
+                self._warn("[UI3] Current NURBS params invalid/unusable; reset to Bezier-like NURBS seed.")
+                self._sync_nurbs_panel_for_current_line(reset_defaults=True)
+                nurbs_curve = _eval_current_nurbs()
+
+            if nurbs_curve is not None:
+                curve = nurbs_curve
+                self._log(f"[UI3] NURBS slip curve OK: n={len(nurbs_curve['chain'])}")
+            else:
+                # Last-resort fallback for display only; keep UI responsive.
+                self._warn("[UI3] NURBS fit failed after reseed; showing Bezier-like seed curve.")
 
             # 5) Re-render base PNG (no curve baked-in), then draw overlay in scene
             out_png = self._profile_png_path_for(line_id)
@@ -1450,6 +1710,8 @@ class CurveAnalyzeTab(QWidget):
                 "elev": np.asarray(curve["elev"], dtype=float),
             }
             self._draw_curve_overlay(self._active_curve["chain"], self._active_curve["elev"])
+            # scene.clear() above removes CP markers; redraw them immediately after Draw Curve.
+            self._draw_control_points_overlay()
 
             if getattr(self, "_first_show", True):
                 self.view.fit_to_scene()
@@ -1800,6 +2062,8 @@ class CurveAnalyzeTab(QWidget):
     def set_context(self, project: str, run_label: str, run_dir: str) -> None:
         """Du?c g?i t? MainWindow sau khi Analyze/Section xong."""
         self._ctx.update({"project": project, "run_label": run_label, "run_dir": run_dir})
+        self._ui2_intersections_cache = None
+        self._anchors_xyz_cache = None
         # uu tiˆn d?c t? ui_shared_data.json (do Analyze/Section ghi)
         shared_jsons = [
             os.path.join(run_dir, "ui_shared_data.json"),
@@ -1958,6 +2222,8 @@ class CurveAnalyzeTab(QWidget):
         self._active_groups = []
         self._active_base_curve = None
         self._active_curve = None
+        self._ui2_intersections_cache = None
+        self._anchors_xyz_cache = None
         self._plot_x0_px = None
         self._plot_w_px = None
         self._x_min = None
@@ -2059,6 +2325,7 @@ class CurveAnalyzeTab(QWidget):
             self._sec_len_m = None
 
         self._load_saved_curve_state_for_current_line()
+        self._refresh_anchor_overlay()
 
     def _try_load_group_table_from_curve(self, line_id: str) -> bool:
         path = self._curve_group_json_path_for(line_id)
@@ -2173,6 +2440,7 @@ class CurveAnalyzeTab(QWidget):
             if getattr(self, "_first_show", True):
                 self.view.fit_to_scene()
                 self._first_show = False
+            self._refresh_anchor_overlay()
             self._log(f"[UI3] Loaded NURBS preview: {path}")
             return True
         except Exception:
@@ -2221,6 +2489,7 @@ class CurveAnalyzeTab(QWidget):
         self._try_load_nurbs_table_from_curve(line_id)
         if not loaded_preview:
             self._log("[i] No saved NURBS preview in ui3/curve. Click 'Render Section' to preview.")
+        self._refresh_anchor_overlay()
 
     # def _groups_json_path(self) -> str:
     #     line_label = self.line_combo.currentText().strip() or f"line_{self.line_combo.currentIndex() + 1:03d}"
@@ -2343,6 +2612,295 @@ class CurveAnalyzeTab(QWidget):
     def _vectors_json_path_for(self, line_id: str) -> str:
         return os.path.join(self._vectors_dir(), f"{line_id}.json")
 
+    def _ui2_intersections_json_path(self) -> str:
+        run_dir = (self._ctx.get("run_dir") or "").strip()
+        if not run_dir:
+            raise RuntimeError("[UI3] Run context is empty. Call set_context() first.")
+        return os.path.join(run_dir, "ui2", "intersections_main_cross.json")
+
+    def _anchors_xyz_json_path(self) -> str:
+        return os.path.join(self._ui3_run_dir(), "anchors_xyz.json")
+
+    @staticmethod
+    def _normalize_line_role(line_role: str, line_id: str = "") -> str:
+        role = (line_role or "").strip().lower()
+        lid = (line_id or "").strip().lower()
+        if role in ("main", "ml"):
+            return "main"
+        if role in ("cross", "aux", "cl"):
+            return "cross"
+        if lid.startswith("ml-") or lid.startswith("main"):
+            return "main"
+        if lid.startswith("cl-") or lid.startswith("cross"):
+            return "cross"
+        return ""
+
+    def _line_row_meta(self, row: Optional[int] = None) -> Dict[str, Any]:
+        out: Dict[str, Any] = {"row": -1, "line_id": "", "line_role": ""}
+        try:
+            ridx = self.line_combo.currentIndex() if row is None else int(row)
+        except Exception:
+            ridx = -1
+        out["row"] = ridx
+        try:
+            if ridx >= 0 and hasattr(self, "_gdf") and self._gdf is not None and ridx < len(self._gdf):
+                g = self._gdf.iloc[ridx]
+                line_id = str(g.get("line_id", g.get("name", "")) or "").strip()
+                line_role = self._normalize_line_role(str(g.get("line_role", "")) or "", line_id)
+                out["line_id"] = line_id
+                out["line_role"] = line_role
+                out["name"] = str(g.get("name", "") or "").strip()
+        except Exception:
+            pass
+        if not out.get("line_id"):
+            out["line_id"] = self._line_id_current()
+        if not out.get("line_role"):
+            out["line_role"] = self._normalize_line_role("", str(out.get("line_id", "")))
+        return out
+
+    def _current_ui2_line_id(self) -> str:
+        return str(self._line_row_meta().get("line_id", "") or "")
+
+    def _current_ui2_line_role(self) -> str:
+        return str(self._line_row_meta().get("line_role", "") or "")
+
+    def _load_ui2_intersections(self, force: bool = False) -> Dict[str, Any]:
+        if (not force) and isinstance(self._ui2_intersections_cache, dict):
+            return self._ui2_intersections_cache
+        path = ""
+        try:
+            path = self._ui2_intersections_json_path()
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f) or {}
+            else:
+                data = {}
+        except Exception:
+            data = {}
+        items = data.get("items", []) if isinstance(data, dict) else []
+        if not isinstance(items, list):
+            items = []
+        data = dict(data or {})
+        data["items"] = items
+        data["_path"] = path
+        self._ui2_intersections_cache = data
+        return data
+
+    def _load_anchors_xyz(self, force: bool = False) -> Dict[str, Any]:
+        if (not force) and isinstance(self._anchors_xyz_cache, dict):
+            return self._anchors_xyz_cache
+        path = ""
+        try:
+            path = self._anchors_xyz_json_path()
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f) or {}
+            else:
+                data = {}
+        except Exception:
+            data = {}
+        items = data.get("items", []) if isinstance(data, dict) else []
+        if not isinstance(items, list):
+            items = []
+        data = dict(data or {})
+        data["items"] = items
+        data["_path"] = path
+        self._anchors_xyz_cache = data
+        return data
+
+    def _save_anchors_xyz(self, data: Dict[str, Any]) -> str:
+        path = self._anchors_xyz_json_path()
+        payload = dict(data or {})
+        payload.pop("_path", None)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        payload["_path"] = path
+        self._anchors_xyz_cache = payload
+        return path
+
+    def _expected_main_line_ids(self) -> List[str]:
+        data = self._load_ui2_intersections()
+        vals = []
+        for it in (data.get("items", []) or []):
+            try:
+                lid = str(it.get("main_line_id", "")).strip()
+            except Exception:
+                lid = ""
+            if lid and lid not in vals:
+                vals.append(lid)
+        return vals
+
+    def _anchors_ready_for_cross_constraints(self) -> bool:
+        inter = self._load_ui2_intersections()
+        inter_items = [it for it in (inter.get("items", []) or []) if str(it.get("status", "")).startswith(("ok", "multi_point"))]
+        if not inter_items:
+            return False
+        expected = sorted({str(it.get("main_line_id", "")).strip() for it in inter_items if str(it.get("main_line_id", "")).strip()})
+        if len(expected) < 3:
+            return False
+        anc = self._load_anchors_xyz()
+        anc_items = [it for it in (anc.get("items", []) or []) if it.get("z", None) is not None]
+        keys = {
+            (
+                str(it.get("main_line_id", "")).strip(),
+                str(it.get("cross_line_id", "")).strip(),
+            )
+            for it in anc_items
+        }
+        for it in inter_items:
+            key = (str(it.get("main_line_id", "")).strip(), str(it.get("cross_line_id", "")).strip())
+            if key not in keys:
+                return False
+        saved_mains = sorted({k[0] for k in keys if k[0]})
+        return all(m in saved_mains for m in expected[:3]) if expected else False
+
+    def _anchors_for_cross_line(self, cross_line_id: str, require_ready: bool = True) -> List[dict]:
+        cross_id = str(cross_line_id or "").strip()
+        if not cross_id:
+            return []
+        if require_ready and not self._anchors_ready_for_cross_constraints():
+            return []
+
+        inter = self._load_ui2_intersections()
+        anc = self._load_anchors_xyz()
+        inter_items = [it for it in (inter.get("items", []) or []) if str(it.get("cross_line_id", "")).strip() == cross_id]
+        anc_by_key: Dict[Tuple[str, str], dict] = {}
+        for it in (anc.get("items", []) or []):
+            m_id = str(it.get("main_line_id", "")).strip()
+            c_id = str(it.get("cross_line_id", "")).strip()
+            if m_id and c_id:
+                anc_by_key[(m_id, c_id)] = it
+
+        out = []
+        for inter_it in inter_items:
+            m_id = str(inter_it.get("main_line_id", "")).strip()
+            rec = anc_by_key.get((m_id, cross_id))
+            if not rec:
+                continue
+            try:
+                s_cross = float(rec.get("s_on_cross", inter_it.get("s_on_cross")))
+                z = float(rec.get("z"))
+                x = float(rec.get("x", inter_it.get("x")))
+                y = float(rec.get("y", inter_it.get("y")))
+            except Exception:
+                continue
+            if not (np.isfinite(s_cross) and np.isfinite(z) and np.isfinite(x) and np.isfinite(y)):
+                continue
+            try:
+                main_order = int(rec.get("main_order", inter_it.get("main_order", 999)))
+            except Exception:
+                main_order = 999
+            label = str(rec.get("main_label_fixed", inter_it.get("main_label_fixed", ""))).strip() or f"L{main_order if main_order < 999 else len(out)+1}"
+            out.append({
+                "main_line_id": m_id,
+                "cross_line_id": cross_id,
+                "main_order": main_order,
+                "main_label_fixed": label,
+                "x": x,
+                "y": y,
+                "z": z,
+                "s_on_cross": s_cross,
+                "s_on_main": rec.get("s_on_main", inter_it.get("s_on_main")),
+            })
+        out.sort(key=lambda d: (int(d.get("main_order", 999)), str(d.get("main_line_id", ""))))
+        return out
+
+    def _update_anchors_xyz_for_saved_main_curve(self, curve: Dict[str, np.ndarray]) -> Tuple[Optional[str], int]:
+        if self._current_ui2_line_role() != "main":
+            return None, 0
+        main_line_id = self._current_ui2_line_id()
+        if not main_line_id:
+            return None, 0
+
+        inter = self._load_ui2_intersections(force=True)
+        inter_items = []
+        for it in (inter.get("items", []) or []):
+            try:
+                if str(it.get("main_line_id", "")).strip() != main_line_id:
+                    continue
+                status = str(it.get("status", "")).strip()
+                if not status.startswith(("ok", "multi_point")):
+                    continue
+                s_main = float(it.get("s_on_main"))
+                s_cross = float(it.get("s_on_cross"))
+                x = float(it.get("x"))
+                y = float(it.get("y"))
+                if not (np.isfinite(s_main) and np.isfinite(s_cross) and np.isfinite(x) and np.isfinite(y)):
+                    continue
+                inter_items.append(it)
+            except Exception:
+                continue
+        if not inter_items:
+            return None, 0
+
+        ch = np.asarray((curve or {}).get("chain", []), dtype=float)
+        zz = np.asarray((curve or {}).get("elev", []), dtype=float)
+        m = np.isfinite(ch) & np.isfinite(zz)
+        ch = ch[m]
+        zz = zz[m]
+        if ch.size < 2:
+            return None, 0
+        o = np.argsort(ch)
+        ch = ch[o]
+        zz = zz[o]
+
+        data = self._load_anchors_xyz(force=True)
+        items = [dict(it) for it in (data.get("items", []) or []) if isinstance(it, dict)]
+        index_by_key: Dict[Tuple[str, str], int] = {}
+        for i, it in enumerate(items):
+            key = (str(it.get("main_line_id", "")).strip(), str(it.get("cross_line_id", "")).strip())
+            if key[0] and key[1]:
+                index_by_key[key] = i
+
+        try:
+            import datetime as _dt
+            saved_at = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            saved_at = ""
+
+        updated = 0
+        for it in inter_items:
+            try:
+                s_main = float(it.get("s_on_main"))
+                z_val = float(np.interp(s_main, ch, zz))
+            except Exception:
+                continue
+            rec = {
+                "main_line_id": str(it.get("main_line_id", "")).strip(),
+                "cross_line_id": str(it.get("cross_line_id", "")).strip(),
+                "main_row_index": it.get("main_row_index"),
+                "cross_row_index": it.get("cross_row_index"),
+                "main_label_fixed": str(it.get("main_label_fixed", "")).strip(),
+                "main_order": it.get("main_order"),
+                "cross_order": it.get("cross_order"),
+                "x": float(it.get("x")),
+                "y": float(it.get("y")),
+                "z": z_val,
+                "s_on_main": float(it.get("s_on_main")),
+                "s_on_cross": float(it.get("s_on_cross")),
+                "status": str(it.get("status", "ok")),
+                "saved_at": saved_at,
+                "curve_method": "nurbs",
+                "source_ui3_line_id": self._line_id_current(),
+            }
+            key = (rec["main_line_id"], rec["cross_line_id"])
+            if key in index_by_key:
+                items[index_by_key[key]] = rec
+            else:
+                index_by_key[key] = len(items)
+                items.append(rec)
+            updated += 1
+
+        payload = {
+            "version": 1,
+            "items": items,
+            "updated_at": saved_at,
+            "source_intersections": inter.get("_path", ""),
+        }
+        out_path = self._save_anchors_xyz(payload)
+        return out_path, updated
+
     @staticmethod
     def _group_for_chainage(groups: List[dict], chainage: float) -> Tuple[Optional[str], Optional[str]]:
         for g in (groups or []):
@@ -2421,13 +2979,15 @@ class CurveAnalyzeTab(QWidget):
             ch = _to_float(chain, i)
             if ch is None:
                 continue
-            gid, _ = self._group_for_chainage(groups or [], ch)
             in_slip = None
             if slip_mask is not None and i < slip_mask.size:
                 try:
                     in_slip = bool(slip_mask[i])
                 except Exception:
                     in_slip = None
+            gid = None
+            if in_slip is not False:
+                gid, _ = self._group_for_chainage(groups or [], ch)
             rows.append({
                 "index": i,
                 "chain_m": ch,
@@ -2535,6 +3095,7 @@ class CurveAnalyzeTab(QWidget):
         self._active_groups = groups if groups else []
         self._active_base_curve = None
         self._active_curve = None
+        self._refresh_anchor_overlay()
 
         # Fit lần đầu
         if getattr(self, "_first_show", True):
