@@ -41,7 +41,7 @@ def run_detect(
     import matplotlib.pyplot as plt
     from matplotlib.colors import LightSource
     from rasterio.plot import plotting_extent
-    from scipy.ndimage import uniform_filter
+    from scipy.ndimage import uniform_filter, binary_erosion
 
     dx_path = os.path.join(ctx.out_ui1, "dx.tif")
     dy_path = os.path.join(ctx.out_ui1, "dy.tif")
@@ -88,6 +88,59 @@ def run_detect(
     meta_dx.update(driver="GTiff", count=1, dtype="uint8", nodata=0, compress="lzw")
     with rasterio.open(mask_tif, "w", **meta_dx) as dst:
         dst.write(mask, 1)
+
+    # ---- save boundary elevations of landslide mask (UI1)
+    boundary_elev_json = None
+    try:
+        before_asc = os.path.join(ctx.in_dir, "before.asc")
+        if os.path.exists(before_asc):
+            with rasterio.open(before_asc) as dem_src:
+                dem_bnd = dem_src.read(1).astype("float32")
+                dem_nd = dem_src.nodata
+                dem_tf = dem_src.transform
+                if dem_nd is not None:
+                    dem_bnd[dem_bnd == dem_nd] = np.nan
+
+            if dem_bnd.shape == mask.shape:
+                mask_bool = (mask > 0)
+                if np.any(mask_bool):
+                    eroded = binary_erosion(mask_bool, structure=np.ones((3, 3), dtype=bool), border_value=0)
+                    boundary = mask_bool & (~eroded)
+                    rr, cc = np.where(boundary)
+                    if rr.size > 0:
+                        xs, ys = rasterio.transform.xy(dem_tf, rr.tolist(), cc.tolist(), offset="center")
+                        z = dem_bnd[rr, cc]
+                        pts = []
+                        for i, (r, c, x, y, zv) in enumerate(zip(rr, cc, xs, ys, z)):
+                            pts.append({
+                                "index": int(i),
+                                "row": int(r),
+                                "col": int(c),
+                                "x": (float(x) if np.isfinite(x) else None),
+                                "y": (float(y) if np.isfinite(y) else None),
+                                "elev_m": (float(zv) if np.isfinite(zv) else None),
+                            })
+                        zf = z[np.isfinite(z)]
+                        payload = {
+                            "count": int(len(pts)),
+                            "mask_path": mask_tif.replace("\\", "/"),
+                            "dem_path": before_asc.replace("\\", "/"),
+                            "elev_stats_m": {
+                                "min": (float(np.min(zf)) if zf.size else None),
+                                "max": (float(np.max(zf)) if zf.size else None),
+                                "mean": (float(np.mean(zf)) if zf.size else None),
+                            },
+                            "boundary_points": pts,
+                        }
+                        boundary_elev_json = os.path.join(ctx.out_ui1, "landslide_boundary_elevations.json")
+                        with open(boundary_elev_json, "w", encoding="utf-8") as f:
+                            json.dump(payload, f, ensure_ascii=False, indent=2)
+            else:
+                print("[WARN] before.asc shape != landslide mask shape; skip boundary elevation export.")
+        else:
+            print("[WARN] before.asc not found; skip boundary elevation export.")
+    except Exception as e:
+        print(f"[WARN] Failed to save landslide boundary elevations: {e}")
 
     # ---- crop DEM with mask for UI3 (optional)
     dem_cropped = None
@@ -235,6 +288,7 @@ def run_detect(
     return {
         "mask_tif": mask_tif.replace("\\", "/"),
         "mask_png": mask_png.replace("\\", "/"),
+        "boundary_elev_json": (boundary_elev_json.replace("\\", "/") if boundary_elev_json else None),
         "threshold_m": float(threshold_m),
         "pixel_size_m": float(pix_m),
     }
