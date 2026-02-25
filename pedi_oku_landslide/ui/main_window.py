@@ -11,6 +11,7 @@ from PyQt5.QtGui import QFont, QFontDatabase
 from .views.analyze_tab import AnalyzeTab
 from .views.section_tab import SectionSelectionTab
 from .views.curve_tab import CurveAnalyzeTab
+from .views.ui4_frontend import UI4FrontendTab
 from .views.settings_dialog import SettingsDialog
 from pedi_oku_landslide.project.settings_store import load_settings
 from PyQt5.QtGui import QIcon
@@ -246,12 +247,20 @@ class MainWindow(QMainWindow):
         curve_scroll.setWidgetResizable(True)
         self.tabs.addTab(curve_scroll, "Curve Analyze")
 
+        # UI4 tab (Kriging surface build)
+        self.ui4_tab = UI4FrontendTab(self.app_root)
+        ui4_scroll = QScrollArea()
+        ui4_scroll.setWidget(self.ui4_tab)
+        ui4_scroll.setWidgetResizable(True)
+        self.tabs.addTab(ui4_scroll, "Contour Lines")
+
         root_layout.addWidget(self.tabs)
 
         # Lưu index để enable/disable
         self._idx_analyze = self.tabs.indexOf(analyze_scroll)
         self._idx_section = self.tabs.indexOf(section_scroll)
         self._idx_curve = self.tabs.indexOf(curve_scroll)
+        self._idx_ui4 = self.tabs.indexOf(ui4_scroll)
 
         # Khóa tab 2–3 khi mở app:
         self.tabs.setCurrentIndex(self._idx_analyze)
@@ -264,6 +273,8 @@ class MainWindow(QMainWindow):
 
         if hasattr(self.section_tab, "sections_confirmed"):
             self.section_tab.sections_confirmed.connect(self._on_sections_confirmed)
+        if hasattr(self.curve_tab, "curve_saved"):
+            self.curve_tab.curve_saved.connect(self._on_curve_saved)
 
         self.setWindowTitle("PEDI Landslide Analyzer")
         self.resize(1000, 700)
@@ -299,6 +310,8 @@ class MainWindow(QMainWindow):
 
             if getattr(self, "curve_tab", None):
                 self.curve_tab.set_context(project, run_label, run_dir)
+            if getattr(self, "ui4_tab", None):
+                self.ui4_tab.set_context(project, run_label, run_dir)
 
             if hasattr(self, "_idx_section"):
                 self.tabs.setCurrentIndex(self._idx_section)
@@ -310,11 +323,23 @@ class MainWindow(QMainWindow):
         try:
             if getattr(self, "curve_tab", None):
                 self.curve_tab.set_context(project, run_label, run_dir)
+            if getattr(self, "ui4_tab", None):
+                self.ui4_tab.set_context(project, run_label, run_dir)
             # Chuyển sang Curve Analyze ngay sau khi confirm
             if hasattr(self, "_idx_curve"):
                 self.tabs.setCurrentIndex(self._idx_curve)
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Cannot open Curve tab:\n{e}")
+
+    def _on_curve_saved(self, curve_json_path: str) -> None:
+        try:
+            if getattr(self, "ui4_tab", None):
+                self.ui4_tab.on_upstream_curve_saved(curve_json_path)
+            # Optional UX: jump to UI4 after a successful UI3 save
+            if hasattr(self, "_idx_ui4"):
+                self.tabs.setCurrentIndex(self._idx_ui4)
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Cannot update UI4 tab:\n{e}")
 
     def _on_new_session_clicked(self) -> None:
         reply = QMessageBox.question(
@@ -345,6 +370,8 @@ class MainWindow(QMainWindow):
             self.section_tab.reset_session()
         if hasattr(self, "curve_tab"):
             self.curve_tab.reset_session()
+        if hasattr(self, "ui4_tab"):
+            self.ui4_tab.reset_session()
         self.tabs.setCurrentIndex(self._idx_analyze)
 
     #  UI scale & stylesheet

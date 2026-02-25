@@ -1408,6 +1408,10 @@ class CurveAnalyzeTab(QWidget):
             except Exception as e:
                 self._warn(f"[UI3] Cannot update anchors_xyz: {e}")
             self._refresh_anchor_overlay()
+            try:
+                self.curve_saved.emit(curve_json)
+            except Exception:
+                pass
 
     def _on_auto_group(self) -> None:
         """Sinh group tự động như UI3, lưu JSON, cập nhật bảng, và vẽ guide (không re-render)."""

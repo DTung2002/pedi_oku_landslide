@@ -4,7 +4,7 @@ from PyQt5.QtCore import QObject, QThread, pyqtSignal, Qt, QTimer
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QMessageBox, QGroupBox, QTextEdit, QSplitter, QSizePolicy,
-    QDoubleSpinBox, QComboBox, QSpinBox, QFileDialog, QScrollArea, QGridLayout, QSlider
+    QDoubleSpinBox, QComboBox, QSpinBox, QFileDialog, QScrollArea, QGridLayout, QSlider, QFrame
 )
 import os, sys
 from datetime import datetime
@@ -291,6 +291,8 @@ class AnalyzeTab(QWidget):
         left_layout.addStretch(1)
         left_scroll = QScrollArea()
         left_scroll.setWidgetResizable(True)
+        left_scroll.setFrameShape(QFrame.NoFrame)
+        left_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
         left_scroll.setMinimumWidth(self._left_min_w)
         left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         left_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
