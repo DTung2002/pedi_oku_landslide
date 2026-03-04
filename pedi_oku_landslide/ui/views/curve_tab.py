@@ -11,7 +11,7 @@ from PyQt5.QtWidgets import (
     QScrollArea, QFrame, QTextEdit, QComboBox, QDoubleSpinBox, QSpinBox,
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
     QTableWidget, QTableWidgetItem, QHeaderView, QSizePolicy,
-    QSplitter, QLineEdit, QMessageBox, QColorDialog, QAbstractSpinBox
+    QSplitter, QLineEdit, QMessageBox, QColorDialog, QAbstractSpinBox, QFileDialog
 )
 from PyQt5.QtGui import QPixmap, QPixmapCache
 from typing import Tuple, List, Dict, Optional
@@ -1900,8 +1900,10 @@ class CurveAnalyzeTab(QWidget):
         self.btn_draw_curve.clicked.connect(self._on_draw_curve)
         self.btn_auto_group = QPushButton("Auto Group")
         self.btn_auto_group.clicked.connect(self._on_auto_group)
+        self.btn_load_group = QPushButton("Load Group")
+        self.btn_load_group.clicked.connect(self._on_load_group_info)
 
-        for btn in (self.btn_auto_group, self.btn_add_g, self.btn_del_g, self.btn_draw_curve):
+        for btn in (self.btn_auto_group, self.btn_load_group, self.btn_add_g, self.btn_del_g, self.btn_draw_curve):
             btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             rowg.addWidget(btn, 1)
         lg.addLayout(rowg)
@@ -1938,14 +1940,17 @@ class CurveAnalyzeTab(QWidget):
         ln.addWidget(self.nurbs_table)
 
         row_nurbs_btn = QHBoxLayout()
+        self.btn_nurbs_load = QPushButton("Load NURBS")
         self.btn_nurbs_reset = QPushButton("Reset NURBS")
         self.btn_nurbs_save = QPushButton("Save")
+        row_nurbs_btn.addWidget(self.btn_nurbs_load, 1)
         row_nurbs_btn.addWidget(self.btn_nurbs_reset, 1)
         row_nurbs_btn.addWidget(self.btn_nurbs_save, 1)
         ln.addLayout(row_nurbs_btn)
 
         self.nurbs_cp_spin.valueChanged.connect(self._on_nurbs_cp_spin_changed)
         self.nurbs_deg_spin.valueChanged.connect(self._on_nurbs_deg_spin_changed)
+        self.btn_nurbs_load.clicked.connect(self._on_load_nurbs_info)
         self.btn_nurbs_reset.clicked.connect(self._on_nurbs_reset_defaults)
         self.btn_nurbs_save.clicked.connect(self._on_nurbs_save)
 
@@ -2318,8 +2323,7 @@ class CurveAnalyzeTab(QWidget):
         self._load_saved_curve_state_for_current_line()
         self._refresh_anchor_overlay()
 
-    def _try_load_group_table_from_curve(self, line_id: str) -> bool:
-        path = self._curve_group_json_path_for(line_id)
+    def _load_group_table_from_path(self, path: str, line_id: str) -> bool:
         if not os.path.exists(path):
             return False
         loaded = 0
@@ -2358,8 +2362,36 @@ class CurveAnalyzeTab(QWidget):
             return True
         return False
 
-    def _try_load_nurbs_table_from_curve(self, line_id: str) -> bool:
-        path = self._curve_nurbs_info_json_path_for(line_id)
+    def _try_load_group_table_from_curve(self, line_id: str) -> bool:
+        path = self._curve_group_json_path_for(line_id)
+        return self._load_group_table_from_path(path, line_id)
+
+    def _on_load_group_info(self) -> None:
+        if self.line_combo.count() == 0:
+            self._warn("[UI3] No line selected.")
+            return
+        try:
+            start_dir = self._curve_dir()
+        except Exception:
+            start_dir = self.base_dir
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load group_info",
+            start_dir,
+            "JSON files (*.json);;All files (*.*)",
+        )
+        if not path:
+            return
+        line_id = self._line_id_current()
+        if self._load_group_table_from_path(path, line_id):
+            try:
+                self._sync_nurbs_defaults_from_group_table()
+            except Exception:
+                pass
+        else:
+            self._warn("[UI3] Cannot load group_info file.")
+
+    def _load_nurbs_table_from_path(self, path: str, line_id: str) -> bool:
         if not os.path.exists(path):
             return False
         try:
@@ -2410,6 +2442,30 @@ class CurveAnalyzeTab(QWidget):
         except Exception as e:
             self._log(f"[!] Cannot read curve nurbs_info file: {e}")
             return False
+
+    def _try_load_nurbs_table_from_curve(self, line_id: str) -> bool:
+        path = self._curve_nurbs_info_json_path_for(line_id)
+        return self._load_nurbs_table_from_path(path, line_id)
+
+    def _on_load_nurbs_info(self) -> None:
+        if self.line_combo.count() == 0:
+            self._warn("[UI3] No line selected.")
+            return
+        try:
+            start_dir = self._curve_dir()
+        except Exception:
+            start_dir = self.base_dir
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load nurbs_info",
+            start_dir,
+            "JSON files (*.json);;All files (*.*)",
+        )
+        if not path:
+            return
+        line_id = self._line_id_current()
+        if not self._load_nurbs_table_from_path(path, line_id):
+            self._warn("[UI3] Cannot load nurbs_info file.")
 
     def _try_load_nurbs_preview_from_curve(self, line_id: str) -> bool:
         path = self._curve_nurbs_png_path_for(line_id)
