@@ -335,9 +335,6 @@ class MainWindow(QMainWindow):
         try:
             if getattr(self, "ui4_tab", None):
                 self.ui4_tab.on_upstream_curve_saved(curve_json_path)
-            # Optional UX: jump to UI4 after a successful UI3 save
-            if hasattr(self, "_idx_ui4"):
-                self.tabs.setCurrentIndex(self._idx_ui4)
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Cannot update UI4 tab:\n{e}")
 

@@ -100,6 +100,11 @@ DEFAULT_UI4_CONTOUR_PARAMS: Dict[str, Any] = {
     "dpi": 200,
     "label_fontsize": 8,
     "linewidth": 1.0,
+    "dem_overlay_linewidth": 0.8,
+    "dem_overlay_color": "#dddddd",
+    "slip_label_step_m": 5.0,
+    "dem_label_step_m": 10.0,
+    "panel_padding_m": 20.0,
 }
 
 
@@ -1049,6 +1054,33 @@ def _contour_levels_from_interval_range(
     return levels[np.isfinite(levels)]
 
 
+def _label_levels_by_step(levels: np.ndarray, *, label_step: float, base_interval: float) -> np.ndarray:
+    arr = np.asarray(levels, dtype=float)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return arr
+    arr = np.unique(np.round(arr, 12))
+    if arr.size == 0:
+        return arr
+    arr.sort()
+
+    step = _safe_float(label_step)
+    if not np.isfinite(step) or step <= 0:
+        return arr
+
+    tol = max(1e-6, abs(step) * 1e-6)
+    mult = np.round(arr / step)
+    picked = arr[np.isclose(arr, mult * step, rtol=0.0, atol=tol)]
+    if picked.size > 0:
+        return picked
+
+    base = _safe_float(base_interval)
+    if not np.isfinite(base) or base <= 0:
+        return arr
+    stride = max(1, int(round(step / base)))
+    return arr[::stride]
+
+
 def render_contours_png_from_raster(
     tif_path: str,
     out_png: str,
@@ -1068,6 +1100,14 @@ def render_contours_png_from_raster(
     boundary_simplify_tolerance_m: float = DEFAULT_UI4_CONTOUR_PARAMS["boundary_simplify_tolerance_m"],
     major_interval_factor: float = DEFAULT_UI4_CONTOUR_PARAMS["major_interval_factor"],
     boundary_xy: Optional[np.ndarray] = None,
+    dem_overlay_tif: Optional[str] = None,
+    dem_overlay_interval: Optional[float] = None,
+    dem_overlay_smooth_meters: Optional[float] = None,
+    dem_overlay_color: str = str(DEFAULT_UI4_CONTOUR_PARAMS["dem_overlay_color"]),
+    dem_overlay_linewidth: float = float(DEFAULT_UI4_CONTOUR_PARAMS["dem_overlay_linewidth"]),
+    slip_label_step_m: float = float(DEFAULT_UI4_CONTOUR_PARAMS["slip_label_step_m"]),
+    dem_label_step_m: float = float(DEFAULT_UI4_CONTOUR_PARAMS["dem_label_step_m"]),
+    panel_padding_m: float = float(DEFAULT_UI4_CONTOUR_PARAMS["panel_padding_m"]),
     profile_lines: Optional[List[Dict[str, Any]]] = None,
     colorbar_label: Optional[str] = None,
     figsize: Tuple[float, float] = DEFAULT_UI4_CONTOUR_PARAMS["figsize"],
@@ -1104,7 +1144,7 @@ def render_contours_png_from_raster(
     z_plot_raw = np.asarray(z, dtype=float)
     z_plot_smooth = _gaussian_smooth_nan(z_plot_raw, sigma_px) if sigma_px > 0 else z_plot_raw.copy()
 
-    # --- NEW: mask by boundary polygon (prevent contours outside boundary) ---
+    # Mask by boundary polygon (prevent contours outside boundary).
     if boundary_xy is not None:
         try:
             from matplotlib.path import Path
@@ -1146,6 +1186,31 @@ def render_contours_png_from_raster(
     major_interval = float(interval_val)
     levels_major = levels_minor
 
+    # Define panel viewport once (boundary bbox + padding, fallback to slip raster valid extent).
+    view_bounds = None
+    try:
+        pad = _safe_float(panel_padding_m)
+        if not np.isfinite(pad) or pad < 0:
+            pad = 0.0
+        bx = boundary_xy[:, 0] if (boundary_xy is not None and len(boundary_xy) >= 3) else None
+        by = boundary_xy[:, 1] if (boundary_xy is not None and len(boundary_xy) >= 3) else None
+        if bx is None or by is None:
+            valid = np.isfinite(z_plot_smooth)
+            if np.any(valid):
+                xx = X[valid]
+                yy = Y[valid]
+                bx = np.array([np.nanmin(xx), np.nanmax(xx)], dtype=float)
+                by = np.array([np.nanmin(yy), np.nanmax(yy)], dtype=float)
+        if bx is not None and by is not None:
+            xmin = float(np.nanmin(bx) - pad)
+            xmax = float(np.nanmax(bx) + pad)
+            ymin = float(np.nanmin(by) - pad)
+            ymax = float(np.nanmax(by) + pad)
+            if np.isfinite(xmin) and np.isfinite(xmax) and np.isfinite(ymin) and np.isfinite(ymax) and xmax > xmin and ymax > ymin:
+                view_bounds = {"xmin": xmin, "xmax": xmax, "ymin": ymin, "ymax": ymax, "padding_m": float(pad)}
+    except Exception:
+        view_bounds = None
+
     os.makedirs(os.path.dirname(out_png), exist_ok=True)
     fig = plt.figure(figsize=figsize, dpi=int(dpi))
     ax = fig.add_subplot(111)
@@ -1159,6 +1224,7 @@ def render_contours_png_from_raster(
         "levels": levels_minor,
         "linewidths": 1.0,
         "alpha": 0.9,
+        "zorder": 4,
     }
     if use_colored_lines:
         cmap_name = str(cmap or "terrain")
@@ -1170,9 +1236,96 @@ def render_contours_png_from_raster(
     cs = ax.contour(X, Y, z_plot, **contour_kwargs)
     if label_contours:
         try:
-            ax.clabel(cs, inline=True, fontsize=int(label_fontsize), fmt="%.1f")
+            slip_label_levels = _label_levels_by_step(
+                levels_minor,
+                label_step=float(slip_label_step_m),
+                base_interval=float(interval_val),
+            )
+            if slip_label_levels.size > 0:
+                ax.clabel(cs, levels=slip_label_levels, inline=True, fontsize=int(label_fontsize), fmt="%.1f")
         except Exception:
             pass
+
+    dem_overlay_used = False
+    dem_overlay_interval_used = None
+    dem_overlay_smooth_used = None
+    if dem_overlay_tif:
+        dem_overlay_path = os.path.abspath(str(dem_overlay_tif or ""))
+        if dem_overlay_path and os.path.exists(dem_overlay_path):
+            try:
+                dem_z, dem_transform, _ = _read_raster_for_contour(dem_overlay_path)
+                if np.any(np.isfinite(dem_z)):
+                    dem_X, dem_Y = _grid_xy_from_transform(dem_transform, dem_z.shape)
+                    dem_grid_res_m = abs(float(dem_transform.a)) if np.isfinite(float(dem_transform.a)) else 0.0
+                    if dem_grid_res_m <= 0:
+                        dem_grid_res_m = abs(float(dem_transform.e)) if np.isfinite(float(dem_transform.e)) else 0.0
+                    dem_smooth_m = (
+                        _safe_float(dem_overlay_smooth_meters)
+                        if dem_overlay_smooth_meters is not None
+                        else _safe_float(smooth_meters)
+                    )
+                    dem_sigma_px = _sigma_pixels_from_meters(dem_smooth_m, dem_grid_res_m)
+                    dem_smooth = _gaussian_smooth_nan(np.asarray(dem_z, dtype=float), dem_sigma_px) if dem_sigma_px > 0 else dem_z
+                    # DEM overlay is not clipped by mask/boundary; limit by panel viewport only.
+                    dem_X_plot = dem_X
+                    dem_Y_plot = dem_Y
+                    dem_Z_plot = np.asarray(dem_smooth, dtype=float)
+                    if isinstance(view_bounds, dict):
+                        x_lo = float(min(view_bounds["xmin"], view_bounds["xmax"]))
+                        x_hi = float(max(view_bounds["xmin"], view_bounds["xmax"]))
+                        y_lo = float(min(view_bounds["ymin"], view_bounds["ymax"]))
+                        y_hi = float(max(view_bounds["ymin"], view_bounds["ymax"]))
+                        xv = np.asarray(dem_X[0, :], dtype=float)
+                        yv = np.asarray(dem_Y[:, 0], dtype=float)
+                        col_idx = np.where(np.isfinite(xv) & (xv >= x_lo) & (xv <= x_hi))[0]
+                        row_idx = np.where(np.isfinite(yv) & (yv >= y_lo) & (yv <= y_hi))[0]
+                        if col_idx.size >= 2 and row_idx.size >= 2:
+                            c0, c1 = int(col_idx.min()), int(col_idx.max())
+                            r0, r1 = int(row_idx.min()), int(row_idx.max())
+                            dem_X_plot = dem_X[r0:r1 + 1, c0:c1 + 1]
+                            dem_Y_plot = dem_Y[r0:r1 + 1, c0:c1 + 1]
+                            dem_Z_plot = dem_Z_plot[r0:r1 + 1, c0:c1 + 1]
+                    dem_interval = _safe_float(dem_overlay_interval) if dem_overlay_interval is not None else interval_val
+                    if not np.isfinite(dem_interval) or dem_interval <= 0:
+                        dem_interval = interval_val
+                    dem_levels = _contour_levels_from_interval_range(
+                        dem_Z_plot,
+                        interval=float(dem_interval),
+                    )
+                    if dem_levels.size >= 2 and np.any(np.isfinite(dem_Z_plot)):
+                        dem_cs = ax.contour(
+                            dem_X_plot,
+                            dem_Y_plot,
+                            np.ma.masked_invalid(dem_Z_plot),
+                            levels=dem_levels,
+                            colors=str(dem_overlay_color or "#dddddd"),
+                            linewidths=max(0.1, float(dem_overlay_linewidth)),
+                            alpha=0.65,
+                            zorder=2,
+                        )
+                        try:
+                            dem_label_levels = _label_levels_by_step(
+                                dem_levels,
+                                label_step=float(dem_label_step_m),
+                                base_interval=float(dem_interval),
+                            )
+                            if dem_label_levels.size == 0:
+                                dem_label_levels = dem_levels
+                            ax.clabel(
+                                dem_cs,
+                                levels=dem_label_levels,
+                                inline=True,
+                                fontsize=max(6, int(label_fontsize) - 1),
+                                fmt="%.1f",
+                                colors="#b8b8b8",
+                            )
+                        except Exception:
+                            pass
+                        dem_overlay_used = True
+                        dem_overlay_interval_used = float(dem_interval)
+                        dem_overlay_smooth_used = float(dem_smooth_m)
+            except Exception:
+                dem_overlay_used = False
 
     # Optional overlays: keep boundary/profile lines visible above contours.
     if boundary_xy is not None:
@@ -1222,6 +1375,10 @@ def render_contours_png_from_raster(
         )
     )
     ax.grid(True, linestyle="--", alpha=0.35)
+    if isinstance(view_bounds, dict):
+        ax.set_xlim(float(view_bounds["xmin"]), float(view_bounds["xmax"]))
+        ax.set_ylim(float(view_bounds["ymin"]), float(view_bounds["ymax"]))
+
     # Show legend only when overlays are present.
     handles, labels = ax.get_legend_handles_labels()
     if handles:
@@ -1244,6 +1401,15 @@ def render_contours_png_from_raster(
         "major_interval": major_interval,
         "smooth_meters": float(_safe_float(smooth_meters)),
         "smooth_sigma_pixels": float(sigma_px),
+        "dem_overlay": {
+            "used": bool(dem_overlay_used),
+            "tif_path": (os.path.abspath(str(dem_overlay_tif)) if dem_overlay_tif else ""),
+            "interval": dem_overlay_interval_used,
+            "smooth_meters": dem_overlay_smooth_used,
+            "linewidth": float(dem_overlay_linewidth),
+            "color": str(dem_overlay_color or "#dddddd"),
+        },
+        "view_bounds": view_bounds,
         "shape": {"ny": int(z.shape[0]), "nx": int(z.shape[1])},
     }
 
@@ -1307,6 +1473,7 @@ def render_ui4_contours_for_run(
         ]
     )
     boundary_xy = _boundary_xy_from_mask_tif(mask_tif)
+    dem_tif = _pick_existing([run_paths.get("dem", "")])
 
     if surface_tif:
         out_png = os.path.join(preview_dir, "contours_surface.png")
@@ -1326,6 +1493,12 @@ def render_ui4_contours_for_run(
             boundary_simplify_tolerance_m=float(boundary_simplify_tolerance_m),
             major_interval_factor=float(major_interval_factor),
             boundary_xy=boundary_xy,
+            dem_overlay_tif=dem_tif,
+            dem_overlay_interval=float(surface_interval_m),
+            dem_overlay_smooth_meters=float(surface_smoothing_m),
+            dem_overlay_color=str(DEFAULT_UI4_CONTOUR_PARAMS["dem_overlay_color"]),
+            dem_overlay_linewidth=float(DEFAULT_UI4_CONTOUR_PARAMS["dem_overlay_linewidth"]),
+            panel_padding_m=float(DEFAULT_UI4_CONTOUR_PARAMS["panel_padding_m"]),
             profile_lines=None,
             colorbar_label="Cao độ bề mặt (m)",
         )
@@ -1340,8 +1513,8 @@ def render_ui4_contours_for_run(
             interval=float(depth_interval_m),
             z_min=depth_z_min,
             z_max=depth_z_max,
-            title="Kriging Slip Depth Contours (masked to Boundary)",
             draw_raster=False,
+            title="Slip Depth Contours",
             label_contours=True,
             linewidth=1.0,
             cmap="viridis",
@@ -1350,6 +1523,12 @@ def render_ui4_contours_for_run(
             boundary_simplify_tolerance_m=float(boundary_simplify_tolerance_m),
             major_interval_factor=float(major_interval_factor),
             boundary_xy=boundary_xy,
+            dem_overlay_tif=dem_tif,
+            dem_overlay_interval=float(surface_interval_m),
+            dem_overlay_smooth_meters=float(surface_smoothing_m),
+            dem_overlay_color=str(DEFAULT_UI4_CONTOUR_PARAMS["dem_overlay_color"]),
+            dem_overlay_linewidth=float(DEFAULT_UI4_CONTOUR_PARAMS["dem_overlay_linewidth"]),
+            panel_padding_m=float(DEFAULT_UI4_CONTOUR_PARAMS["panel_padding_m"]),
             profile_lines=None,
             colorbar_label="Độ sâu (m)",
         )

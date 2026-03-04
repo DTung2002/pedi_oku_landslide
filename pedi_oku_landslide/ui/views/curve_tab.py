@@ -864,6 +864,52 @@ class CurveAnalyzeTab(QWidget):
 
         return {"chain": ch_aug, "elev": zz_adj}
 
+    def _clamp_curve_below_ground(
+        self,
+        curve: Optional[Dict[str, np.ndarray]],
+        *,
+        prof: Optional[dict] = None,
+        clearance: float = 0.3,
+        keep_endpoints: bool = True,
+    ) -> Optional[Dict[str, np.ndarray]]:
+        if not curve:
+            return curve
+        pf = prof if isinstance(prof, dict) else (self._active_prof or {})
+        ch = np.asarray((curve or {}).get("chain", []), dtype=float)
+        zz = np.asarray((curve or {}).get("elev", []), dtype=float)
+        m = np.isfinite(ch) & np.isfinite(zz)
+        ch = ch[m]
+        zz = zz[m]
+        if ch.size < 2:
+            return curve
+        order = np.argsort(ch)
+        ch = ch[order]
+        zz = zz[order]
+
+        gch = np.asarray((pf or {}).get("chain", []), dtype=float)
+        gz = np.asarray((pf or {}).get("elev_s", []), dtype=float)
+        mg = np.isfinite(gch) & np.isfinite(gz)
+        gch = gch[mg]
+        gz = gz[mg]
+        if gch.size < 2:
+            return {"chain": ch, "elev": zz}
+        go = np.argsort(gch)
+        gch = gch[go]
+        gz = gz[go]
+
+        try:
+            clear_m = float(clearance)
+        except Exception:
+            clear_m = 0.3
+        clear_m = max(0.0, clear_m)
+        g_at = np.interp(ch, gch, gz)
+        zz2 = zz.copy()
+        if keep_endpoints and zz2.size >= 3:
+            zz2[1:-1] = np.minimum(zz2[1:-1], g_at[1:-1] - clear_m)
+        else:
+            zz2[:] = np.minimum(zz2, g_at - clear_m)
+        return {"chain": ch, "elev": zz2}
+
     @staticmethod
     def _normalize_group_spans(groups: list) -> List[Tuple[float, float]]:
         spans: List[Tuple[float, float]] = []
@@ -932,7 +978,7 @@ class CurveAnalyzeTab(QWidget):
         mg = np.isfinite(gch) & np.isfinite(gz)
         gch = gch[mg]
         gz = gz[mg]
-        clearance = 0.2
+        clearance = 0.35
         if gch.size >= 2 and len(cp_elev) >= 3:
             g_at_cp = np.interp(np.asarray(cp_chain, dtype=float), gch, gz)
             cp_elev_arr = np.asarray(cp_elev, dtype=float)
@@ -1206,6 +1252,7 @@ class CurveAnalyzeTab(QWidget):
             return None
         out = {"chain": sx, "elev": sz}
         out = self._constrain_curve_to_cross_anchors(out)
+        out = self._clamp_curve_below_ground(out, prof=prof, clearance=0.3, keep_endpoints=True)
         return out
 
     def _on_nurbs_cp_spin_changed(self, val: int) -> None:
@@ -1570,8 +1617,8 @@ class CurveAnalyzeTab(QWidget):
             # 3) Base curve để lấy mục tiêu mặc định cho NURBS/Bezier
             base = estimate_slip_curve(
                 prof, groups,
-                ds=0.2, smooth_factor=0.1,
-                depth_gain=8, min_depth=2
+                ds=0.2, smooth_factor=0.06,
+                depth_gain=14, min_depth=5
             )
             x_base = np.asarray(base.get("chain", []), dtype=float)
             z_base = np.asarray(base.get("elev", []), dtype=float)
@@ -1607,7 +1654,7 @@ class CurveAnalyzeTab(QWidget):
                         target_z=z_base,
                         c0=0.20,
                         c1=0.40,
-                        clearance=0.20,
+                        clearance=0.35,
                     )
 
                     xb = np.asarray(bez.get("chain", []), dtype=float)
@@ -1656,6 +1703,7 @@ class CurveAnalyzeTab(QWidget):
             else:
                 # Last-resort fallback for display only; keep UI responsive.
                 self._warn("[UI3] NURBS fit failed after reseed; showing Bezier-like seed curve.")
+            curve = self._clamp_curve_below_ground(curve, prof=prof, clearance=0.3, keep_endpoints=True) or curve
 
             # 5) Re-render base PNG (no curve baked-in), then draw overlay in scene
             out_png = self._profile_png_path_for(line_id)
@@ -2437,6 +2485,17 @@ class CurveAnalyzeTab(QWidget):
                 self._nurbs_updating_ui = False
             self._draw_control_points_overlay(params)
             self._set_curve_method_for_line(line_id, "nurbs")
+            # Ensure live NURBS overlay is recomputed from loaded control points.
+            if not self._active_prof:
+                self._active_prof = self._build_profile_for_current_line()
+            groups_now = self._read_groups_from_table() or []
+            if groups_now and self._active_prof:
+                try:
+                    groups_now = clamp_groups_to_slip(self._active_prof, groups_now)
+                except Exception:
+                    pass
+            self._active_groups = groups_now
+            self._schedule_nurbs_live_update()
             self._log(f"[UI3] Loaded NURBS table from: {path}")
             return True
         except Exception as e:

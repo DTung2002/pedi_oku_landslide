@@ -491,7 +491,7 @@ class UI4FrontendTab(QWidget):
         else:
             self.lbl_preview_status.setText(f"Preview: cannot load image ({path})")
 
-    def _refresh_preview_pngs(self) -> None:
+    def _refresh_preview_pngs(self, prefer_surface: bool = False) -> None:
         run_dir = (self._ctx.get("run_dir") or "").strip()
         prev_selected = self.preview_file_combo.currentData()
         self.preview_file_combo.blockSignals(True)
@@ -524,7 +524,12 @@ class UI4FrontendTab(QWidget):
         self.preview_file_combo.blockSignals(False)
 
         idx = 0
-        if prev_selected:
+        if prefer_surface:
+            for i, p in enumerate(pngs):
+                if os.path.basename(p).lower() == "contours_surface.png":
+                    idx = i
+                    break
+        elif prev_selected:
             try:
                 idx = pngs.index(prev_selected)
             except ValueError:
@@ -625,7 +630,7 @@ class UI4FrontendTab(QWidget):
                     self._append(f"[UI4] {key} contours error: {it.get('error')}")
             if res.get("summary_json"):
                 self._append(f"[UI4] Contour summary: {res.get('summary_json')}")
-            self._refresh_preview_pngs()
+            self._refresh_preview_pngs(prefer_surface=True)
         except Exception as e:
             self._append(f"[UI4] Contours exception: {e}")
 
