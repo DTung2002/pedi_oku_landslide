@@ -1,3 +1,4 @@
+import json
 import os
 import time
 from pathlib import Path
@@ -514,6 +515,7 @@ def run_UI1_3_plot_vector(
 def run_UI1_3_plot_vector_geotiff(
     dem_path, dx_path, dy_path, slip_zone_path,
     output_png="output/UI1/step4_vector_geotiff.png",
+    vector_json_path="output/ui1/vector/vectors.json",
     vector_scale=45, vector_color="red", stride=20,
     vector_width=3, headwidth=6, headlength=5, headaxislength=3
 ):
@@ -541,11 +543,16 @@ def run_UI1_3_plot_vector_geotiff(
 
     x_coords = transform[2] + cols * transform[0] + transform[0] / 2
     y_coords = transform[5] + rows * transform[4] + transform[4] / 2
+    z_vals = dem[rows, cols]
+    dx_vals = dx[rows, cols]
+    dy_vals = dy[rows, cols]
+    magnitude_vals = np.sqrt(dx_vals ** 2 + dy_vals ** 2)
+    direction_deg_vals = np.degrees(np.arctan2(dy_vals, dx_vals))
 
     fig, ax = plt.subplots(figsize=(8, 8))
     ax.imshow(dem, cmap="gray", extent=extent, origin="upper")
     ax.quiver(x_coords, y_coords,
-              dx[rows, cols], dy[rows, cols],
+              dx_vals, dy_vals,
               color=vector_color, angles='xy', scale=vector_scale,
               width=vector_width / 1000.0,
               headwidth=headwidth, headlength=headlength, headaxislength=headaxislength)
@@ -556,7 +563,44 @@ def run_UI1_3_plot_vector_geotiff(
     plt.savefig(output_png, dpi=300)
     plt.close()
 
-    return f"[✓] Vector overlay saved to {output_png}", output_png
+    json_status = ""
+    try:
+        json_path = Path(vector_json_path)
+        json_path.parent.mkdir(parents=True, exist_ok=True)
+        vector_records = []
+        for i in range(len(rows)):
+            vector_records.append({
+                "row": int(rows[i]),
+                "col": int(cols[i]),
+                "x": float(x_coords[i]),
+                "y": float(y_coords[i]),
+                "z": None if np.isnan(z_vals[i]) else float(z_vals[i]),
+                "dx": None if np.isnan(dx_vals[i]) else float(dx_vals[i]),
+                "dy": None if np.isnan(dy_vals[i]) else float(dy_vals[i]),
+                "direction_deg": None if np.isnan(direction_deg_vals[i]) else float(direction_deg_vals[i]),
+                "magnitude": None if np.isnan(magnitude_vals[i]) else float(magnitude_vals[i]),
+            })
+
+        payload = {
+            "count": len(vector_records),
+            "stride_px": int(stride),
+            "vector_scale_display": float(vector_scale),
+            "vector_color": vector_color,
+            "sources": {
+                "dem_path": dem_path,
+                "dx_path": dx_path,
+                "dy_path": dy_path,
+                "slip_zone_path": slip_zone_path,
+            },
+            "vectors": vector_records,
+        }
+        with json_path.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        json_status = f" | JSON saved to {json_path.as_posix()}"
+    except Exception as e:
+        json_status = f" | [!] JSON export failed: {e}"
+
+    return f"[✓] Vector overlay saved to {output_png}{json_status}", output_png
 
 
 #Bước 5: UI1_4_dz

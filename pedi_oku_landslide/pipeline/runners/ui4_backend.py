@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import glob
 import json
 import math
@@ -18,11 +19,13 @@ except Exception:
 
 try:
     import rasterio
+    from rasterio.features import shapes as rio_shapes
     from rasterio.transform import from_origin
     from rasterio.warp import reproject, Resampling
     from rasterio.windows import Window, transform as window_transform
 except Exception:
     rasterio = None  # type: ignore[assignment]
+    rio_shapes = None  # type: ignore[assignment]
     from_origin = None  # type: ignore[assignment]
     reproject = None  # type: ignore[assignment]
     Resampling = None  # type: ignore[assignment]
@@ -31,20 +34,26 @@ except Exception:
 
 try:
     from scipy.linalg import lu_factor, lu_solve
+    from scipy.ndimage import gaussian_filter
     from scipy.optimize import curve_fit
     from scipy.spatial.distance import cdist
 except Exception:
     lu_factor = None  # type: ignore[assignment]
     lu_solve = None  # type: ignore[assignment]
+    gaussian_filter = None  # type: ignore[assignment]
     curve_fit = None  # type: ignore[assignment]
     cdist = None  # type: ignore[assignment]
 
 try:
-    from shapely.geometry import MultiPoint, Point
+    from shapely.geometry import MultiPoint, MultiPolygon, Point, Polygon
+    from shapely.ops import unary_union
     from shapely.prepared import prep
 except Exception:
     MultiPoint = None  # type: ignore[assignment]
+    MultiPolygon = None  # type: ignore[assignment]
     Point = None  # type: ignore[assignment]
+    Polygon = None  # type: ignore[assignment]
+    unary_union = None  # type: ignore[assignment]
     prep = None  # type: ignore[assignment]
 
 try:
@@ -52,12 +61,25 @@ try:
 except Exception:
     plt = None  # type: ignore[assignment]
 
+try:
+    from pykrige.ok import OrdinaryKriging as PyKrigeOrdinaryKriging
+except Exception:
+    PyKrigeOrdinaryKriging = None  # type: ignore[assignment]
+
+try:
+    import ezdxf
+except Exception:
+    ezdxf = None  # type: ignore[assignment]
+
 
 DEFAULT_UI4_PARAMS: Dict[str, Any] = {
-    "chainage_step_m": 1.0,       # decimate along each curve
-    "grid_res_m": 0.5,            # kriging grid resolution
+    "chainage_step_m": 0.2,       # decimate along each curve
+    "grid_res_m": 0.2,            # kriging grid resolution
     "buffer_m": 5.0,              # convex hull buffer
     "nodata_out": -9999.0,
+    "use_pykrige": True,
+    "variogram_model": "spherical",
+    "smooth_sigma": 2.5,          # smoothing distance in meters
     "variogram_pairs": 20000,
     "variogram_bins": 20,
     "variogram_min_pairs_per_bin": 50,
@@ -68,12 +90,16 @@ DEFAULT_UI4_PARAMS: Dict[str, Any] = {
 }
 
 DEFAULT_UI4_CONTOUR_PARAMS: Dict[str, Any] = {
-    "surface_interval_m": 5.0,
-    "depth_interval_m": 2.0,
+    "surface_interval_m": 1.0,
+    "depth_interval_m": 1.0,
+    "surface_smoothing_m": 2.5,
+    "depth_smoothing_m": 2.0,
+    "boundary_simplify_tolerance_m": 1.0,
+    "major_interval_factor": 5.0,
     "figsize": (10, 8),
-    "dpi": 180,
+    "dpi": 200,
     "label_fontsize": 8,
-    "linewidth": 0.8,
+    "linewidth": 0.7,
 }
 
 
@@ -147,6 +173,31 @@ def _safe_float(v: Any) -> float:
     return x if np.isfinite(x) else float("nan")
 
 
+def _gaussian_smooth_nan(arr: np.ndarray, sigma: float) -> np.ndarray:
+    sigma = float(sigma)
+    if gaussian_filter is None or not np.isfinite(sigma) or sigma <= 0:
+        return np.asarray(arr, dtype=float)
+
+    work = np.asarray(arr, dtype=float)
+    if work.ndim != 2 or not np.any(np.isfinite(work)):
+        return work.copy()
+    nan_mask = ~np.isfinite(work)
+    fill_value = float(np.nanmedian(work[np.isfinite(work)]))
+    tmp = work.copy()
+    tmp[nan_mask] = fill_value
+    tmp = gaussian_filter(tmp, sigma=sigma)
+    tmp[nan_mask] = np.nan
+    return tmp
+
+
+def _sigma_pixels_from_meters(smoothing_meters: float, grid_res_m: float) -> float:
+    sm = float(smoothing_meters)
+    gr = float(grid_res_m)
+    if not np.isfinite(sm) or not np.isfinite(gr) or sm <= 0 or gr <= 0:
+        return 0.0
+    return float(sm / gr)
+
+
 def _find_ui4_mask_tif(run_dir: str) -> str:
     ui1_dir = os.path.join(run_dir, "ui1")
     candidates = [
@@ -156,6 +207,92 @@ def _find_ui4_mask_tif(run_dir: str) -> str:
         os.path.join(ui1_dir, "mask_binary.tif"),
     ]
     return _pick_existing(candidates)
+
+
+def _find_ui4_dxf_boundary(run_dir: str) -> str:
+    """Discover a DXF boundary file in the run's input/ directory."""
+    input_dir = os.path.join(run_dir, "input")
+    candidates = [
+        os.path.join(input_dir, "Boundary.dxf"),
+        os.path.join(input_dir, "boundary.dxf"),
+    ]
+    found = _pick_existing(candidates)
+    if found:
+        return found
+    # Fallback: first .dxf in input/
+    dxf_files = sorted(glob.glob(os.path.join(input_dir, "*.dxf")))
+    return os.path.abspath(dxf_files[0]) if dxf_files else ""
+
+
+def read_boundary_polygon_from_dxf(
+    dxf_path: str,
+    log_fn: Optional[Callable[[str], None]] = None,
+) -> Optional[Any]:
+    """
+    Read boundary entities from a DXF file and return a shapely Polygon.
+
+    Strategy:
+      - Collect closed LWPOLYLINE / POLYLINE entities as polygons
+      - Union them; keep the largest-area polygon as the main boundary
+      - Returns None if ezdxf is not installed or no valid boundary found
+    """
+    if ezdxf is None:
+        _log(log_fn, "[UI4] ezdxf not installed, cannot read DXF boundary")
+        return None
+    if Polygon is None or unary_union is None:
+        _log(log_fn, "[UI4] shapely not available, cannot process DXF boundary")
+        return None
+
+    dxf_path = os.path.abspath(str(dxf_path or ""))
+    if not dxf_path or not os.path.exists(dxf_path):
+        return None
+
+    try:
+        doc = ezdxf.readfile(dxf_path)
+    except Exception as e:
+        _log(log_fn, f"[UI4] Failed to read DXF: {dxf_path} ({e})")
+        return None
+
+    msp = doc.modelspace()
+    polys = []
+
+    # LWPOLYLINE
+    for e in msp.query("LWPOLYLINE"):
+        pts = [(p[0], p[1]) for p in e.get_points("xy")]
+        if len(pts) < 3:
+            continue
+        if e.closed:
+            polys.append(Polygon(pts))
+
+    # POLYLINE (2D/3D)
+    for e in msp.query("POLYLINE"):
+        pts = [(v.dxf.location.x, v.dxf.location.y) for v in e.vertices]
+        if len(pts) < 3:
+            continue
+        if e.is_closed:
+            polys.append(Polygon(pts))
+
+    if not polys:
+        _log(log_fn, f"[UI4] No closed polyline found in DXF: {dxf_path}")
+        return None
+
+    # Clean invalid polygons
+    polys = [p.buffer(0) for p in polys if p.is_valid or p.buffer(0).is_valid]
+    if not polys:
+        _log(log_fn, f"[UI4] All DXF polygons are invalid: {dxf_path}")
+        return None
+
+    geom = unary_union(polys)
+    if isinstance(geom, Polygon):
+        _log(log_fn, f"[UI4] DXF boundary polygon loaded: area={geom.area:.2f}")
+        return geom
+    if MultiPolygon is not None and isinstance(geom, MultiPolygon):
+        biggest = max(list(geom.geoms), key=lambda g: float(getattr(g, "area", 0.0)))
+        _log(log_fn, f"[UI4] DXF boundary: multi-polygon, using largest (area={biggest.area:.2f})")
+        return biggest
+
+    _log(log_fn, f"[UI4] Unexpected DXF boundary geometry type: {type(geom)}")
+    return None
 
 
 def _finite_raster_stats(arr: np.ndarray) -> Dict[str, Any]:
@@ -270,6 +407,7 @@ def collect_ui4_run_inputs(run_dir: str) -> Dict[str, Any]:
     ui3_dir = os.path.join(run_dir, "ui3")
     curve_dir = os.path.join(ui3_dir, "curve")
     mask_tif = _find_ui4_mask_tif(run_dir)
+    dxf_boundary = _find_ui4_dxf_boundary(run_dir)
 
     dem_tif_candidates = sorted(glob.glob(os.path.join(input_dir, "*.tif")))
     # Prefer DEM-like filenames when multiple TIFFs exist in input/.
@@ -322,6 +460,7 @@ def collect_ui4_run_inputs(run_dir: str) -> Dict[str, Any]:
             "dem": dem_path,
             "dem_tif_candidates": [os.path.abspath(p) for p in dem_tif_candidates],
             "mask_tif": mask_tif,
+            "dxf_boundary_path": dxf_boundary,
             "intersections_main_cross_json": intersections_json,
             "anchors_xyz_json": anchors_xyz_json,
             "ui3_curve_dir": os.path.abspath(curve_dir),
@@ -522,9 +661,10 @@ def _fit_exponential_variogram(
     h = np.hypot(coords[i, 0] - coords[j, 0], coords[i, 1] - coords[j, 1])
     gamma = 0.5 * (values[i] - values[j]) ** 2
 
-    h = h[np.isfinite(h)]
-    gamma = gamma[np.isfinite(gamma)]
-    if h.size < 10 or gamma.size < 10:
+    valid_hg = np.isfinite(h) & np.isfinite(gamma)
+    h = h[valid_hg]
+    gamma = gamma[valid_hg]
+    if h.size < 10:
         raise ValueError("Invalid pair distances/semivariance values.")
 
     hmax = float(np.percentile(h, float(percentile_max_h)))
@@ -692,6 +832,187 @@ def _grid_xy_from_transform(transform: Any, shape: Tuple[int, int]) -> Tuple[np.
     return np.meshgrid(xs, ys)
 
 
+def _ring_area_abs_xy(ring_xy: np.ndarray) -> float:
+    if ring_xy.ndim != 2 or ring_xy.shape[0] < 3 or ring_xy.shape[1] < 2:
+        return 0.0
+    x = ring_xy[:, 0]
+    y = ring_xy[:, 1]
+    # Shoelace area; works for closed/unclosed ring.
+    return float(abs(0.5 * (np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))))
+
+
+def _boundary_xy_from_mask_tif(mask_tif: str) -> Optional[np.ndarray]:
+    mask_tif = os.path.abspath(str(mask_tif or ""))
+    if not mask_tif or not os.path.exists(mask_tif) or rasterio is None:
+        return None
+    if rio_shapes is None:
+        return None
+    try:
+        with rasterio.open(mask_tif) as src:
+            arr = src.read(1).astype(float)
+            nodata = src.nodata
+            if nodata is not None:
+                if np.isnan(nodata):
+                    arr[~np.isfinite(arr)] = np.nan
+                else:
+                    arr[np.isclose(arr, float(nodata))] = np.nan
+            mask_bool = np.isfinite(arr) & (arr > 0)
+            if not np.any(mask_bool):
+                return None
+
+            best_xy = None
+            best_area = 0.0
+            for geom, val in rio_shapes(mask_bool.astype(np.uint8), mask=mask_bool, transform=src.transform):
+                try:
+                    if int(val) != 1:
+                        continue
+                    coords = (geom or {}).get("coordinates")
+                    if not coords:
+                        continue
+                    ring = np.asarray(coords[0], dtype=float)
+                    if ring.ndim != 2 or ring.shape[1] < 2 or ring.shape[0] < 3:
+                        continue
+                    area = _ring_area_abs_xy(ring[:, :2])
+                    if area > best_area:
+                        best_area = area
+                        best_xy = ring[:, :2]
+                except Exception:
+                    continue
+            return best_xy
+    except Exception:
+        return None
+
+
+def _polygon_from_boundary_xy(boundary_xy: Optional[np.ndarray]) -> Optional[Any]:
+    if boundary_xy is None or Polygon is None:
+        return None
+    try:
+        ring = np.asarray(boundary_xy, dtype=float)
+    except Exception:
+        return None
+    if ring.ndim != 2 or ring.shape[1] < 2 or ring.shape[0] < 3:
+        return None
+    if not np.allclose(ring[0, :2], ring[-1, :2]):
+        ring = np.vstack([ring[:, :2], ring[0, :2]])
+    else:
+        ring = ring[:, :2]
+    try:
+        poly = Polygon(ring)
+        if not poly.is_valid:
+            poly = poly.buffer(0)
+    except Exception:
+        return None
+    if poly is None or poly.is_empty:
+        return None
+    if poly.geom_type == "MultiPolygon":
+        geoms = list(getattr(poly, "geoms", []))
+        if not geoms:
+            return None
+        poly = max(geoms, key=lambda g: float(getattr(g, "area", 0.0)))
+    return poly
+
+
+def _simplify_boundary_xy(boundary_xy: Optional[np.ndarray], tolerance_m: float) -> Optional[np.ndarray]:
+    if boundary_xy is None:
+        return None
+    ring = np.asarray(boundary_xy, dtype=float)
+    if ring.ndim != 2 or ring.shape[1] < 2 or ring.shape[0] < 3:
+        return None
+    if Polygon is None:
+        return ring[:, :2]
+    tol = _safe_float(tolerance_m)
+    if not np.isfinite(tol) or tol <= 0:
+        tol = 0.0
+    try:
+        poly = _polygon_from_boundary_xy(ring[:, :2])
+        if poly is None:
+            return ring[:, :2]
+        if tol > 0:
+            poly = poly.simplify(float(tol), preserve_topology=True)
+        if poly is None or poly.is_empty:
+            return ring[:, :2]
+        return np.asarray(poly.exterior.coords, dtype=float)[:, :2]
+    except Exception:
+        return ring[:, :2]
+
+
+def _line_label_short(line_id: str) -> str:
+    txt = str(line_id or "").strip()
+    if not txt:
+        return ""
+    return txt.split("__")[0]
+
+
+def _load_section_profile_lines(run_dir: str) -> List[Dict[str, Any]]:
+    path = os.path.join(os.path.abspath(str(run_dir or "")), "ui2", "sections.csv")
+    if not os.path.exists(path):
+        return []
+    palette = ["#1f77b4", "#2ca02c", "#9467bd", "#ff7f0e", "#17becf", "#e377c2", "#bcbd22", "#8c564b"]
+    lines: List[Dict[str, Any]] = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for i, row in enumerate(reader):
+                x1 = _safe_float(row.get("x1"))
+                y1 = _safe_float(row.get("y1"))
+                x2 = _safe_float(row.get("x2"))
+                y2 = _safe_float(row.get("y2"))
+                if not all(np.isfinite(v) for v in (x1, y1, x2, y2)):
+                    continue
+                line_id = str(row.get("line_id") or row.get("name") or f"L{i + 1}").strip()
+                lines.append(
+                    {
+                        "line_id": line_id,
+                        "label": _line_label_short(line_id) or f"L{i + 1}",
+                        "x": np.asarray([x1, x2], dtype=float),
+                        "y": np.asarray([y1, y2], dtype=float),
+                        "color": palette[i % len(palette)],
+                    }
+                )
+    except Exception:
+        return []
+    return lines
+
+
+def _load_curve_profile_lines(curve_json_paths: List[str]) -> List[Dict[str, Any]]:
+    if not curve_json_paths:
+        return []
+    palette = ["#1f77b4", "#2ca02c", "#9467bd", "#ff7f0e", "#17becf", "#e377c2", "#bcbd22", "#8c564b"]
+    lines: List[Dict[str, Any]] = []
+    for i, p in enumerate(curve_json_paths):
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                data = json.load(f) or {}
+            pts = data.get("points") or []
+            if not isinstance(pts, list):
+                continue
+            xs: List[float] = []
+            ys: List[float] = []
+            for pt in pts:
+                if not isinstance(pt, dict):
+                    continue
+                x = _safe_float(pt.get("x"))
+                y = _safe_float(pt.get("y"))
+                if np.isfinite(x) and np.isfinite(y):
+                    xs.append(float(x))
+                    ys.append(float(y))
+            if len(xs) < 2:
+                continue
+            line_id = str(data.get("line_id") or os.path.splitext(os.path.basename(p))[0]).strip()
+            lines.append(
+                {
+                    "line_id": line_id,
+                    "label": _line_label_short(line_id) or f"L{i + 1}",
+                    "x": np.asarray(xs, dtype=float),
+                    "y": np.asarray(ys, dtype=float),
+                    "color": palette[i % len(palette)],
+                }
+            )
+        except Exception:
+            continue
+    return lines
+
+
 def _contour_levels_from_interval(z: np.ndarray, interval: float) -> np.ndarray:
     return _contour_levels_from_interval_range(z, interval=interval)
 
@@ -713,7 +1034,6 @@ def _contour_levels_from_interval_range(
     if not (np.isfinite(data_min) and np.isfinite(data_max)):
         return np.array([], dtype=float)
 
-    use_custom_range = (z_min is not None) or (z_max is not None)
     zmin = data_min if z_min is None else float(z_min)
     zmax = data_max if z_max is None else float(z_max)
     if not (np.isfinite(zmin) and np.isfinite(zmax)):
@@ -723,12 +1043,8 @@ def _contour_levels_from_interval_range(
     if math.isclose(zmin, zmax, rel_tol=0.0, abs_tol=1e-12):
         return np.array([zmin], dtype=float)
 
-    if use_custom_range:
-        start = zmin
-        stop = zmax
-    else:
-        start = math.floor(zmin / interval) * interval
-        stop = math.ceil(zmax / interval) * interval
+    start = math.floor(zmin / interval) * interval
+    stop = math.ceil(zmax / interval) * interval
     levels = np.arange(start, stop + interval, interval, dtype=float)
     return levels[np.isfinite(levels)]
 
@@ -748,12 +1064,18 @@ def render_contours_png_from_raster(
     label_contours: bool = True,
     label_fontsize: int = DEFAULT_UI4_CONTOUR_PARAMS["label_fontsize"],
     contour_color: Optional[str] = None,
+    smooth_meters: float = DEFAULT_UI4_CONTOUR_PARAMS["surface_smoothing_m"],
+    boundary_simplify_tolerance_m: float = DEFAULT_UI4_CONTOUR_PARAMS["boundary_simplify_tolerance_m"],
+    major_interval_factor: float = DEFAULT_UI4_CONTOUR_PARAMS["major_interval_factor"],
+    boundary_xy: Optional[np.ndarray] = None,
+    profile_lines: Optional[List[Dict[str, Any]]] = None,
+    colorbar_label: Optional[str] = None,
     figsize: Tuple[float, float] = DEFAULT_UI4_CONTOUR_PARAMS["figsize"],
     dpi: int = DEFAULT_UI4_CONTOUR_PARAMS["dpi"],
 ) -> Dict[str, Any]:
     """
-    Render contour lines from a GeoTIFF and save to PNG.
-    Ported/adapted from local `contours.py` (interactive) into backend-safe export.
+    Render contour map from a GeoTIFF and save to PNG.
+    Style supports colored background + contour lines + optional overlays.
     """
     _require_contour_deps()
     tif_path = os.path.abspath(str(tif_path or ""))
@@ -761,7 +1083,7 @@ def render_contours_png_from_raster(
     if not tif_path or not os.path.exists(tif_path):
         return {"ok": False, "error": f"Raster not found: {tif_path}"}
 
-    z, transform, bounds = _read_raster_for_contour(tif_path)
+    z, transform, _bounds = _read_raster_for_contour(tif_path)
     if not np.any(np.isfinite(z)):
         return {"ok": False, "error": "No valid contour levels"}
 
@@ -769,18 +1091,42 @@ def render_contours_png_from_raster(
     if not np.isfinite(interval_val) or interval_val <= 0:
         return {"ok": False, "error": "Contour interval must be > 0"}
 
-    # Match the standalone contour script logic: build X/Y directly from raster transform.
+    # Build X/Y directly from raster transform.
     ny, nx = z.shape
     xs = transform.c + (np.arange(nx) + 0.5) * transform.a
     ys = transform.f + (np.arange(ny) + 0.5) * transform.e  # transform.e is usually negative
     X, Y = np.meshgrid(xs, ys)
+    grid_res_m = abs(float(transform.a)) if np.isfinite(float(transform.a)) else 0.0
+    if grid_res_m <= 0:
+        grid_res_m = abs(float(transform.e)) if np.isfinite(float(transform.e)) else 0.0
+    sigma_px = _sigma_pixels_from_meters(_safe_float(smooth_meters), grid_res_m)
 
-    data_zmin = float(np.nanmin(z))
-    data_zmax = float(np.nanmax(z))
-    use_auto_min = z_min is None
-    use_auto_max = z_max is None
-    level_zmin = data_zmin if use_auto_min else float(z_min)
-    level_zmax = data_zmax if use_auto_max else float(z_max)
+    z_plot_raw = np.asarray(z, dtype=float)
+    z_plot_smooth = _gaussian_smooth_nan(z_plot_raw, sigma_px) if sigma_px > 0 else z_plot_raw.copy()
+
+    # --- NEW: mask by boundary polygon (prevent contours outside boundary) ---
+    if boundary_xy is not None:
+        try:
+            from matplotlib.path import Path
+            bxy = _simplify_boundary_xy(boundary_xy, float(boundary_simplify_tolerance_m))
+            if bxy is not None and bxy.ndim == 2 and bxy.shape[1] >= 2 and bxy.shape[0] >= 3:
+                poly_path = Path(bxy[:, :2])
+                inside = poly_path.contains_points(
+                    np.c_[X.ravel(), Y.ravel()]
+                ).reshape(z_plot_smooth.shape)
+                z_plot_smooth[~inside] = np.nan
+                boundary_xy = bxy  # keep simplified boundary for plotting
+        except Exception:
+            pass
+
+    z_plot = np.ma.masked_invalid(z_plot_smooth)
+    if not np.any(np.isfinite(z_plot_smooth)):
+        return {"ok": False, "error": "No valid contour levels"}
+
+    data_zmin = float(np.nanmin(z_plot_smooth))
+    data_zmax = float(np.nanmax(z_plot_smooth))
+    level_zmin = data_zmin if z_min is None else float(z_min)
+    level_zmax = data_zmax if z_max is None else float(z_max)
     if not (np.isfinite(level_zmin) and np.isfinite(level_zmax)):
         return {"ok": False, "error": "Invalid contour z-range."}
     if (z_min is not None) and (z_max is not None) and (float(z_max) <= float(z_min)):
@@ -788,55 +1134,115 @@ def render_contours_png_from_raster(
     if level_zmax < level_zmin:
         level_zmin, level_zmax = level_zmax, level_zmin
 
-    if math.isclose(level_zmin, level_zmax, rel_tol=0.0, abs_tol=1e-12):
-        levels = np.array([level_zmin], dtype=float)
-    else:
-        level_start = (
-            np.floor(level_zmin / interval_val) * interval_val if use_auto_min else level_zmin
-        )
-        level_stop = (
-            np.ceil(level_zmax / interval_val) * interval_val if use_auto_max else level_zmax
-        )
-        levels = np.arange(level_start, level_stop + interval_val, interval_val, dtype=float)
-        levels = levels[np.isfinite(levels)]
-    if levels.size < 2:
+    levels_minor = _contour_levels_from_interval_range(
+        z_plot_smooth,
+        interval=interval_val,
+        z_min=level_zmin,
+        z_max=level_zmax,
+    )
+    if levels_minor.size < 2:
         return {"ok": False, "error": "No valid contour levels"}
+    major_factor = _safe_float(major_interval_factor)
+    if not np.isfinite(major_factor) or major_factor <= 1.0:
+        major_factor = 5.0
+    major_interval = float(interval_val * major_factor)
+    levels_major = _contour_levels_from_interval_range(
+        z_plot_smooth,
+        interval=major_interval,
+        z_min=level_zmin,
+        z_max=level_zmax,
+    )
+    if levels_major.size < 2:
+        levels_major = levels_minor
 
     os.makedirs(os.path.dirname(out_png), exist_ok=True)
     fig = plt.figure(figsize=figsize, dpi=int(dpi))
     ax = fig.add_subplot(111)
-    extent = (bounds.left, bounds.right, bounds.bottom, bounds.top)
 
-    z_plot = np.ma.masked_invalid(z)
-    img = None
+    cf = None
     if draw_raster:
-        imshow_kwargs = {
-            "extent": extent,
-            "origin": "upper",
-            "alpha": float(alpha_raster),
-            "cmap": cmap,
-        }
-        if z_min is not None:
-            imshow_kwargs["vmin"] = float(z_min)
-        if z_max is not None:
-            imshow_kwargs["vmax"] = float(z_max)
-        img = ax.imshow(z_plot, **imshow_kwargs)
-        fig.colorbar(img, ax=ax, shrink=0.85)
+        cf = ax.contourf(X, Y, z_plot, levels=levels_minor, cmap=(cmap or "terrain"), alpha=float(alpha_raster))
 
-    contour_kwargs: Dict[str, Any] = {"levels": levels, "linewidths": float(linewidth)}
-    if contour_color:
-        contour_kwargs["colors"] = contour_color
-    cs = ax.contour(X, Y, z_plot, **contour_kwargs)
+    use_colored_lines = (contour_color is None) or (not str(contour_color).strip())
+    contour_minor_kwargs: Dict[str, Any] = {
+        "levels": levels_minor,
+        "linewidths": max(0.2, float(linewidth) * 0.7),
+        "alpha": 0.75,
+    }
+    contour_major_kwargs: Dict[str, Any] = {
+        "levels": levels_major,
+        "linewidths": max(0.35, float(linewidth) * 1.45),
+        "alpha": 0.95,
+    }
+    if use_colored_lines:
+        cmap_name = str(cmap or "terrain")
+        contour_minor_kwargs["cmap"] = cmap_name
+        contour_major_kwargs["cmap"] = cmap_name
+    else:
+        line_color = str(contour_color).strip()
+        contour_minor_kwargs["colors"] = line_color
+        contour_major_kwargs["colors"] = line_color
+
+    ax.contour(X, Y, z_plot, **contour_minor_kwargs)
+    cs = ax.contour(X, Y, z_plot, **contour_major_kwargs)
     if label_contours:
         try:
-            ax.clabel(cs, inline=True, fontsize=int(label_fontsize))
+            ax.clabel(cs, inline=True, fontsize=int(label_fontsize), fmt="%.1f")
         except Exception:
             pass
 
+    # Optional overlays: keep boundary/profile lines visible above contours.
+    if boundary_xy is not None:
+        try:
+            bxy = _simplify_boundary_xy(boundary_xy, float(boundary_simplify_tolerance_m))
+            if bxy is not None and bxy.ndim == 2 and bxy.shape[1] >= 2 and bxy.shape[0] >= 2:
+                ax.plot(
+                    bxy[:, 0],
+                    bxy[:, 1],
+                    color="#1f77b4",
+                    linewidth=1.2,
+                    alpha=0.95,
+                    zorder=6,
+                )
+        except Exception:
+            pass
+
+    if profile_lines:
+        for i, line in enumerate(profile_lines):
+            try:
+                xs = np.asarray(line.get("x", []), dtype=float)
+                ys = np.asarray(line.get("y", []), dtype=float)
+                if xs.size < 2 or ys.size < 2:
+                    continue
+                c = str(line.get("color") or f"C{i % 10}")
+                lbl = str(line.get("label") or line.get("line_id") or f"Profile {i + 1}")
+                ax.plot(xs, ys, color=c, linewidth=1.3, alpha=0.9, zorder=5, label=lbl)
+            except Exception:
+                continue
+
+    if cf is not None:
+        cbar = fig.colorbar(cf, ax=ax, shrink=0.85)
+        cb_label = str(colorbar_label or "").strip()
+        if not cb_label:
+            name = os.path.basename(tif_path).lower()
+            cb_label = "Độ sâu (m)" if "depth" in name else "Cao độ bề mặt (m)"
+        cbar.set_label(cb_label)
+
     ax.set_aspect("equal", adjustable="box")
-    ax.set_xlabel("X")
-    ax.set_ylabel("Y")
-    ax.set_title(title or f"Contours: {os.path.basename(tif_path)} (interval={interval_val:g} m)")
+    ax.set_xlabel("Tọa độ X")
+    ax.set_ylabel("Tọa độ Y")
+    ax.set_title(
+        title
+        or (
+            "Bản đồ Địa hình Tổng hợp: Mặt trượt và Tự nhiên xung quanh\n"
+            f"(Đường đồng mức cách nhau {interval_val:g}m)"
+        )
+    )
+    ax.grid(True, linestyle="--", alpha=0.35)
+    # Show legend only when overlays are present.
+    handles, labels = ax.get_legend_handles_labels()
+    if handles:
+        ax.legend(loc="upper right")
     fig.tight_layout()
     fig.savefig(out_png, bbox_inches="tight")
     plt.close(fig)
@@ -848,9 +1254,13 @@ def render_contours_png_from_raster(
         "interval": interval_val,
         "z_min": (float(z_min) if z_min is not None else None),
         "z_max": (float(z_max) if z_max is not None else None),
-        "levels_count": int(levels.size),
-        "levels_min": float(levels.min()) if levels.size else None,
-        "levels_max": float(levels.max()) if levels.size else None,
+        "levels_count": int(levels_minor.size),
+        "levels_min": float(levels_minor.min()) if levels_minor.size else None,
+        "levels_max": float(levels_minor.max()) if levels_minor.size else None,
+        "major_levels_count": int(levels_major.size),
+        "major_interval": major_interval,
+        "smooth_meters": float(_safe_float(smooth_meters)),
+        "smooth_sigma_pixels": float(sigma_px),
         "shape": {"ny": int(z.shape[0]), "nx": int(z.shape[1])},
     }
 
@@ -861,6 +1271,10 @@ def render_ui4_contours_for_run(
     out_subdir: str = "ui4",
     surface_interval_m: float = DEFAULT_UI4_CONTOUR_PARAMS["surface_interval_m"],
     depth_interval_m: float = DEFAULT_UI4_CONTOUR_PARAMS["depth_interval_m"],
+    surface_smoothing_m: float = DEFAULT_UI4_CONTOUR_PARAMS["surface_smoothing_m"],
+    depth_smoothing_m: float = DEFAULT_UI4_CONTOUR_PARAMS["depth_smoothing_m"],
+    boundary_simplify_tolerance_m: float = DEFAULT_UI4_CONTOUR_PARAMS["boundary_simplify_tolerance_m"],
+    major_interval_factor: float = DEFAULT_UI4_CONTOUR_PARAMS["major_interval_factor"],
     surface_z_min: Optional[float] = None,
     surface_z_max: Optional[float] = None,
     depth_z_min: Optional[float] = None,
@@ -875,6 +1289,8 @@ def render_ui4_contours_for_run(
     run_dir = os.path.abspath(str(run_dir or ""))
     ui4_dir = os.path.join(run_dir, str(out_subdir))
     shared = _read_json_if_exists(os.path.join(ui4_dir, "ui_shared_data.json"))
+    run_inputs = collect_ui4_run_inputs(run_dir)
+    run_paths = run_inputs.get("paths", {}) if isinstance(run_inputs, dict) else {}
 
     surface_tif = _pick_existing([
         shared.get("ui4_surface_masked_tif", ""),
@@ -899,6 +1315,16 @@ def render_ui4_contours_for_run(
 
     outputs: Dict[str, Any] = {"ok": True, "ui4_dir": ui4_dir, "preview_dir": preview_dir, "items": {}}
 
+    # Overlays for style parity with reference map.
+    mask_tif = _pick_existing(
+        [
+            shared.get("ui4_mask_tif", ""),
+            run_paths.get("mask_tif", ""),
+            _find_ui4_mask_tif(run_dir),
+        ]
+    )
+    boundary_xy = _boundary_xy_from_mask_tif(mask_tif)
+
     if surface_tif:
         out_png = os.path.join(preview_dir, "contours_surface.png")
         res = render_contours_png_from_raster(
@@ -907,9 +1333,18 @@ def render_ui4_contours_for_run(
             interval=float(surface_interval_m),
             z_min=surface_z_min,
             z_max=surface_z_max,
-            title=None,
+            title="Kriging Slip Surface Contours (masked to Boundary)",
             draw_raster=False,
+            label_contours=True,
+            linewidth=0.7,
             cmap="terrain",
+            contour_color=None,
+            smooth_meters=float(surface_smoothing_m),
+            boundary_simplify_tolerance_m=float(boundary_simplify_tolerance_m),
+            major_interval_factor=float(major_interval_factor),
+            boundary_xy=boundary_xy,
+            profile_lines=None,
+            colorbar_label="Cao độ bề mặt (m)",
         )
         outputs["items"]["surface"] = res
         _log(log_fn, f"[UI4] Surface contour: {res.get('png_path') if res.get('ok') else res.get('error')}")
@@ -922,9 +1357,18 @@ def render_ui4_contours_for_run(
             interval=float(depth_interval_m),
             z_min=depth_z_min,
             z_max=depth_z_max,
-            title=None,
+            title="Kriging Slip Depth Contours (masked to Boundary)",
             draw_raster=False,
+            label_contours=True,
+            linewidth=0.7,
             cmap="viridis",
+            contour_color=None,
+            smooth_meters=float(depth_smoothing_m),
+            boundary_simplify_tolerance_m=float(boundary_simplify_tolerance_m),
+            major_interval_factor=float(major_interval_factor),
+            boundary_xy=boundary_xy,
+            profile_lines=None,
+            colorbar_label="Độ sâu (m)",
         )
         outputs["items"]["depth"] = res
         _log(log_fn, f"[UI4] Depth contour: {res.get('png_path') if res.get('ok') else res.get('error')}")
@@ -942,10 +1386,14 @@ def run_ui4_kriging_from_paths(
     curve_json_paths: List[str],
     out_dir: str,
     mask_tif_path: Optional[str] = None,
+    dxf_boundary_path: Optional[str] = None,
     chainage_step_m: float = DEFAULT_UI4_PARAMS["chainage_step_m"],
     grid_res_m: float = DEFAULT_UI4_PARAMS["grid_res_m"],
     buffer_m: float = DEFAULT_UI4_PARAMS["buffer_m"],
     nodata_out: float = DEFAULT_UI4_PARAMS["nodata_out"],
+    use_pykrige: bool = DEFAULT_UI4_PARAMS["use_pykrige"],
+    variogram_model: str = DEFAULT_UI4_PARAMS["variogram_model"],
+    smooth_sigma: float = DEFAULT_UI4_PARAMS["smooth_sigma"],
     variogram_pairs: int = DEFAULT_UI4_PARAMS["variogram_pairs"],
     variogram_bins: int = DEFAULT_UI4_PARAMS["variogram_bins"],
     variogram_min_pairs_per_bin: int = DEFAULT_UI4_PARAMS["variogram_min_pairs_per_bin"],
@@ -961,6 +1409,15 @@ def run_ui4_kriging_from_paths(
     out_dir = os.path.abspath(str(out_dir or ""))
     curve_json_paths = [os.path.abspath(str(p)) for p in (curve_json_paths or []) if str(p).strip()]
     mask_tif_path = os.path.abspath(str(mask_tif_path or "")) if str(mask_tif_path or "").strip() else ""
+    dxf_boundary_path = os.path.abspath(str(dxf_boundary_path or "")) if str(dxf_boundary_path or "").strip() else ""
+    smooth_meters = _safe_float(smooth_sigma)
+    if not np.isfinite(smooth_meters):
+        smooth_meters = 0.0
+    grid_res_safe = max(1e-6, abs(float(grid_res_m)))
+    if grid_res_safe <= 0.3 and smooth_meters > 0 and smooth_meters < 2.0:
+        _log(log_fn, f"[UI4] Overriding smooth_sigma {smooth_meters:.2f}m -> 2.5m (grid_res={grid_res_safe:.3f}m is fine, need stronger smoothing)")
+        smooth_meters = 2.5
+    smooth_sigma_px = _sigma_pixels_from_meters(smooth_meters, grid_res_safe)
 
     if not dem_path or not os.path.exists(dem_path):
         return {"ok": False, "error": f"DEM not found: {dem_path}", "paths": {}}
@@ -993,32 +1450,26 @@ def run_ui4_kriging_from_paths(
         }
 
     coords = krig_df[["x", "y"]].to_numpy(dtype=float)
-    values = krig_df["depth"].to_numpy(dtype=float)
-    n = int(values.size)
+    values_surface = krig_df["z"].to_numpy(dtype=float)
+    n = int(values_surface.size)
     _log(log_fn, f"[UI4] Kriging points: n={n}")
 
-    variogram = _fit_exponential_variogram(
-        coords,
-        values,
-        pairs=int(variogram_pairs),
-        bins_count=int(variogram_bins),
-        min_pairs_per_bin=int(variogram_min_pairs_per_bin),
-        percentile_max_h=float(variogram_percentile_max_h),
-        random_seed=int(random_seed),
-    )
-    params = np.asarray(variogram["params"], dtype=float)
-    _log(
-        log_fn,
-        "[UI4] Variogram params: "
-        f"nugget={params[0]:.6g}, sill={params[1]:.6g}, range={params[2]:.6g} "
-        f"({variogram.get('fit_method')})",
-    )
-
-    solver = _build_ok_solver(coords, values, params)
-
-    # Build grid over convex hull (+ buffer), predict inside hull
-    hull = MultiPoint([Point(float(x), float(y)) for x, y in coords]).convex_hull.buffer(float(buffer_m))
-    minx, miny, maxx, maxy = map(float, hull.bounds)
+    # Determine interpolation domain: DXF boundary > mask TIF > convex hull buffer.
+    interp_poly = None
+    interp_domain = "convex_hull_buffer"
+    if dxf_boundary_path and os.path.exists(dxf_boundary_path):
+        interp_poly = read_boundary_polygon_from_dxf(dxf_boundary_path, log_fn=log_fn)
+        if interp_poly is not None:
+            interp_domain = "dxf_boundary"
+            _log(log_fn, f"[UI4] Using DXF boundary: {dxf_boundary_path}")
+    if interp_poly is None and mask_tif_path:
+        interp_poly = _polygon_from_boundary_xy(_boundary_xy_from_mask_tif(mask_tif_path))
+        if interp_poly is not None:
+            interp_domain = "mask_polygon"
+    if interp_poly is None:
+        interp_poly = MultiPoint([Point(float(x), float(y)) for x, y in coords]).convex_hull.buffer(float(buffer_m))
+        interp_domain = "convex_hull_buffer"
+    minx, miny, maxx, maxy = map(float, interp_poly.bounds)
 
     xs = np.arange(minx, maxx + float(grid_res_m), float(grid_res_m))
     ys = np.arange(miny, maxy + float(grid_res_m), float(grid_res_m))
@@ -1030,17 +1481,95 @@ def run_ui4_kriging_from_paths(
     xx, yy = np.meshgrid(xs, ys)
     grid_points = np.column_stack([xx.ravel(), yy.ravel()])
 
-    ph = prep(hull)
-    mask = np.array([ph.covers(Point(float(p[0]), float(p[1]))) for p in grid_points], dtype=bool)
+    # Row-by-row polygon containment (much faster than point-by-point).
+    ph = prep(interp_poly)
+    mask_2d = np.zeros((ny, nx), dtype=bool)
+    for j in range(ny):
+        row_pts = [Point(float(x), float(ys[j])) for x in xs]
+        mask_2d[j, :] = [ph.contains(pt) for pt in row_pts]
+    mask = mask_2d.ravel()
+    if not np.any(mask):
+        # Fallback: try covers() for edge cases.
+        for j in range(ny):
+            row_pts = [Point(float(x), float(ys[j])) for x in xs]
+            mask_2d[j, :] = [ph.covers(pt) for pt in row_pts]
+        mask = mask_2d.ravel()
     inside_pts = grid_points[mask]
     if inside_pts.size == 0:
-        return {"ok": False, "error": "No grid points inside hull.", "paths": {}}
+        return {"ok": False, "error": "No grid points inside interpolation domain.", "paths": {}}
 
-    _log(log_fn, f"[UI4] Grid size: {nx}x{ny} ({nx*ny:,} cells), inside={inside_pts.shape[0]:,}")
+    _log(
+        log_fn,
+        f"[UI4] Grid size: {nx}x{ny} ({nx*ny:,} cells), inside={inside_pts.shape[0]:,}, domain={interp_domain}",
+    )
 
-    pred_depth, pred_var = _ok_predict(solver, inside_pts, chunk=int(predict_chunk_size))
-    pred_depth = np.clip(pred_depth, 0.0, None)
-    pred_var = np.clip(pred_var, 0.0, None)
+    Z_surface = np.full((ny, nx), np.nan, dtype=float)
+    Z_var = np.full((ny, nx), np.nan, dtype=float)
+    variogram: Dict[str, Any] = {
+        "fit_method": None,
+        "nugget": None,
+        "sill": None,
+        "range": None,
+        "bin_centers": np.asarray([], dtype=float),
+        "gamma_means": np.asarray([], dtype=float),
+        "bin_counts": np.asarray([], dtype=int),
+    }
+
+    use_pykrige_effective = bool(use_pykrige) and (PyKrigeOrdinaryKriging is not None)
+    if use_pykrige_effective:
+        try:
+            model_name = str(variogram_model or "spherical").strip().lower() or "spherical"
+            _log(log_fn, f"[UI4] Kriging engine: pykrige ({model_name})")
+            ok = PyKrigeOrdinaryKriging(
+                coords[:, 0],
+                coords[:, 1],
+                values_surface,
+                variogram_model=model_name,
+                verbose=False,
+                enable_plotting=False,
+            )
+            zgrid, ss = ok.execute("grid", xs, ys)
+            Z_surface = np.asarray(zgrid, dtype=float).reshape((ny, nx))
+            Z_var = np.asarray(ss, dtype=float).reshape((ny, nx))
+            variogram["fit_method"] = f"pykrige_{model_name}"
+        except Exception as e:
+            _log(log_fn, f"[UI4] pykrige failed, fallback to internal OK solver: {e}")
+            use_pykrige_effective = False
+
+    if not use_pykrige_effective:
+        variogram = _fit_exponential_variogram(
+            coords,
+            values_surface,
+            pairs=int(variogram_pairs),
+            bins_count=int(variogram_bins),
+            min_pairs_per_bin=int(variogram_min_pairs_per_bin),
+            percentile_max_h=float(variogram_percentile_max_h),
+            random_seed=int(random_seed),
+        )
+        params = np.asarray(variogram["params"], dtype=float)
+        _log(
+            log_fn,
+            "[UI4] Kriging engine: internal OK (exponential variogram) | "
+            f"nugget={params[0]:.6g}, sill={params[1]:.6g}, range={params[2]:.6g} "
+            f"({variogram.get('fit_method')})",
+        )
+        solver = _build_ok_solver(coords, values_surface, params)
+        pred_surface, pred_var = _ok_predict(solver, inside_pts, chunk=int(predict_chunk_size))
+        pred_var = np.clip(pred_var, 0.0, None)
+        flat_surface = np.full(nx * ny, np.nan, dtype=float)
+        flat_var = np.full(nx * ny, np.nan, dtype=float)
+        flat_surface[mask] = pred_surface
+        flat_var[mask] = pred_var
+        Z_surface = flat_surface.reshape((ny, nx))
+        Z_var = flat_var.reshape((ny, nx))
+
+    mask_2d = mask.reshape((ny, nx))
+    Z_surface[~mask_2d] = np.nan
+    Z_var[~mask_2d] = np.nan
+
+    if smooth_sigma_px > 0:
+        Z_surface = _gaussian_smooth_nan(Z_surface, smooth_sigma_px)
+        Z_surface[~mask_2d] = np.nan
 
     with rasterio.open(dem_path) as src:
         dem_inside = np.array([v[0] for v in src.sample([tuple(p) for p in inside_pts])], dtype=float)
@@ -1052,23 +1581,23 @@ def run_ui4_kriging_from_paths(
             else:
                 dem_inside[np.isclose(dem_inside, float(dem_nodata))] = np.nan
 
-    valid_inside = np.isfinite(dem_inside)
-    slip_z = np.full_like(dem_inside, np.nan, dtype=float)
-    slip_z[valid_inside] = dem_inside[valid_inside] - pred_depth[valid_inside]
-    pred_depth[~valid_inside] = np.nan
-    pred_var[~valid_inside] = np.nan
+    Z_flat = np.full(nx * ny, np.nan, dtype=float)
+    Z_depth_flat = np.full(nx * ny, np.nan, dtype=float)
+    Z_var_flat = np.full(nx * ny, np.nan, dtype=float)
+    surface_inside = Z_surface.ravel()[mask]
+    var_inside = Z_var.ravel()[mask]
+    valid_inside = np.isfinite(dem_inside) & np.isfinite(surface_inside)
+    depth_inside = np.full_like(surface_inside, np.nan, dtype=float)
+    depth_inside[valid_inside] = dem_inside[valid_inside] - surface_inside[valid_inside]
+    depth_inside = np.where(np.isfinite(depth_inside), np.clip(depth_inside, 0.0, None), np.nan)
 
-    Z = np.full(nx * ny, np.nan, dtype=float)
-    Z_depth = np.full(nx * ny, np.nan, dtype=float)
-    Z_var = np.full(nx * ny, np.nan, dtype=float)
+    Z_flat[mask] = np.where(valid_inside, surface_inside, np.nan)
+    Z_depth_flat[mask] = depth_inside
+    Z_var_flat[mask] = np.where(valid_inside, np.clip(var_inside, 0.0, None), np.nan)
 
-    Z[mask] = slip_z
-    Z_depth[mask] = pred_depth
-    Z_var[mask] = pred_var
-
-    Z = Z.reshape((ny, nx))
-    Z_depth = Z_depth.reshape((ny, nx))
-    Z_var = Z_var.reshape((ny, nx))
+    Z = Z_flat.reshape((ny, nx))
+    Z_depth = Z_depth_flat.reshape((ny, nx))
+    Z_var = Z_var_flat.reshape((ny, nx))
 
     # flip vertically for GeoTIFF (row0 = maxy)
     Z_top = np.flipud(Z)
@@ -1135,6 +1664,10 @@ def run_ui4_kriging_from_paths(
             "grid_res_m": float(grid_res_m),
             "buffer_m": float(buffer_m),
             "nodata_out": float(nodata_out),
+            "use_pykrige": bool(use_pykrige),
+            "variogram_model": str(variogram_model),
+            "smooth_sigma": float(smooth_meters),
+            "smooth_sigma_pixels": float(smooth_sigma_px),
             "variogram_pairs": int(variogram_pairs),
             "variogram_bins": int(variogram_bins),
             "variogram_min_pairs_per_bin": int(variogram_min_pairs_per_bin),
@@ -1163,9 +1696,15 @@ def run_ui4_kriging_from_paths(
         "raster_stats": raster_stats,
         "variogram": {
             "fit_method": variogram.get("fit_method"),
-            "nugget": float(variogram["nugget"]),
-            "sill": float(variogram["sill"]),
-            "range": float(variogram["range"]),
+            "nugget": (
+                float(variogram["nugget"]) if variogram.get("nugget") is not None else None
+            ),
+            "sill": (
+                float(variogram["sill"]) if variogram.get("sill") is not None else None
+            ),
+            "range": (
+                float(variogram["range"]) if variogram.get("range") is not None else None
+            ),
             "bin_count_used": int(len(variogram.get("bin_centers", []))),
             "bin_centers": np.asarray(variogram.get("bin_centers", []), dtype=float).tolist(),
             "gamma_means": np.asarray(variogram.get("gamma_means", []), dtype=float).tolist(),
@@ -1246,6 +1785,7 @@ def run_ui4_kriging_for_run(
     dem_path = info["paths"]["dem"]
     curve_json_paths = info["paths"]["nurbs_curve_jsons"]
     mask_tif_path = info.get("paths", {}).get("mask_tif") or ""
+    dxf_boundary_path = info.get("paths", {}).get("dxf_boundary_path") or ""
     out_dir = os.path.join(os.path.abspath(str(run_dir)), str(out_subdir))
 
     _log(log_fn, f"[UI4] Running kriging for run_dir={os.path.abspath(str(run_dir))}")
@@ -1254,6 +1794,7 @@ def run_ui4_kriging_for_run(
         curve_json_paths=curve_json_paths,
         out_dir=out_dir,
         mask_tif_path=mask_tif_path,
+        dxf_boundary_path=dxf_boundary_path,
         log_fn=log_fn,
         **kwargs,
     )

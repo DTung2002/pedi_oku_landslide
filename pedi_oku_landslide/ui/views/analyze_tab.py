@@ -17,6 +17,7 @@ from pedi_oku_landslide.pipeline.ingest import run_ingest
 from pedi_oku_landslide.pipeline.steps.step_smooth import run_smooth
 from pedi_oku_landslide.pipeline.steps.step_sad import run_sad
 from pedi_oku_landslide.pipeline.steps.step_detect import run_detect, render_vectors
+from pedi_oku_landslide.pipeline.steps.step_mask_dxf import run_mask_from_dxf
 
 
 class AnalyzeTab(QWidget):
@@ -184,6 +185,26 @@ class AnalyzeTab(QWidget):
         grid_detect.addWidget(self.spin_detect_thr, 2, 1)
         grid_detect.addWidget(self.btn_detect, 2, 2)
         lay_detect.addLayout(grid_detect)
+
+        # ---- Manual mask from DXF (optional) ----
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setFrameShadow(QFrame.Sunken)
+        lay_detect.addWidget(sep)
+
+        self.fp_mask_dxf = FilePicker("Boundary.dxf", "DXF (*.dxf)")
+        self.btn_import_dxf_mask = QPushButton("Detect from DXF")
+        self.btn_import_dxf_mask.setEnabled(False)  # bật sau SAD (cần dx/dy grid)
+        self.btn_import_dxf_mask.clicked.connect(self._on_import_dxf_mask)
+        row_mask = QHBoxLayout()
+        row_mask.addWidget(self.fp_mask_dxf, 1)
+        row_mask.addWidget(self.btn_import_dxf_mask, 0)
+        lay_detect.addLayout(row_mask)
+
+        self.lbl_mask_source = QLabel("Mask source: not set")
+        self.lbl_mask_source.setWordWrap(True)
+        self.lbl_mask_source.setVisible(False)
+
         # ---- Vector Display ----
         grp_vectors = QGroupBox("Vector Display")
         lay_vectors = QVBoxLayout(grp_vectors)
@@ -271,11 +292,13 @@ class AnalyzeTab(QWidget):
             self.btn_detect.sizeHint().width(),
             self.btn_smooth.sizeHint().width(),
             self.btn_calc_sad.sizeHint().width(),
+            self.btn_import_dxf_mask.sizeHint().width(),
             120,  # keep labels fully visible on narrow panes
         )
         self.btn_smooth.setFixedWidth(btn_detect_w)
         self.btn_calc_sad.setFixedWidth(btn_detect_w)
         self.btn_detect.setFixedWidth(btn_detect_w)
+        self.btn_import_dxf_mask.setFixedWidth(btn_detect_w)
         left_layout.addWidget(grp_detect)
         left_layout.addWidget(grp_vectors)
 
@@ -421,6 +444,57 @@ class AnalyzeTab(QWidget):
         parts = run_id.split("_", 2)
         return parts[2] if len(parts) == 3 else ""
 
+    @staticmethod
+    def _ctx_from_run_dir(base_dir: str, run_dir: str) -> AnalysisContext:
+        parts = os.path.normpath(run_dir).split(os.sep)
+        if len(parts) < 2:
+            raise RuntimeError("Unexpected run folder structure.")
+        run_id = parts[-1]
+        project = parts[-2]
+        return AnalysisContext(
+            project_id=project,
+            run_id=run_id,
+            base_dir=base_dir,
+            project_dir=os.path.join(base_dir, "output", project),
+            run_dir=run_dir,
+            in_dir=os.path.join(run_dir, "input"),
+            out_ui1=os.path.join(run_dir, "ui1"),
+            out_ui2=os.path.join(run_dir, "ui2"),
+            out_ui3=os.path.join(run_dir, "ui3"),
+        )
+
+    def _refresh_mask_source_ui(self, run_dir: Optional[str] = None) -> None:
+        rd = (run_dir or self._last_run_dir or "").strip()
+        if not rd:
+            self.lbl_mask_source.setText("Mask source: not set")
+            return
+
+        ui1_dir = os.path.join(rd, "ui1")
+        mask_tif = os.path.join(ui1_dir, "landslide_mask.tif")
+        meta_json = os.path.join(ui1_dir, "mask_from_dxf_meta.json")
+
+        if not os.path.exists(mask_tif):
+            self.lbl_mask_source.setText("Mask source: not set")
+            return
+
+        dxf_name = ""
+        if os.path.exists(meta_json):
+            try:
+                import json
+                with open(meta_json, "r", encoding="utf-8") as f:
+                    meta = json.load(f) or {}
+                dxf_path = str(meta.get("dxf_path") or "").strip()
+                if dxf_path:
+                    dxf_name = os.path.basename(dxf_path)
+                    self.fp_mask_dxf.set_path(dxf_path)
+            except Exception:
+                pass
+
+        if dxf_name:
+            self.lbl_mask_source.setText(f"Mask source: DXF ({dxf_name})")
+        else:
+            self.lbl_mask_source.setText("Mask source: auto/existing mask raster")
+
     # ---------- Actions ----------
     def _on_confirm_input(self) -> None:
         project = (self.edit_project.text() or "").strip()
@@ -450,6 +524,9 @@ class AnalyzeTab(QWidget):
             self.btn_open_run.setEnabled(True)
             self.btn_smooth.setEnabled(True)  # bật smooth sau khi confirm
             self.btn_calc_sad.setEnabled(True)
+            self.btn_detect.setEnabled(False)
+            self.btn_vectors.setEnabled(False)
+            self.btn_import_dxf_mask.setEnabled(False)
 
             self._ok(
                 "Confirm Input completed.\n"
@@ -463,6 +540,7 @@ class AnalyzeTab(QWidget):
                 preview.get("before_asc_hillshade_png"),
                 preview.get("after_asc_hillshade_png"),
             )
+            self._refresh_mask_source_ui(self._last_run_dir)
 
         except FileExistsError:
             self._err("Run folder already exists (rare). Please try again.")
@@ -569,6 +647,7 @@ class AnalyzeTab(QWidget):
             self.btn_calc_sad.setEnabled(True)
             self.btn_detect.setEnabled(True)
             self.btn_vectors.setEnabled(True)
+            self.btn_import_dxf_mask.setEnabled(True)
 
             # thông báo
             self._ok(
@@ -587,6 +666,7 @@ class AnalyzeTab(QWidget):
             right_img = vectors if os.path.exists(vectors) else dz_png
 
             self.viewer.show_pair(left_img, right_img)
+            self._refresh_mask_source_ui(self._last_run_dir)
 
         except Exception as e:
             self._err(f"Post-process error: {e}")
@@ -595,6 +675,12 @@ class AnalyzeTab(QWidget):
         self.btn_calc_sad.setEnabled(True)
         self.btn_detect.setEnabled(True)
         self.btn_vectors.setEnabled(True)
+        if self._last_run_dir:
+            dx_ok = os.path.exists(os.path.join(self._last_run_dir, "ui1", "dx.tif"))
+            dy_ok = os.path.exists(os.path.join(self._last_run_dir, "ui1", "dy.tif"))
+            self.btn_import_dxf_mask.setEnabled(dx_ok and dy_ok)
+        else:
+            self.btn_import_dxf_mask.setEnabled(False)
         self._err(f"SAD+dZ error: {msg}")
 
     def _on_open_run(self) -> None:
@@ -610,6 +696,120 @@ class AnalyzeTab(QWidget):
                 subprocess.Popen([opener, self._last_run_dir])
         except Exception as e:
             self._err(f"Cannot open folder: {e}")
+
+    def _export_ui1_vectors_json(
+        self,
+        ctx: AnalysisContext,
+        *,
+        step: int,
+        scale: float,
+        vector_color: str,
+        vector_width: float,
+        vector_opacity: float,
+        min_m: float = 0.05,
+        max_m: float = 2.0,
+    ) -> str:
+        """
+        Export sampled vectors currently used by Render Vectors to JSON.
+        Output: <run_dir>/ui1/vector/vectors.json
+        """
+        import json
+        import numpy as np
+        import rasterio
+
+        dx_path = os.path.join(ctx.out_ui1, "dx.tif")
+        dy_path = os.path.join(ctx.out_ui1, "dy.tif")
+        dem_path = os.path.join(ctx.in_dir, "before.asc")
+        mask_path = os.path.join(ctx.out_ui1, "landslide_mask.tif")
+
+        if not (os.path.exists(dx_path) and os.path.exists(dy_path)):
+            raise FileNotFoundError("dx.tif or dy.tif is missing.")
+        if not os.path.exists(dem_path):
+            raise FileNotFoundError("before.asc is missing.")
+
+        with rasterio.open(dx_path) as dx_ds:
+            dX = dx_ds.read(1).astype("float32")
+            transform = dx_ds.transform
+            px_m = abs(float(transform.a))
+            py_m = abs(float(transform.e))
+
+        with rasterio.open(dy_path) as dy_ds:
+            dY = dy_ds.read(1).astype("float32")
+
+        with rasterio.open(dem_path) as dem_ds:
+            dem = dem_ds.read(1).astype("float32")
+            nd = dem_ds.nodata
+            if nd is not None:
+                dem[dem == nd] = np.nan
+
+        if os.path.exists(mask_path):
+            with rasterio.open(mask_path) as msk_ds:
+                in_zone = (msk_ds.read(1) > 0)
+        else:
+            in_zone = np.ones_like(dX, dtype=bool)
+
+        mag_m = np.sqrt((dX * px_m) ** 2 + (dY * py_m) ** 2).astype("float32")
+        sample = np.zeros_like(mag_m, dtype=bool)
+        sample[::max(1, int(step)), ::max(1, int(step))] = True
+        ok = sample & in_zone & np.isfinite(mag_m) & (mag_m >= float(min_m)) & (mag_m <= float(max_m))
+
+        rows, cols = np.where(ok)
+        out_dir = os.path.join(ctx.out_ui1, "vector")
+        os.makedirs(out_dir, exist_ok=True)
+        out_json = os.path.join(out_dir, "vectors.json")
+
+        xw = transform.c + cols * transform.a + transform.a / 2.0
+        yw = transform.f + rows * transform.e + transform.e / 2.0
+
+        dx_px = dX[rows, cols]
+        dy_px = dY[rows, cols]
+        dx_m = dx_px * px_m
+        dy_m = dy_px * py_m
+        z_vals = dem[rows, cols]
+        magnitude_m = np.sqrt(dx_m ** 2 + dy_m ** 2)
+        direction_deg = np.degrees(np.arctan2(dy_m, dx_m))
+
+        vectors = []
+        for i in range(len(rows)):
+            vectors.append({
+                "row": int(rows[i]),
+                "col": int(cols[i]),
+                "x": float(xw[i]),
+                "y": float(yw[i]),
+                "z": (None if not np.isfinite(z_vals[i]) else float(z_vals[i])),
+                "direction_deg": (None if not np.isfinite(direction_deg[i]) else float(direction_deg[i])),
+                "magnitude_m": (None if not np.isfinite(magnitude_m[i]) else float(magnitude_m[i])),
+                "dx_px": (None if not np.isfinite(dx_px[i]) else float(dx_px[i])),
+                "dy_px": (None if not np.isfinite(dy_px[i]) else float(dy_px[i])),
+                "dx_m": (None if not np.isfinite(dx_m[i]) else float(dx_m[i])),
+                "dy_m": (None if not np.isfinite(dy_m[i]) else float(dy_m[i])),
+            })
+
+        payload = {
+            "project_id": ctx.project_id,
+            "run_id": ctx.run_id,
+            "count": len(vectors),
+            "step": int(step),
+            "scale": float(scale),
+            "vector_color": str(vector_color),
+            "vector_width": float(vector_width),
+            "vector_opacity": float(vector_opacity),
+            "filters": {
+                "min_m": float(min_m),
+                "max_m": float(max_m),
+            },
+            "sources": {
+                "dx_tif": dx_path.replace("\\", "/"),
+                "dy_tif": dy_path.replace("\\", "/"),
+                "dem_before_asc": dem_path.replace("\\", "/"),
+                "mask_tif": (mask_path.replace("\\", "/") if os.path.exists(mask_path) else None),
+            },
+            "vectors": vectors,
+        }
+
+        with open(out_json, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        return out_json.replace("\\", "/")
 
     # ---------- Status helpers ----------
     def _append_status(self, text: str) -> None:
@@ -648,35 +848,55 @@ class AnalyzeTab(QWidget):
             self._warn("Please run 'Confirm Input' first.")
             return
         try:
-            # reconstruct ctx
-            parts = os.path.normpath(self._last_run_dir).split(os.sep)
-            if len(parts) < 2:
-                raise RuntimeError("Unexpected run folder structure.")
-            run_id = parts[-1]
-            project = parts[-2]
-
-            ctx = AnalysisContext(
-                project_id=project,
-                run_id=run_id,
-                base_dir=self.base_dir,
-                project_dir=os.path.join(self.base_dir, "output", project),
-                run_dir=self._last_run_dir,
-                in_dir=os.path.join(self._last_run_dir, "input"),
-                out_ui1=os.path.join(self._last_run_dir, "ui1"),
-                out_ui2=os.path.join(self._last_run_dir, "ui2"),
-                out_ui3=os.path.join(self._last_run_dir, "ui3"),
-            )
+            ctx = self._ctx_from_run_dir(self.base_dir, self._last_run_dir)
 
             thr_m = float(self.spin_detect_thr.value())
             out = run_detect(ctx, method="threshold", threshold_m=thr_m)
+
+            # Auto detect overrides manual DXF mask metadata.
+            meta_json = os.path.join(ctx.out_ui1, "mask_from_dxf_meta.json")
+            if os.path.exists(meta_json):
+                try:
+                    os.remove(meta_json)
+                except Exception:
+                    pass
 
             self._ok(f"Detected with threshold = {thr_m:.2f} m\n - {out['mask_tif']}")
             dz_png = os.path.join(ctx.out_ui1, "dz.png")
             overlay = out["mask_png"]  # bước detect đã lưu heatmap overlay
             self.viewer.show_pair(dz_png, overlay)
+            self._refresh_mask_source_ui(ctx.run_dir)
 
         except Exception as e:
             self._err(f"Detect error: {e}")
+
+    def _on_import_dxf_mask(self) -> None:
+        if not self._last_run_dir:
+            self._warn("Please run 'Confirm Input' first.")
+            return
+        dxf_path = (self.fp_mask_dxf.path or "").strip()
+        if not dxf_path:
+            self._warn("Please select a DXF boundary file first.")
+            return
+        try:
+            ctx = self._ctx_from_run_dir(self.base_dir, self._last_run_dir)
+            out = run_mask_from_dxf(ctx, dxf_path)
+
+            self._ok(
+                f"DXF mask created.\n"
+                f" - mask: {out.get('mask_tif', '')}\n"
+                f" - polygons: {out.get('polygon_count', 0)}"
+            )
+            self._info(f"Mask pixels in-zone: {out.get('mask_pixels_positive', 0)}")
+
+            dz_png = os.path.join(ctx.out_ui1, "dz.png")
+            left_img = dz_png if os.path.exists(dz_png) else os.path.join(ctx.out_ui1, "before_asc_hillshade.png")
+            right_img = out.get("mask_png", "")
+            if left_img and right_img and os.path.exists(right_img):
+                self.viewer.show_pair(left_img, right_img)
+            self._refresh_mask_source_ui(ctx.run_dir)
+        except Exception as e:
+            self._err(f"DXF mask import error: {e}")
 
     def _on_render_vectors(self, quiet: bool = False, emit_signal: bool = True) -> None:
         if not self._last_run_dir:
@@ -719,6 +939,20 @@ class AnalyzeTab(QWidget):
                 vector_opacity=opacity,
             )
 
+            json_path = None
+            if not quiet:
+                try:
+                    json_path = self._export_ui1_vectors_json(
+                        ctx,
+                        step=step,
+                        scale=scale,
+                        vector_color=color,
+                        vector_width=width,
+                        vector_opacity=opacity,
+                    )
+                except Exception as e:
+                    self._append_status(f"WARN: Export vector JSON failed: {e}")
+
             # Hiển thị: trái = overlay (nếu có) hoặc dz, phải = vectors overlay
             overlay = os.path.join(ctx.out_ui1, "landslide_overlay.png")
             left_img = overlay if os.path.exists(overlay) else os.path.join(ctx.out_ui1, "dz.png")
@@ -729,6 +963,8 @@ class AnalyzeTab(QWidget):
                     f"Vectors rendered (step={step}, scale={scale}, "
                     f"size={self.sld_vec_size.value()}%, opacity={self.sld_vec_opacity.value()}%)."
                 )
+                if json_path:
+                    self._info(f"Vector JSON saved: {json_path}")
 
             # emit để MainWindow enable tab Section Selection
             if emit_signal:
@@ -794,6 +1030,7 @@ class AnalyzeTab(QWidget):
             dy_ok = os.path.exists(os.path.join(ctx.out_ui1, "dy.tif"))
             self.btn_detect.setEnabled(dx_ok and dy_ok)
             self.btn_vectors.setEnabled(dx_ok and dy_ok)
+            self.btn_import_dxf_mask.setEnabled(dx_ok and dy_ok)
 
             # Bật Open run
             self.btn_open_run.setEnabled(True)
@@ -819,6 +1056,7 @@ class AnalyzeTab(QWidget):
 
             if left_img and right_img:
                 self.viewer.show_pair(left_img, right_img)
+            self._refresh_mask_source_ui(ctx.run_dir)
 
             self._ok(
                 "Opened existing run.\n"
@@ -871,6 +1109,10 @@ class AnalyzeTab(QWidget):
             except Exception:
                 # Không fatal, chỉ cố gắng hết sức
                 pass
+        try:
+            self.fp_mask_dxf.clear()
+        except Exception:
+            pass
 
         # 4) Đưa các nút về trạng thái ban đầu
         self.btn_open_run.setEnabled(False)
@@ -878,6 +1120,7 @@ class AnalyzeTab(QWidget):
         self.btn_calc_sad.setEnabled(False)
         self.btn_detect.setEnabled(False)
         self.btn_vectors.setEnabled(False)
+        self.btn_import_dxf_mask.setEnabled(False)
         # Nút Confirm Input luôn bật
         self.btn_confirm.setEnabled(True)
 
@@ -929,6 +1172,10 @@ class AnalyzeTab(QWidget):
         # 7) Clear status log
         try:
             self.status_text.clear()
+        except Exception:
+            pass
+        try:
+            self.lbl_mask_source.setText("Mask source: not set")
         except Exception:
             pass
 

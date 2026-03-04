@@ -21,7 +21,6 @@ from pedi_oku_landslide.pipeline.runners.ui3_backend import (
     clamp_groups_to_slip, auto_group_profile_by_criteria, auto_group_profile,
     estimate_slip_curve, fit_bezier_smooth_curve, evaluate_nurbs_curve
 )
-from pedi_oku_landslide.pipeline.runners.ui3_backend import rdp_indices_from_profile, rdp_points_from_profile
 from PyQt5.QtGui import QPen, QColor
 # ===================== ZOOMABLE GRAPHICS VIEW =====================
 from PyQt5.QtWidgets import QGraphicsView, QToolBar, QAction
@@ -172,6 +171,12 @@ class KeyboardOnlyDoubleSpinBox(QDoubleSpinBox):
         event.ignore()
 
 
+class NoWheelComboBox(QComboBox):
+    """Ignore wheel to allow parent scroll area to consume mouse wheel."""
+    def wheelEvent(self, event):
+        event.ignore()
+
+
 Section = Tuple[float, float, float, float]  # (x1, y1, x2, y2)
 
 
@@ -191,6 +196,7 @@ class CurveAnalyzeTab(QWidget):
         self.base_dir = base_dir
         self._ctx: Dict[str, str] = {"project": "", "run_label": "", "run_dir": ""}
         self._splitter: Optional[QSplitter] = None
+        self._left_scroll: Optional[QScrollArea] = None
         self._left_min_w = 380
         self._left_default_w = 490
         self._pending_init_splitter = True
@@ -1526,35 +1532,6 @@ class CurveAnalyzeTab(QWidget):
                 self._warn("[UI3] Empty/too-short slip profile.");
                 return
 
-            # Save RDP indices (numpy-based _rdp) to output/RDP_indicies.json
-            try:
-                out_dir = os.path.join(self.base_dir, "output")
-                os.makedirs(out_dir, exist_ok=True)
-
-                rdp_indices = rdp_indices_from_profile(prof, rdp_eps_m=0.5)
-                out_json_idx = os.path.join(out_dir, "RDP_indicies.json")
-                payload_idx = {
-                    "line": self._line_id_current(),
-                    "eps": 0.5,
-                    "rdp_indices": rdp_indices,
-                }
-                with open(out_json_idx, "w", encoding="utf-8") as f:
-                    json.dump(payload_idx, f, ensure_ascii=False, indent=2)
-                self._log(f"[UI3] RDP indices saved: {out_json_idx} (n={len(rdp_indices)})")
-
-                rdp_points = rdp_points_from_profile(prof, rdp_eps_m=0.5)
-                out_json_pts = os.path.join(out_dir, "RDP_points.json")
-                payload_pts = {
-                    "line": self._line_id_current(),
-                    "eps": 0.5,
-                    "rdp_points": rdp_points,
-                }
-                with open(out_json_pts, "w", encoding="utf-8") as f:
-                    json.dump(payload_pts, f, ensure_ascii=False, indent=2)
-                self._log(f"[UI3] RDP points saved: {out_json_pts} (n={len(rdp_points)})")
-            except Exception as e:
-                self._warn(f"[UI3] RDP save failed: {e}")
-
             # 2) Lấy groups (ưu tiên bảng → file), rồi clamp vào slip-zone
             groups = self._load_groups_for_current_line()
             if not groups:
@@ -1785,13 +1762,22 @@ class CurveAnalyzeTab(QWidget):
         splitter.splitterMoved.connect(lambda *_: self._enforce_left_pane_bounds())
         root.addWidget(splitter)
 
-        # ===== LEFT: controls (KHÔNG dùng QScrollArea nữa) =====
+        # ===== LEFT: controls (scrollable) =====
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setFrameShape(QFrame.NoFrame)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        left_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        left_scroll.setMinimumWidth(self._left_min_w)
+        self._left_scroll = left_scroll
+        splitter.addWidget(left_scroll)
+
         left_container = QWidget()
         left_container.setMinimumWidth(self._left_min_w)
         left = QVBoxLayout(left_container)
         left.setContentsMargins(6, 6, 6, 6)
         left.setSpacing(8)
-        splitter.addWidget(left_container)
+        left_scroll.setWidget(left_container)
 
         # Project info – giống Section tab
         box_proj = QGroupBox("Project")
@@ -1832,7 +1818,7 @@ class CurveAnalyzeTab(QWidget):
         box_sel = QGroupBox("Sections Display")
         lsd = QVBoxLayout(box_sel)
         ls = QHBoxLayout()
-        self.line_combo = QComboBox()
+        self.line_combo = NoWheelComboBox()
         self.line_combo.currentIndexChanged.connect(self._on_line_changed)
         btn_render = QPushButton("Render Section")
         btn_render.clicked.connect(self._render_current_safe)
@@ -1852,7 +1838,7 @@ class CurveAnalyzeTab(QWidget):
 
         lbl_step = _fit_adv_label("Step (m):")
         la.addWidget(lbl_step)
-        self.step_box = QDoubleSpinBox()
+        self.step_box = KeyboardOnlyDoubleSpinBox()
         self.step_box.setDecimals(2)
         self.step_box.setValue(0.20)
         self.step_box.setMaximum(1e6)
@@ -1861,7 +1847,7 @@ class CurveAnalyzeTab(QWidget):
         la.addWidget(self.step_box, 1)
         lbl_scale = _fit_adv_label("Scale:")
         la.addWidget(lbl_scale)
-        self.vscale = QDoubleSpinBox()
+        self.vscale = KeyboardOnlyDoubleSpinBox()
         self.vscale.setDecimals(3)
         self.vscale.setValue(0.1)
         self.vscale.setMaximum(1e6)
@@ -1870,7 +1856,7 @@ class CurveAnalyzeTab(QWidget):
         la.addWidget(self.vscale, 1)
         lbl_width = _fit_adv_label("Width:")
         la.addWidget(lbl_width)
-        self.vwidth = QDoubleSpinBox()
+        self.vwidth = KeyboardOnlyDoubleSpinBox()
         self.vwidth.setDecimals(4)
         self.vwidth.setValue(0.0015)
         self.vwidth.setMaximum(1.0)
@@ -1902,7 +1888,7 @@ class CurveAnalyzeTab(QWidget):
         self.group_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self.group_table.cellDoubleClicked.connect(self._on_group_cell_double_clicked)
         self.group_table.itemChanged.connect(self._on_group_table_item_changed)
-        _set_table_visible_rows(self.group_table, rows=4, row_h=30)
+        _set_table_visible_rows(self.group_table, rows=6, row_h=30)
         lg.addWidget(self.group_table)
 
         rowg = QHBoxLayout()
@@ -1948,7 +1934,7 @@ class CurveAnalyzeTab(QWidget):
         self.nurbs_table.verticalHeader().setVisible(False)
         self.nurbs_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.nurbs_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        _set_table_visible_rows(self.nurbs_table, rows=4, row_h=34)
+        _set_table_visible_rows(self.nurbs_table, rows=6, row_h=34)
         ln.addWidget(self.nurbs_table)
 
         row_nurbs_btn = QHBoxLayout()
@@ -1970,6 +1956,7 @@ class CurveAnalyzeTab(QWidget):
         ls = QVBoxLayout(box_st)
         self.status = QTextEdit()
         self.status.setReadOnly(True)
+        self.status.setMinimumHeight(170)
         self.status.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         ls.addWidget(self.status)
         left.addWidget(box_st, 1)

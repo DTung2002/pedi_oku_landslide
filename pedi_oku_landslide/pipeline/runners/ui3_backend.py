@@ -544,11 +544,11 @@ def render_profile_png(
 
     import matplotlib.pyplot as plt
     with plt.rc_context({'font.size': base_font}):
-        # 2 h├áng: [vectors ; theta-rate]
+        # 2 h├áng: [vectors ; gradient]
         fig = plt.figure(figsize=figsize if figsize else (18, 12), dpi=dpi)
         gs = fig.add_gridspec(nrows=2, ncols=1, height_ratios=[3, 1], hspace=0.35)
         ax = fig.add_subplot(gs[0, 0])  # vectors/profile
-        ax2 = fig.add_subplot(gs[1, 0], sharex=ax)  # theta-rate
+        ax2 = fig.add_subplot(gs[1, 0], sharex=ax)  # gradient
 
         ax.plot(chain, elev_s, "k-", lw=ground_lw, label="Ground (smoothed)")
 
@@ -610,20 +610,20 @@ def render_profile_png(
             finite = np.isfinite(chain_s) & np.isfinite(d_para_s) & np.isfinite(dz_s)
             if finite.sum() >= 2:
                 ch = chain_s[finite]
-                theta_unw = np.unwrap(np.arctan2(dz_s[finite], d_para_s[finite]))  # rad
-                dtheta_ds = np.gradient(theta_unw, ch)  # rad/m
-                theta_rate = np.degrees(dtheta_ds)  # deg/m
+                # Vector slope angle (deg), normalized to [-90, 90].
+                gradient_deg = np.degrees(np.arctan2(dz_s[finite], d_para_s[finite]))
+                gradient_deg = ((gradient_deg + 90.0) % 180.0) - 90.0
 
-                if savgol_filter is not None and theta_rate.size >= 9:
+                if savgol_filter is not None and gradient_deg.size >= 9:
                     try:
-                        theta_rate = savgol_filter(theta_rate, 9, 2, mode="interp")
+                        gradient_deg = savgol_filter(gradient_deg, 9, 2, mode="interp")
                     except Exception:
                         pass
 
-                ax2.plot(ch, theta_rate, lw=2.2, color="#2ca02c", zorder=5, label="θ-rate")
+                ax2.plot(ch, gradient_deg, lw=2.2, color="#2ca02c", zorder=5, label="Gradient")
 
             ax2.axhline(0.0, color="0.5", lw=1.0, zorder=1)
-            ax2.set_ylabel("θ rate (deg/m)", fontsize=axis_label_font)
+            ax2.set_ylabel("Gradient (deg)", fontsize=axis_label_font)
             ax2r = ax2.twinx()
             ax2r.set_ylabel("Curvature (1/m)", fontsize=axis_label_font)
 
@@ -654,7 +654,7 @@ def render_profile_png(
 
             try:
                 if finite.sum() >= 2:
-                    q = np.nanpercentile(np.abs(theta_rate), 98)
+                    q = np.nanpercentile(np.abs(gradient_deg), 98)
                     if np.isfinite(q) and q > 0:
                         ax2.set_ylim(-1.2 * q, 1.2 * q)
             except Exception:
@@ -686,19 +686,19 @@ def render_profile_png(
             finite_th = np.isfinite(chain) & np.isfinite(d_para) & np.isfinite(dz)
             if finite_th.sum() >= 2:
                 chain_f = chain[finite_th]
-                theta_unw = np.unwrap(np.arctan2(dz[finite_th], d_para[finite_th]))  # rad
-                dtheta_ds = np.gradient(theta_unw, chain_f)  # rad/m
-                theta_rate = np.degrees(dtheta_ds)  # deg/m
-                if savgol_filter is not None and theta_rate.size >= 9:
+                # Vector slope angle (deg), normalized to [-90, 90].
+                gradient_deg = np.degrees(np.arctan2(dz[finite_th], d_para[finite_th]))
+                gradient_deg = ((gradient_deg + 90.0) % 180.0) - 90.0
+                if savgol_filter is not None and gradient_deg.size >= 9:
                     try:
-                        theta_rate = savgol_filter(theta_rate, 9, 2, mode="interp")
+                        gradient_deg = savgol_filter(gradient_deg, 9, 2, mode="interp")
                     except Exception:
                         pass
-                ax2.plot(chain_f, theta_rate, color="#2ca02c", lw=2.4, zorder=5, label="θ-rate")
+                ax2.plot(chain_f, gradient_deg, color="#2ca02c", lw=2.4, zorder=5, label="Gradient")
 
             ax2.axhline(0.0, color="0.5", lw=1.0, zorder=1)
             ax2.set_xlabel("Chainage (m)")
-            ax2.set_ylabel("θ rate (deg/m)")
+            ax2.set_ylabel("Gradient (deg)")
             ax2r = ax2.twinx()
             ax2r.set_ylabel("Curvature (1/m)")
 
@@ -728,7 +728,7 @@ def render_profile_png(
 
             try:
                 if finite_th.sum() >= 2:
-                    q = np.nanpercentile(np.abs(theta_rate), 98)
+                    q = np.nanpercentile(np.abs(gradient_deg), 98)
                     if np.isfinite(q) and q > 0:
                         pad = 1.2 * q
                         ax2.set_ylim(-pad, pad)
@@ -869,7 +869,7 @@ def render_profile_png(
 
         ax2.set_xlabel("Chainage (m)", fontsize=axis_label_font)
         ax.set_ylabel("Elevation (m)", fontsize=axis_label_font)
-        ax2.set_ylabel("θ rate (deg/m)", fontsize=axis_label_font)
+        ax2.set_ylabel("Gradient (deg)", fontsize=axis_label_font)
         try:
             ax2r.set_ylabel("Curvature (1/m)", fontsize=axis_label_font)
         except Exception:
