@@ -30,6 +30,36 @@ def _read_raster(path: str) -> Tuple[np.ndarray, dict, Affine, Optional[object]]
     return arr, meta, transform, crs
 
 
+def _write_geotiff_float32(path: str, arr: np.ndarray, meta_template: dict, nodata_default: float = -9999.0) -> None:
+    """
+    Force output to true GeoTIFF and normalize NaN/Inf to nodata.
+    This avoids AAIGrid-in-.tif outputs that can fail on other GDAL builds.
+    """
+    profile = dict(meta_template or {})
+    nodata_val = profile.get("nodata", nodata_default)
+    try:
+        nodata_val = float(nodata_val)
+    except Exception:
+        nodata_val = float(nodata_default)
+    if not np.isfinite(nodata_val):
+        nodata_val = float(nodata_default)
+
+    arr_f = np.asarray(arr, dtype="float32")
+    arr_out = np.where(np.isfinite(arr_f), arr_f, nodata_val).astype("float32", copy=False)
+
+    profile.update(
+        driver="GTiff",
+        dtype="float32",
+        count=1,
+        compress="lzw",
+        nodata=float(nodata_val),
+    )
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with rasterio.open(path, "w", **profile) as ds:
+        ds.write(arr_out, 1)
+
+
 def _pixel_size_from_transform(transform: Affine) -> Tuple[float, float]:
     # Typically transform.a = pixel width (xres), transform.e = negative pixel height
     return abs(float(transform.a)), abs(float(transform.e))
@@ -344,11 +374,8 @@ def run_sad(ctx: AnalysisContext,
     dx_tif = os.path.join(ctx.out_ui1, "dx.tif")
     dy_tif = os.path.join(ctx.out_ui1, "dy.tif")
     m = meta_b.copy()
-    m.update(dtype="float32", count=1, compress="lzw")
-    with rasterio.open(dx_tif, "w", **m) as d:
-        d.write(dX.astype("float32"), 1)
-    with rasterio.open(dy_tif, "w", **m) as d:
-        d.write(dY.astype("float32"), 1)
+    _write_geotiff_float32(dx_tif, dX, m)
+    _write_geotiff_float32(dy_tif, dY, m)
 
     # ---- save dX, dY PNG (in pixels)
     dx_png = os.path.join(ctx.out_ui1, "dx.png")
@@ -376,9 +403,7 @@ def run_sad(ctx: AnalysisContext,
     # ---- save dZ GeoTIFF + PNG
     dz_tif = os.path.join(ctx.out_ui1, "dz.tif")
     mm = meta_bz.copy()
-    mm.update(dtype="float32", count=1, compress="lzw")
-    with rasterio.open(dz_tif, "w", **mm) as d:
-        d.write(dz, 1)
+    _write_geotiff_float32(dz_tif, dz, mm)
 
     dz_png = os.path.join(ctx.out_ui1, "dz.png")
     _save_png_diverging(dz, transform_bz, dz_png, f"dZ (after_pz shifted - before_pz) [{method}]", "dZ", vlim=vlim_dz)
