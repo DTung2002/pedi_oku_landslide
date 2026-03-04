@@ -99,7 +99,7 @@ DEFAULT_UI4_CONTOUR_PARAMS: Dict[str, Any] = {
     "figsize": (10, 8),
     "dpi": 200,
     "label_fontsize": 8,
-    "linewidth": 0.7,
+    "linewidth": 1.0,
 }
 
 
@@ -1142,18 +1142,9 @@ def render_contours_png_from_raster(
     )
     if levels_minor.size < 2:
         return {"ok": False, "error": "No valid contour levels"}
-    major_factor = _safe_float(major_interval_factor)
-    if not np.isfinite(major_factor) or major_factor <= 1.0:
-        major_factor = 5.0
-    major_interval = float(interval_val * major_factor)
-    levels_major = _contour_levels_from_interval_range(
-        z_plot_smooth,
-        interval=major_interval,
-        z_min=level_zmin,
-        z_max=level_zmax,
-    )
-    if levels_major.size < 2:
-        levels_major = levels_minor
+    # Keep API compatibility while rendering a single contour layer (no major/minor split).
+    major_interval = float(interval_val)
+    levels_major = levels_minor
 
     os.makedirs(os.path.dirname(out_png), exist_ok=True)
     fig = plt.figure(figsize=figsize, dpi=int(dpi))
@@ -1164,27 +1155,19 @@ def render_contours_png_from_raster(
         cf = ax.contourf(X, Y, z_plot, levels=levels_minor, cmap=(cmap or "terrain"), alpha=float(alpha_raster))
 
     use_colored_lines = (contour_color is None) or (not str(contour_color).strip())
-    contour_minor_kwargs: Dict[str, Any] = {
+    contour_kwargs: Dict[str, Any] = {
         "levels": levels_minor,
-        "linewidths": max(0.2, float(linewidth) * 0.7),
-        "alpha": 0.75,
-    }
-    contour_major_kwargs: Dict[str, Any] = {
-        "levels": levels_major,
-        "linewidths": max(0.35, float(linewidth) * 1.45),
-        "alpha": 0.95,
+        "linewidths": 1.0,
+        "alpha": 0.9,
     }
     if use_colored_lines:
         cmap_name = str(cmap or "terrain")
-        contour_minor_kwargs["cmap"] = cmap_name
-        contour_major_kwargs["cmap"] = cmap_name
+        contour_kwargs["cmap"] = cmap_name
     else:
         line_color = str(contour_color).strip()
-        contour_minor_kwargs["colors"] = line_color
-        contour_major_kwargs["colors"] = line_color
+        contour_kwargs["colors"] = line_color
 
-    ax.contour(X, Y, z_plot, **contour_minor_kwargs)
-    cs = ax.contour(X, Y, z_plot, **contour_major_kwargs)
+    cs = ax.contour(X, Y, z_plot, **contour_kwargs)
     if label_contours:
         try:
             ax.clabel(cs, inline=True, fontsize=int(label_fontsize), fmt="%.1f")
@@ -1229,8 +1212,8 @@ def render_contours_png_from_raster(
         cbar.set_label(cb_label)
 
     ax.set_aspect("equal", adjustable="box")
-    ax.set_xlabel("Tọa độ X")
-    ax.set_ylabel("Tọa độ Y")
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
     ax.set_title(
         title
         or (
@@ -1333,10 +1316,10 @@ def render_ui4_contours_for_run(
             interval=float(surface_interval_m),
             z_min=surface_z_min,
             z_max=surface_z_max,
-            title="Kriging Slip Surface Contours (masked to Boundary)",
+            title="Slip Surface Contours",
             draw_raster=False,
             label_contours=True,
-            linewidth=0.7,
+            linewidth=1.0,
             cmap="terrain",
             contour_color=None,
             smooth_meters=float(surface_smoothing_m),
@@ -1360,7 +1343,7 @@ def render_ui4_contours_for_run(
             title="Kriging Slip Depth Contours (masked to Boundary)",
             draw_raster=False,
             label_contours=True,
-            linewidth=0.7,
+            linewidth=1.0,
             cmap="viridis",
             contour_color=None,
             smooth_meters=float(depth_smoothing_m),

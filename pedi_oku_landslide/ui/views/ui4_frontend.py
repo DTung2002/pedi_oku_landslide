@@ -129,7 +129,7 @@ class UI4FrontendTab(QWidget):
         self.status_box.setMaximumHeight(140)
         self.btn_refresh = QPushButton("Reload Inputs")
         self.btn_refresh.clicked.connect(self.refresh_from_context)
-        self.btn_run_ui4 = QPushButton("Calculate Kriging")
+        self.btn_run_ui4 = QPushButton("Calculate Slip Surface")
         self.btn_run_ui4.clicked.connect(self._on_run_ui4)
         self.btn_make_contours = QPushButton("Preview")
         self.btn_make_contours.clicked.connect(self._on_generate_contours)
