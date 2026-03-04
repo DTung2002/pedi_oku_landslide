@@ -415,7 +415,7 @@ def compute_profile(
         elev_s = elev.copy()
 
     for d in (dem_ds, dx_ds, dy_ds, dz_ds): d.close()
-    if mask_bool is not None:
+    if mask_bool is not None and slip_only:
         keep = np.isfinite(chain) & (mask_bool == True) & np.isfinite(elev_s)
     else:
         keep = np.isfinite(chain) & np.isfinite(elev_s)
@@ -488,57 +488,29 @@ def render_profile_png(
     tick_font: int = 20,
     legend_font: int = 20,
     ground_lw: float = 2.2,
+    ungrouped_color: str = "#bbbbbb",
 ) -> Tuple[str, Optional[str]]:
 
     if not prof:
-        return "[Γ£ù] Empty profile", None
+        return "Empty profile", None
 
-    def _dump_ground_json(out_png_path: str, prof_dict: Dict[str, np.ndarray]) -> None:
-        try:
-            xs = np.asarray(prof_dict.get("x", []), dtype=float)
-            ys = np.asarray(prof_dict.get("y", []), dtype=float)
-            z_raw = np.asarray(prof_dict.get("elev", []), dtype=float)
-            z_smooth = np.asarray(prof_dict.get("elev_s", []), dtype=float)
-            n = min(xs.size, ys.size, z_raw.size, z_smooth.size)
-            if n == 0:
-                return
-
-            ui3_dir = os.path.dirname(os.path.dirname(out_png_path))
-            base = os.path.splitext(os.path.basename(out_png_path))[0]
-            out_json = os.path.join(ui3_dir, f"{base}_ground.json")
-
-            rows = []
-            for i in range(n):
-                xr = float(xs[i]) if np.isfinite(xs[i]) else None
-                yr = float(ys[i]) if np.isfinite(ys[i]) else None
-                zr = float(z_raw[i]) if np.isfinite(z_raw[i]) else None
-                zs = float(z_smooth[i]) if np.isfinite(z_smooth[i]) else None
-                rows.append({
-                    "index": i,
-                    "x": xr,
-                    "y": yr,
-                    "z_raw": zr,
-                    "z_smooth": zs,
-                })
-
-            payload = {
-                "count": n,
-                "data": rows,
-            }
-            os.makedirs(ui3_dir, exist_ok=True)
-            with open(out_json, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
+    # UI3 global font scale: shrink all legend/axis/tick text to 80%
+    font_scale = 0.8
+    base_font = max(1, int(round(base_font * font_scale)))
+    label_font = max(1, int(round(label_font * font_scale)))
+    tick_font = max(1, int(round(tick_font * font_scale)))
+    legend_font = max(1, int(round(legend_font * font_scale)))
+    # Additional 10% reduction for legend fonts.
+    legend_font = max(1, int(round(legend_font * 0.9)))
+    # Additional 10% reduction for requested axis labels/tick labels.
+    axis_label_font = max(1, int(round(label_font * 0.9)))
+    axis_tick_font = max(1, int(round(tick_font * 0.9)))
 
     x_user_min, x_user_max = x_min, x_max
     y_user_min, y_user_max = y_min, y_max
 
     chain = prof["chain"]; elev_s = prof["elev_s"]
     d_para = prof["d_para"]; dz = prof["dz"]; theta = prof["theta"]
-
-    if out_png:
-        _dump_ground_json(out_png, prof)
 
     if (x_min is None) or (x_max is None):
         if "slip_span" in prof and prof["slip_span"]:
@@ -572,16 +544,26 @@ def render_profile_png(
 
     import matplotlib.pyplot as plt
     with plt.rc_context({'font.size': base_font}):
-        # 2 h├áng: [vectors ; theta-rate]
+        # 2 h├áng: [vectors ; gradient]
         fig = plt.figure(figsize=figsize if figsize else (18, 12), dpi=dpi)
         gs = fig.add_gridspec(nrows=2, ncols=1, height_ratios=[3, 1], hspace=0.35)
         ax = fig.add_subplot(gs[0, 0])  # vectors/profile
-        ax2 = fig.add_subplot(gs[1, 0], sharex=ax)  # theta-rate
+        ax2 = fig.add_subplot(gs[1, 0], sharex=ax)  # gradient
 
         ax.plot(chain, elev_s, "k-", lw=ground_lw, label="Ground (smoothed)")
 
 
         finite = np.isfinite(chain) & np.isfinite(elev_s) & np.isfinite(d_para) & np.isfinite(dz)
+        slip_mask_arr = None
+        try:
+            sm = prof.get("slip_mask", None)
+            if sm is not None:
+                sm = np.asarray(sm)
+                if sm.shape == chain.shape:
+                    # Only True values are considered "inside mask"; all others default to ungrouped.
+                    slip_mask_arr = (sm == True)
+        except Exception:
+            slip_mask_arr = None
         if group_ranges:
             if "slip_span" in prof and prof["slip_span"]:
                 smin, smax = prof["slip_span"]
@@ -607,6 +589,8 @@ def render_profile_png(
             gidx = np.full(chain.shape, -1, dtype=int)
             for gi, gid, s, e, color in prepared:
                 m = (chain >= s) & (chain <= e)
+                if slip_mask_arr is not None:
+                    m = m & slip_mask_arr
                 gidx[m] = gi
 
             for gi, gid, s, e, color in prepared:
@@ -616,7 +600,7 @@ def render_profile_png(
                               angles="xy", scale_units="xy", scale=vec_scale,
                               width=vec_width, color=color,
                               headlength=head_len, headwidth=head_w)
-                    ax.plot([], [], color=color, lw=3, label=str(gid))
+                    ax.plot([], [], color=color, lw=3, label="_nolegend_")
 
             order = np.argsort(chain)
             chain_s = chain[order]
@@ -626,22 +610,22 @@ def render_profile_png(
             finite = np.isfinite(chain_s) & np.isfinite(d_para_s) & np.isfinite(dz_s)
             if finite.sum() >= 2:
                 ch = chain_s[finite]
-                theta_unw = np.unwrap(np.arctan2(dz_s[finite], d_para_s[finite]))  # rad
-                dtheta_ds = np.gradient(theta_unw, ch)  # rad/m
-                theta_rate = np.degrees(dtheta_ds)  # deg/m
+                # Vector slope angle (deg), normalized to [-90, 90].
+                gradient_deg = np.degrees(np.arctan2(dz_s[finite], d_para_s[finite]))
+                gradient_deg = ((gradient_deg + 90.0) % 180.0) - 90.0
 
-                if savgol_filter is not None and theta_rate.size >= 9:
+                if savgol_filter is not None and gradient_deg.size >= 9:
                     try:
-                        theta_rate = savgol_filter(theta_rate, 9, 2, mode="interp")
+                        gradient_deg = savgol_filter(gradient_deg, 9, 2, mode="interp")
                     except Exception:
                         pass
 
-                ax2.plot(ch, theta_rate, lw=2.2, color="#2ca02c", zorder=5, label="θ-rate")
+                ax2.plot(ch, gradient_deg, lw=2.2, color="#2ca02c", zorder=5, label="Gradient")
 
             ax2.axhline(0.0, color="0.5", lw=1.0, zorder=1)
-            ax2.set_ylabel("θ rate (deg/m)", fontsize=label_font)
+            ax2.set_ylabel("Gradient (deg)", fontsize=axis_label_font)
             ax2r = ax2.twinx()
-            ax2r.set_ylabel("Curvature (1/m)", fontsize=label_font)
+            ax2r.set_ylabel("Curvature (1/m)", fontsize=axis_label_font)
 
             # Curvature from RDP points on the profile (signed k = 1/R).
             k_curve = None
@@ -670,7 +654,7 @@ def render_profile_png(
 
             try:
                 if finite.sum() >= 2:
-                    q = np.nanpercentile(np.abs(theta_rate), 98)
+                    q = np.nanpercentile(np.abs(gradient_deg), 98)
                     if np.isfinite(q) and q > 0:
                         ax2.set_ylim(-1.2 * q, 1.2 * q)
             except Exception:
@@ -686,11 +670,12 @@ def render_profile_png(
 
             m = finite & (gidx == -1)
             if np.any(m):
+                ug_color = ungrouped_color or "#bbbbbb"
                 ax.quiver(chain[m], elev_s[m], d_para[m], dz[m],
                           angles="xy", scale_units="xy", scale=vec_scale,
-                          width=vec_width, color="#bbbbbb", alpha=0.9,
+                          width=vec_width, color=ug_color, alpha=0.9,
                           headlength=head_len, headwidth=head_w)
-                ax.plot([], [], color="#bbbbbb", lw=3, label="(ungrouped)")
+                ax.plot([], [], color=ug_color, lw=3, label="_nolegend_")
         else:
             ax.quiver(
                 chain, elev_s, d_para, dz,
@@ -701,19 +686,19 @@ def render_profile_png(
             finite_th = np.isfinite(chain) & np.isfinite(d_para) & np.isfinite(dz)
             if finite_th.sum() >= 2:
                 chain_f = chain[finite_th]
-                theta_unw = np.unwrap(np.arctan2(dz[finite_th], d_para[finite_th]))  # rad
-                dtheta_ds = np.gradient(theta_unw, chain_f)  # rad/m
-                theta_rate = np.degrees(dtheta_ds)  # deg/m
-                if savgol_filter is not None and theta_rate.size >= 9:
+                # Vector slope angle (deg), normalized to [-90, 90].
+                gradient_deg = np.degrees(np.arctan2(dz[finite_th], d_para[finite_th]))
+                gradient_deg = ((gradient_deg + 90.0) % 180.0) - 90.0
+                if savgol_filter is not None and gradient_deg.size >= 9:
                     try:
-                        theta_rate = savgol_filter(theta_rate, 9, 2, mode="interp")
+                        gradient_deg = savgol_filter(gradient_deg, 9, 2, mode="interp")
                     except Exception:
                         pass
-                ax2.plot(chain_f, theta_rate, color="#2ca02c", lw=2.4, zorder=5, label="θ-rate")
+                ax2.plot(chain_f, gradient_deg, color="#2ca02c", lw=2.4, zorder=5, label="Gradient")
 
             ax2.axhline(0.0, color="0.5", lw=1.0, zorder=1)
             ax2.set_xlabel("Chainage (m)")
-            ax2.set_ylabel("θ rate (deg/m)")
+            ax2.set_ylabel("Gradient (deg)")
             ax2r = ax2.twinx()
             ax2r.set_ylabel("Curvature (1/m)")
 
@@ -743,7 +728,7 @@ def render_profile_png(
 
             try:
                 if finite_th.sum() >= 2:
-                    q = np.nanpercentile(np.abs(theta_rate), 98)
+                    q = np.nanpercentile(np.abs(gradient_deg), 98)
                     if np.isfinite(q) and q > 0:
                         pad = 1.2 * q
                         ax2.set_ylim(-pad, pad)
@@ -796,6 +781,29 @@ def render_profile_png(
                 for x in bounds:
                     ax.axvline(x, **vkw)
                     ax2.axvline(x, **vkw)
+                # Number group intervals between adjacent dashed boundaries.
+                try:
+                    import matplotlib.transforms as mtransforms
+                    trans = mtransforms.blended_transform_factory(ax.transData, ax.transAxes)
+                    label_fs = max(8, int(round(tick_font * 0.9)))
+                    idx = 1
+                    for x0, x1 in zip(bounds[:-1], bounds[1:]):
+                        if not (np.isfinite(x0) and np.isfinite(x1)):
+                            continue
+                        if x1 <= x0:
+                            continue
+                        xm = 0.5 * (x0 + x1)
+                        ax.text(
+                            float(xm), 0.995, str(idx),
+                            transform=trans,
+                            ha="center", va="top",
+                            fontsize=label_fs,
+                            color="#333333",
+                            zorder=60,
+                        )
+                        idx += 1
+                except Exception:
+                    pass
         # --- draw slip curve if requested ---
         # --- draw slip curve if requested (make it pop on top of vectors) ---
         # --- draw slip curve if requested (robust overlay) ---
@@ -859,9 +867,19 @@ def render_profile_png(
                 ax.plot(chain[m], elev_s[m], "o", color="limegreen", ms=5,
                         label=f"θ ΓëÑ {thr:.1f}┬░ & dz>0")
 
-        ax2.set_xlabel("Chainage (m)", fontsize=label_font)
-        ax.set_ylabel("Elevation (m)", fontsize=label_font)
-        ax.tick_params(labelsize=tick_font)
+        ax2.set_xlabel("Chainage (m)", fontsize=axis_label_font)
+        ax.set_ylabel("Elevation (m)", fontsize=axis_label_font)
+        ax2.set_ylabel("Gradient (deg)", fontsize=axis_label_font)
+        try:
+            ax2r.set_ylabel("Curvature (1/m)", fontsize=axis_label_font)
+        except Exception:
+            pass
+        ax.tick_params(axis="both", labelsize=axis_tick_font)
+        ax2.tick_params(axis="both", labelsize=axis_tick_font)
+        try:
+            ax2r.tick_params(axis="both", labelsize=axis_tick_font)
+        except Exception:
+            pass
         ax.grid(ls="--", lw=0.8, alpha=0.35)
         ax.margins(x=0.02)
 
@@ -922,6 +940,13 @@ def render_profile_png(
         if user_x_fixed:
             ax.set_xlim(float(x_user_min), float(x_user_max))
             ax2.set_xlim(float(x_user_min), float(x_user_max))
+        # Force chainage major ticks every 10 m on both panels.
+        try:
+            from matplotlib.ticker import MultipleLocator
+            ax.xaxis.set_major_locator(MultipleLocator(10.0))
+            ax2.xaxis.set_major_locator(MultipleLocator(10.0))
+        except Exception:
+            pass
         # --- OVERLAY SLIP CURVES
         if overlay_curves:
             for item in overlay_curves:
@@ -939,16 +964,6 @@ def render_profile_png(
                 m = np.isfinite(ch) & np.isfinite(zz)
                 if not np.any(m):
                     continue
-                try:
-                    xmin, xmax = ax.get_xlim()
-                    m &= (ch >= xmin) & (ch <= xmax)
-                except Exception:
-                    pass
-                try:
-                    ymin, ymax = ax.get_ylim()
-                    m &= (zz >= ymin) & (zz <= ymax)
-                except Exception:
-                    pass
 
                 if np.any(m):
                     ln, = ax.plot(ch[m], zz[m], color=color, lw=3.0, zorder=50, label=label)
@@ -966,11 +981,12 @@ def render_profile_png(
         fig.canvas.draw()
         renderer = fig.canvas.get_renderer()
 
-        bbox_top = ax.get_window_extent(renderer=renderer).transformed(fig.dpi_scale_trans)
+        # get_window_extent is already in display pixels
+        bbox_top = ax.get_window_extent(renderer=renderer)
         x_top, y_top, w_top, h_top = map(float, bbox_top.bounds)
         x_min_top, x_max_top = ax.get_xlim()
 
-        bbox_bot = ax2.get_window_extent(renderer=renderer).transformed(fig.dpi_scale_trans)
+        bbox_bot = ax2.get_window_extent(renderer=renderer)
         x_bot, y_bot, w_bot, h_bot = map(float, bbox_bot.bounds)
         x_min_bot, x_max_bot = ax2.get_xlim()
 
@@ -982,18 +998,22 @@ def render_profile_png(
         crop_y0 = float(tight.y0) - pad_px
 
         top_left_px = x_top - crop_x0
-        top_top_px = y_top - crop_y0
         bot_left_px = x_bot - crop_x0
-        bot_top_px = y_bot - crop_y0
+        # Convert Matplotlib display-y (origin at bottom) to saved image y (origin at top).
+        crop_h = float(tight.height) + (2.0 * pad_px)
+        top_top_px = crop_h - ((y_top - crop_y0) + h_top)
+        bot_top_px = crop_h - ((y_bot - crop_y0) + h_bot)
 
         meta = {
             "top": {
                 "x_min": float(x_min_top), "x_max": float(x_max_top),
+                "y_min": float(min(ax.get_ylim())), "y_max": float(max(ax.get_ylim())),
                 "left_px": float(top_left_px), "top_px": float(top_top_px),
                 "width_px": float(w_top), "height_px": float(h_top)
             },
             "bot": {
                 "x_min": float(x_min_bot), "x_max": float(x_max_bot),
+                "y_min": float(min(ax2.get_ylim())), "y_max": float(max(ax2.get_ylim())),
                 "left_px": float(bot_left_px), "top_px": float(bot_top_px),
                 "width_px": float(w_bot), "height_px": float(h_bot)
             }
@@ -1010,12 +1030,12 @@ def render_profile_png(
         fig.savefig(out_png, dpi=dpi, bbox_inches="tight", pad_inches=pad_inches)
 
         plt.close(fig)
-        return f"[Γ£ô] Saved {out_png}", out_png
+        return f"Saved {out_png}", out_png
 
 
 def export_csv(prof: Dict[str, np.ndarray], out_csv: Optional[str]) -> Tuple[str, Optional[str]]:
     if not prof:
-        return "[Γ£ù] Empty profile", None
+        return "Empty profile", None
 
     if not out_csv:
         from datetime import datetime
@@ -1125,6 +1145,441 @@ def rdp_points_from_profile(prof: dict, rdp_eps_m: float = 0.5) -> List[List[flo
     pts = list(zip(map(float, chain_f), map(float, elev_f)))
     simp = _rdp_polyline(pts, rdp_eps_m)
     return [[float(x), float(y)] for x, y in simp]
+
+def _cluster_chain_marks(chain_marks: np.ndarray, gap_m: float = 0.5) -> List[float]:
+    vals = np.asarray(chain_marks, dtype=float)
+    vals = vals[np.isfinite(vals)]
+    if vals.size == 0:
+        return []
+    vals.sort()
+    clusters: List[List[float]] = [[float(vals[0])]]
+    for v in vals[1:]:
+        if (float(v) - clusters[-1][-1]) <= gap_m:
+            clusters[-1].append(float(v))
+        else:
+            clusters.append([float(v)])
+    return [float(np.mean(c)) for c in clusters if c]
+
+def _robust_zscore_abs(vals: np.ndarray) -> np.ndarray:
+    arr = np.asarray(vals, dtype=float)
+    out = np.zeros(arr.shape, dtype=float)
+    m = np.isfinite(arr)
+    if int(np.count_nonzero(m)) < 3:
+        return out
+    v = np.abs(arr[m])
+    med = float(np.nanmedian(v))
+    mad = float(np.nanmedian(np.abs(v - med)))
+    if mad > 1e-9:
+        scale = 1.4826 * mad
+    else:
+        q75, q25 = np.nanpercentile(v, [75, 25])
+        iqr = float(q75 - q25)
+        if iqr > 1e-9:
+            scale = iqr / 1.349
+        else:
+            scale = float(np.nanstd(v))
+    if (not np.isfinite(scale)) or scale <= 1e-9:
+        return out
+    out[m] = (v - med) / scale
+    return out
+
+def _smooth_series(vals: np.ndarray, win: int, poly: int = 2) -> np.ndarray:
+    arr = np.asarray(vals, dtype=float).copy()
+    n = int(arr.size)
+    if n < 3:
+        return arr
+    m = np.isfinite(arr)
+    if int(np.count_nonzero(m)) < 2:
+        return arr
+    if not np.all(m):
+        idx = np.flatnonzero(m)
+        if idx.size == 1:
+            arr[:] = arr[idx[0]]
+        else:
+            arr[~m] = np.interp(np.flatnonzero(~m), idx, arr[idx])
+
+    w = int(max(5, win))
+    if (w % 2) == 0:
+        w += 1
+    if w > n:
+        w = n if (n % 2 == 1) else (n - 1)
+    if w < 3 or savgol_filter is None:
+        return arr
+
+    p = int(max(1, min(poly, w - 1)))
+    try:
+        return savgol_filter(arr, w, p, mode="interp")
+    except Exception:
+        return arr
+
+def auto_group_profile_adaptive_hybrid(
+    prof: dict,
+    min_len_m: float = 2.0,
+    min_boundary_gap_m: float = 1.5,
+    score_quantile: float = 85.0,
+    merge_angle_tol_deg: float = 15.0,
+    smooth_span_m: float = 2.0,
+) -> list:
+    """
+    Adaptive hybrid grouping:
+    - Build change score from theta jump, curvature, and theta-rate.
+    - Pick local maxima above a profile-adaptive quantile threshold.
+    - Apply spacing suppression between neighboring boundaries.
+    - Merge adjacent segments with similar vector direction.
+    """
+    chain = np.asarray(prof.get("chain"), dtype=float)
+    elev_s = np.asarray(prof.get("elev_s"), dtype=float)
+    dpa = np.asarray(prof.get("d_para"), dtype=float)
+    dzz = np.asarray(prof.get("dz"), dtype=float)
+    if chain.ndim != 1 or elev_s.ndim != 1 or dpa.ndim != 1 or dzz.ndim != 1:
+        return []
+    if chain.size < 5:
+        return []
+
+    if "slip_span" in prof and prof["slip_span"]:
+        smin, smax = map(float, prof["slip_span"])
+    else:
+        finite_all = np.isfinite(chain) & np.isfinite(elev_s)
+        if int(np.count_nonzero(finite_all)) < 2:
+            return []
+        smin = float(np.nanmin(chain[finite_all]))
+        smax = float(np.nanmax(chain[finite_all]))
+    if smax < smin:
+        smin, smax = smax, smin
+    if smax <= smin:
+        return []
+
+    mask = (
+        np.isfinite(chain)
+        & np.isfinite(elev_s)
+        & np.isfinite(dpa)
+        & np.isfinite(dzz)
+        & (chain >= smin)
+        & (chain <= smax)
+    )
+    if int(np.count_nonzero(mask)) < 5:
+        if (smax - smin) >= float(min_len_m):
+            return [{"id": "G1", "start": float(smin), "end": float(smax), "color": "#1f77b4"}]
+        return []
+
+    ch = chain[mask]
+    zz = elev_s[mask]
+    dx = dpa[mask]
+    dz = dzz[mask]
+    order = np.argsort(ch)
+    ch = ch[order]
+    zz = zz[order]
+    dx = dx[order]
+    dz = dz[order]
+
+    ch_u, uniq_idx = np.unique(ch, return_index=True)
+    zz_u = zz[uniq_idx]
+    dx_u = dx[uniq_idx]
+    dz_u = dz[uniq_idx]
+    if ch_u.size < 5:
+        if (smax - smin) >= float(min_len_m):
+            return [{"id": "G1", "start": float(smin), "end": float(smax), "color": "#1f77b4"}]
+        return []
+
+    ds = np.diff(ch_u)
+    ds = ds[np.isfinite(ds) & (ds > 1e-9)]
+    if ds.size == 0:
+        if (smax - smin) >= float(min_len_m):
+            return [{"id": "G1", "start": float(smin), "end": float(smax), "color": "#1f77b4"}]
+        return []
+    med_ds = float(np.nanmedian(ds))
+    w_est = int(round(float(max(0.5, smooth_span_m)) / med_ds))
+    if (w_est % 2) == 0:
+        w_est += 1
+    w_est = int(max(5, min(w_est, 31)))
+
+    zz_sm = _smooth_series(zz_u, w_est, poly=2)
+    theta_deg = np.degrees(np.unwrap(np.arctan2(dz_u, dx_u)))
+    theta_sm = _smooth_series(theta_deg, w_est, poly=2)
+    kappa = np.asarray(_curvature_3pt(ch_u, zz_sm), dtype=float)
+    theta_rate = _theta_rate_deg_per_m(ch_u, dx_u, dz_u)
+    theta_rate_sm = _smooth_series(theta_rate, w_est, poly=2)
+
+    jump = np.zeros(ch_u.shape, dtype=float)
+    if theta_sm.size >= 2:
+        dth = np.abs((theta_sm[1:] - theta_sm[:-1] + 180.0) % 360.0 - 180.0)
+        jump[1:] = dth
+
+    z_jump = _robust_zscore_abs(jump)
+    z_k = _robust_zscore_abs(kappa)
+    z_rate = _robust_zscore_abs(theta_rate_sm)
+    score = 0.45 * z_jump + 0.35 * z_k + 0.20 * z_rate
+
+    ms = np.isfinite(score)
+    if int(np.count_nonzero(ms)) < 3:
+        if (smax - smin) >= float(min_len_m):
+            return [{"id": "G1", "start": float(smin), "end": float(smax), "color": "#1f77b4"}]
+        return []
+    q = float(np.clip(score_quantile, 50.0, 99.5))
+    thr = float(np.nanpercentile(score[ms], q))
+
+    peak_idx = []
+    for i in range(1, ch_u.size - 1):
+        if not np.isfinite(score[i]):
+            continue
+        if score[i] < thr:
+            continue
+        if (score[i] >= score[i - 1]) and (score[i] > score[i + 1]):
+            peak_idx.append(i)
+
+    candidates = []
+    for i in peak_idx:
+        x = float(ch_u[i])
+        if (x <= (smin + 1e-6)) or (x >= (smax - 1e-6)):
+            continue
+        candidates.append((x, float(score[i])))
+    candidates.sort(key=lambda t: t[1], reverse=True)
+
+    selected = []
+    min_gap = float(max(0.0, min_boundary_gap_m))
+    for x, sc in candidates:
+        if all(abs(x - sx) >= min_gap for sx, _ in selected):
+            selected.append((x, sc))
+    selected.sort(key=lambda t: t[0])
+
+    boundaries = [float(smin)] + [x for x, _ in selected] + [float(smax)]
+    uniq = [boundaries[0]]
+    for b in boundaries[1:]:
+        if (float(b) - float(uniq[-1])) > 1e-6:
+            uniq.append(float(b))
+    if len(uniq) < 2:
+        return []
+
+    ranges = []
+    for s, e in zip(uniq[:-1], uniq[1:]):
+        if e > s:
+            ranges.append({"start": float(s), "end": float(e)})
+    if not ranges:
+        return []
+
+    merged = _merge_by_vector_direction(
+        ch_u, dx_u, dz_u, ranges, angle_tol_deg=float(max(1.0, merge_angle_tol_deg))
+    )
+
+    colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+              "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"]
+    out = []
+    for rg in merged:
+        s = max(float(rg["start"]), float(smin))
+        e = min(float(rg["end"]), float(smax))
+        if (e - s) < float(min_len_m):
+            continue
+        i = len(out) + 1
+        out.append({
+            "id": f"G{i}",
+            "start": float(s),
+            "end": float(e),
+            "color": colors[(i - 1) % len(colors)],
+        })
+
+    if not out and (smax - smin) >= float(min_len_m):
+        out = [{
+            "id": "G1",
+            "start": float(smin),
+            "end": float(smax),
+            "color": colors[0],
+        }]
+    return out
+
+def auto_group_profile_by_criteria(
+    prof: dict,
+    rdp_eps_m: float = 0.5,
+    curvature_thr_abs: float = 2.0,
+    horizontal_angle_tol_deg: float = 5.0,
+    adjacent_angle_split_deg: float = 10.0,
+    horizontal_cluster_gap_m: float = 0.5,
+    min_len_m: float = 0.20,
+) -> list:
+    """
+    New standalone grouping rule:
+    1) Start/end of slip block.
+    2) Points where |curvature| > curvature_thr_abs on RDP-simplified smoothed profile.
+    3) Points where vector is horizontal within +/- horizontal_angle_tol_deg.
+    4) Split between adjacent vectors when |delta angle| > adjacent_angle_split_deg.
+    """
+    chain = np.asarray(prof.get("chain"), dtype=float)
+    elev_s = np.asarray(prof.get("elev_s"), dtype=float)
+    dpa = np.asarray(prof.get("d_para"), dtype=float)
+    dzz = np.asarray(prof.get("dz"), dtype=float)
+    if chain.ndim != 1 or elev_s.ndim != 1 or dpa.ndim != 1 or dzz.ndim != 1:
+        return []
+    if chain.size < 2:
+        return []
+
+    if "slip_span" in prof and prof["slip_span"]:
+        smin, smax = map(float, prof["slip_span"])
+    else:
+        finite_all = np.isfinite(chain) & np.isfinite(elev_s)
+        if finite_all.sum() < 2:
+            return []
+        smin = float(np.nanmin(chain[finite_all]))
+        smax = float(np.nanmax(chain[finite_all]))
+    if smax < smin:
+        smin, smax = smax, smin
+    if smax <= smin:
+        return []
+
+    boundaries = [smin, smax]
+
+    finite_curve = np.isfinite(chain) & np.isfinite(elev_s) & (chain >= smin) & (chain <= smax)
+    if finite_curve.sum() >= 3:
+        pts = list(zip(chain[finite_curve].tolist(), elev_s[finite_curve].tolist()))
+        rdp_pts = _rdp_polyline(pts, rdp_eps_m)
+        if len(rdp_pts) >= 3:
+            k_vals = _curvature_points_from_rdp(rdp_pts)
+            for (xv, _), kv in zip(rdp_pts, k_vals):
+                if np.isfinite(kv) and abs(float(kv)) > float(curvature_thr_abs):
+                    boundaries.append(float(xv))
+
+    finite_vec = np.isfinite(chain) & np.isfinite(dpa) & np.isfinite(dzz) & (chain >= smin) & (chain <= smax)
+    if finite_vec.any():
+        chain_v = chain[finite_vec]
+        dpa_v = dpa[finite_vec]
+        dzz_v = dzz[finite_vec]
+        ang = np.degrees(np.arctan2(dzz_v, dpa_v))  # [-180, 180]
+        ang_abs = np.abs(ang)
+        # Distance to nearest horizontal direction (0 deg or 180 deg).
+        dist_to_horizontal = np.minimum(ang_abs, np.abs(180.0 - ang_abs))
+        horiz = np.isfinite(dist_to_horizontal) & (dist_to_horizontal <= float(horizontal_angle_tol_deg))
+        if np.any(horiz):
+            chain_h = chain_v[horiz]
+            boundaries.extend(_cluster_chain_marks(chain_h, gap_m=horizontal_cluster_gap_m))
+
+        # Adjacent-vector split rule: split when angle jump is larger than threshold.
+        if chain_v.size >= 2:
+            a1 = ang[:-1]
+            a2 = ang[1:]
+            jump = np.abs((a2 - a1 + 180.0) % 360.0 - 180.0)
+            split_mask = np.isfinite(jump) & (jump > float(adjacent_angle_split_deg))
+            if np.any(split_mask):
+                # Split at the exact position of vector i+1.
+                split_points = chain_v[1:][split_mask]
+                boundaries.extend(split_points.tolist())
+
+    boundaries = [b for b in boundaries if np.isfinite(b) and (smin <= b <= smax)]
+    if not boundaries:
+        return []
+    boundaries = sorted(boundaries)
+    uniq = [boundaries[0]]
+    for b in boundaries[1:]:
+        if abs(b - uniq[-1]) > 1e-6:
+            uniq.append(b)
+
+    colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+              "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"]
+    groups = []
+    for s, e in zip(uniq[:-1], uniq[1:]):
+        if (e - s) < float(min_len_m):
+            continue
+        i = len(groups) + 1
+        groups.append({
+            "id": f"G{i}",
+            "start": float(s),
+            "end": float(e),
+            "color": colors[(i - 1) % len(colors)],
+        })
+    if not groups and (smax - smin) >= float(min_len_m):
+        groups = [{
+            "id": "G1",
+            "start": float(smin),
+            "end": float(smax),
+            "color": colors[0],
+        }]
+    return groups
+
+
+def auto_group_profile_by_theta_anchor(
+    prof: dict,
+    angle_threshold_deg: float = 20.0,
+    min_len_m: float = 2,
+) -> list:
+    """
+    Split groups by scanning vectors from left to right:
+    - Keep the first vector angle of the current group as anchor.
+    - When |theta(i) - theta(anchor)| > threshold, close current group and start a new one.
+    """
+    chain = np.asarray(prof.get("chain"), dtype=float)
+    theta = np.asarray(prof.get("theta"), dtype=float)
+    if chain.ndim != 1 or theta.ndim != 1:
+        return []
+    n = int(min(chain.size, theta.size))
+    if n < 2:
+        return []
+    chain = chain[:n]
+    theta = theta[:n]
+
+    if "slip_span" in prof and prof["slip_span"]:
+        smin, smax = map(float, prof["slip_span"])
+    else:
+        finite_all = np.isfinite(chain) & np.isfinite(theta)
+        if int(np.count_nonzero(finite_all)) < 2:
+            return []
+        smin = float(np.nanmin(chain[finite_all]))
+        smax = float(np.nanmax(chain[finite_all]))
+    if smax < smin:
+        smin, smax = smax, smin
+    if smax <= smin:
+        return []
+
+    mask = np.isfinite(chain) & np.isfinite(theta) & (chain >= smin) & (chain <= smax)
+    if int(np.count_nonzero(mask)) < 2:
+        return []
+
+    chain_v = chain[mask]
+    theta_v = theta[mask]
+    order = np.argsort(chain_v)
+    chain_v = chain_v[order]
+    theta_v = theta_v[order]
+    if chain_v.size < 2:
+        return []
+
+    boundaries = [float(chain_v[0])]
+    anchor_theta = float(theta_v[0])
+    thr = float(max(0.0, angle_threshold_deg))
+
+    for i in range(1, chain_v.size):
+        d = abs(((float(theta_v[i]) - anchor_theta + 180.0) % 360.0) - 180.0)
+        if d > thr:
+            b = 0.5 * (float(chain_v[i - 1]) + float(chain_v[i]))
+            if b > boundaries[-1] + 1e-9:
+                boundaries.append(float(b))
+            anchor_theta = float(theta_v[i])
+
+    end_b = float(chain_v[-1])
+    if end_b > boundaries[-1] + 1e-9:
+        boundaries.append(end_b)
+    if len(boundaries) < 2:
+        return []
+
+    colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+              "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"]
+    groups = []
+    for s, e in zip(boundaries[:-1], boundaries[1:]):
+        s = float(max(s, smin))
+        e = float(min(e, smax))
+        if (e - s) < float(min_len_m):
+            continue
+        i = len(groups) + 1
+        groups.append({
+            "id": f"G{i}",
+            "start": s,
+            "end": e,
+            "color": colors[(i - 1) % len(colors)],
+        })
+
+    if not groups and (smax - smin) >= float(min_len_m):
+        groups = [{
+            "id": "G1",
+            "start": float(smin),
+            "end": float(smax),
+            "color": colors[0],
+        }]
+    return groups
 
 def _mean_angle_deg(d_para_seg, dz_seg):
     V = np.vstack([d_para_seg, dz_seg]).T
@@ -1348,64 +1803,274 @@ def fit_bezier_smooth_curve(chain, elevg, target_s, target_z,
 
     return {"chain": s_bez, "elev": z_bez}
 
-"""
-def fit_bezier_with_intersection(chain, elevg,
-                                 target_s, target_z,
-                                 sA, sB,                 # fit trong [sA, sB] = slip-zone hiß╗çn h├ánh
-                                 pass_point,             # (sM, zM) ΓÇô phß║úi ─æi qua ─æiß╗âm giao
-                                 c0=0.30, c1=0.30,
-                                 clearance=0.12,
-                                 hard_weight=2000.0):
-    sA, sB = float(sA), float(sB)
-    if not np.isfinite(sA) or not np.isfinite(sB) or sB <= sA:
+def _make_open_uniform_knot(n_ctrl: int, degree: int) -> np.ndarray:
+    """Open-uniform clamped knot vector for B-spline/NURBS."""
+    m = int(n_ctrl) + int(degree) + 1
+    kv = np.zeros(m, dtype=float)
+    kv[: degree + 1] = 0.0
+    kv[-(degree + 1):] = 1.0
+    n_internal = m - 2 * (degree + 1)
+    if n_internal > 0:
+        kv[degree + 1: degree + 1 + n_internal] = np.linspace(0.0, 1.0, n_internal + 2)[1:-1]
+    return kv
+
+
+def _bspline_basis_all(u: float, degree: int, knot: np.ndarray, n_ctrl: int) -> np.ndarray:
+    """Compute all non-rational B-spline basis functions N_i,p(u)."""
+    N = np.zeros(n_ctrl, dtype=float)
+    for i in range(n_ctrl):
+        if (knot[i] <= u < knot[i + 1]) or (
+            u == 1.0 and knot[i] <= u <= knot[i + 1] and knot[i + 1] == 1.0
+        ):
+            N[i] = 1.0
+
+    for p in range(1, degree + 1):
+        Np = np.zeros(n_ctrl, dtype=float)
+        for i in range(n_ctrl):
+            left = 0.0
+            right = 0.0
+            left_den = knot[i + p] - knot[i]
+            right_den = knot[i + p + 1] - knot[i + 1]
+            if left_den != 0.0:
+                left = (u - knot[i]) / left_den * N[i]
+            if right_den != 0.0 and (i + 1) < n_ctrl:
+                right = (knot[i + p + 1] - u) / right_den * N[i + 1]
+            Np[i] = left + right
+        N = Np
+    return N
+
+
+def _eval_nurbs_curve(
+    ctrl_pts: np.ndarray,
+    weights: np.ndarray,
+    degree: int,
+    n_samples: int,
+    knot: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    n_ctrl = int(ctrl_pts.shape[0])
+    if knot is None:
+        knot = _make_open_uniform_knot(n_ctrl, degree)
+
+    us = np.linspace(0.0, 1.0, int(max(8, n_samples)))
+    curve = np.zeros((us.size, 2), dtype=float)
+    for j, u in enumerate(us):
+        N = _bspline_basis_all(float(u), degree, knot, n_ctrl)
+        wN = weights * N
+        denom = float(np.sum(wN))
+        if denom == 0.0:
+            curve[j, :] = np.nan
+        else:
+            curve[j, :] = (wN @ ctrl_pts) / denom
+    return curve
+
+
+def evaluate_nurbs_curve(
+    chain_ctrl,
+    elev_ctrl,
+    weights=None,
+    degree: int = 3,
+    n_samples: int = 300,
+) -> dict:
+    """Evaluate a global NURBS curve from control points in chain-elevation space."""
+    ch = np.asarray(chain_ctrl, dtype=float)
+    zz = np.asarray(elev_ctrl, dtype=float)
+    if ch.ndim != 1 or zz.ndim != 1 or ch.size != zz.size or ch.size < 2:
+        return {"chain": np.array([], dtype=float), "elev": np.array([], dtype=float)}
+    m = np.isfinite(ch) & np.isfinite(zz)
+    ch = ch[m]
+    zz = zz[m]
+    if ch.size < 2:
+        return {"chain": np.array([], dtype=float), "elev": np.array([], dtype=float)}
+    order = np.argsort(ch)
+    ch = ch[order]
+    zz = zz[order]
+
+    if weights is None:
+        ww = np.ones(ch.size, dtype=float)
+    else:
+        ww = np.asarray(weights, dtype=float)
+        if ww.ndim != 1 or ww.size != ch.size:
+            ww = np.ones(ch.size, dtype=float)
+        ww = np.where(np.isfinite(ww) & (ww > 0), ww, 1.0)
+
+    n_ctrl = int(ch.size)
+    deg = int(max(1, min(int(degree), n_ctrl - 1)))
+    curve = _eval_nurbs_curve(
+        np.vstack([ch, zz]).T,
+        ww,
+        degree=deg,
+        n_samples=int(max(8, n_samples)),
+    )
+    sx = curve[:, 0]
+    sz = curve[:, 1]
+    fin = np.isfinite(sx) & np.isfinite(sz)
+    sx = sx[fin]
+    sz = sz[fin]
+    if sx.size < 2:
+        return {"chain": np.array([], dtype=float), "elev": np.array([], dtype=float)}
+    o2 = np.argsort(sx)
+    return {"chain": sx[o2], "elev": sz[o2]}
+
+
+def _median_theta_deg(chain: np.ndarray, theta: np.ndarray, s0: float, s1: float) -> Optional[float]:
+    lo, hi = (s0, s1) if s0 <= s1 else (s1, s0)
+    m = np.isfinite(chain) & np.isfinite(theta) & (chain >= lo) & (chain <= hi)
+    if int(np.count_nonzero(m)) == 0:
+        return None
+    return float(np.nanmedian(theta[m]))
+
+
+def fit_nurbs_segmented_curve(
+    prof: dict,
+    groups: list,
+    target_s,
+    target_z,
+    degree: int = 3,
+    n_ctrl: int = 4,
+    samples_per_meter: float = 6.0,
+) -> dict:
+    """
+    Piecewise NURBS (C0-continuous) from slip crest -> toe by group boundaries.
+    For each segment, use median vector angle of the corresponding group.
+    """
+    chain = np.asarray(prof.get("chain", []), dtype=float)
+    elevg = np.asarray(prof.get("elev_s", []), dtype=float)
+    theta = np.asarray(prof.get("theta", []), dtype=float)
+    if chain.ndim != 1 or elevg.ndim != 1 or theta.ndim != 1:
         return {"chain": [], "elev": []}
-    L = sB - sA
+    if chain.size < 3:
+        return {"chain": [], "elev": []}
 
-    # Endpoints tr├¬n ground
-    zA = float(np.interp(sA, chain, elevg))
-    zB = float(np.interp(sB, chain, elevg))
+    ok = np.isfinite(chain) & np.isfinite(elevg)
+    if int(np.count_nonzero(ok)) < 3:
+        return {"chain": [], "elev": []}
+    chain = chain[ok]
+    elevg = elevg[ok]
+    theta = theta[ok]
 
-    # Control x cß╗æ ─æß╗ïnh theo tß╗ë lß╗ç
-    P0x, P3x = sA, sB
-    P1x, P2x = sA + c0*L, sB - c1*L
+    if "slip_span" in prof and prof["slip_span"]:
+        smin, smax = map(float, prof["slip_span"])
+    else:
+        smin = float(np.nanmin(chain))
+        smax = float(np.nanmax(chain))
+    if smax <= smin:
+        return {"chain": [], "elev": []}
 
-    # Dß╗» liß╗çu mß╗Ñc ti├¬u trong [sA,sB]
-    ts = np.asarray(target_s, float)
-    tz = np.asarray(target_z, float)
-    m  = (ts >= sA) & (ts <= sB) & np.isfinite(tz)
-    ts, tz = ts[m], tz[m]
-    if ts.size < 6:
-        return {"chain": ts, "elev": tz}
+    # Normalize and sort groups; keep only segments inside slip span.
+    norm_groups = []
+    for g in (groups or []):
+        try:
+            gs = float(g.get("start", g.get("start_chainage", np.nan)))
+            ge = float(g.get("end", g.get("end_chainage", np.nan)))
+        except Exception:
+            continue
+        if not np.isfinite(gs) or not np.isfinite(ge):
+            continue
+        if ge < gs:
+            gs, ge = ge, gs
+        gs = max(gs, smin)
+        ge = min(ge, smax)
+        if ge > gs:
+            norm_groups.append((gs, ge))
+    if not norm_groups:
+        return {"chain": [], "elev": []}
+    norm_groups.sort(key=lambda x: (x[0], x[1]))
 
-    u  = (ts - sA)/L
-    B0 = (1-u)**3
-    B1 = 3*(1-u)**2*u
-    B2 = 3*(1-u)*u**2
-    B3 = u**3
-    A   = np.vstack([B1, B2]).T
-    rhs = tz - (B0*zA + B3*zB)
+    target_s = np.asarray(target_s, dtype=float)
+    target_z = np.asarray(target_z, dtype=float)
+    target_ok = np.isfinite(target_s) & np.isfinite(target_z)
+    target_s = target_s[target_ok]
+    target_z = target_z[target_ok]
+    has_target = target_s.size >= 2
 
-    # r├áng buß╗Öc (sM,zM)
-    sM, zM = float(pass_point[0]), float(pass_point[1])
-    uM = np.clip((sM - sA)/L, 0.0, 1.0)
-    b0 = (1-uM)**3; b1 = 3*(1-uM)**2*uM; b2 = 3*(1-uM)*uM**2; b3 = uM**3
-    A_aug   = np.vstack([A, [hard_weight*b1, hard_weight*b2]])
-    rhs_aug = np.hstack([rhs, hard_weight*(zM - (b0*zA + b3*zB))])
+    degree = int(max(1, degree))
+    n_ctrl = int(max(4, n_ctrl))
+    if n_ctrl != 4:
+        n_ctrl = 4  # current implementation uses fixed 4 control points per group segment
+    degree = min(degree, n_ctrl - 1)
 
-    z1, z2 = np.linalg.lstsq(A_aug, rhs_aug, rcond=None)[0]
+    # Lock start/end of segmented control points to first/last group boundaries.
+    global_start = float(norm_groups[0][0])
+    global_end = float(norm_groups[-1][1])
 
-    # Mß║½u h├│a
-    uu = np.linspace(0, 1, max(200, int(L*5)))
-    C0 = (1-uu)**3; C1 = 3*(1-uu)**2*uu; C2 = 3*(1-uu)*uu**2; C3 = uu**3
-    s_bez = C0*P0x + C1*P1x + C2*P2x + C3*P3x
-    z_bez = C0*zA  + C1*z1  + C2*z2  + C3*zB
+    # Start point at Group 1 start (instead of slip crest).
+    cur_s = float(global_start)
+    cur_z = float(np.interp(cur_s, target_s, target_z)) if has_target else float(np.interp(cur_s, chain, elevg))
 
-    zg = np.interp(s_bez, chain, elevg)
-    if z_bez.size > 2:
-        z_bez[1:-1] = np.minimum(z_bez[1:-1], zg[1:-1] - float(clearance))
-    z_bez[0]  = zg[0]
-    z_bez[-1] = zg[-1]
-    return {"chain": s_bez, "elev": z_bez}
-"""
+    out_s = []
+    out_z = []
+    last_theta = _median_theta_deg(chain, theta, smin, smax)
+    if last_theta is None:
+        last_theta = 0.0
 
+    for idx, (gs, ge) in enumerate(norm_groups):
+        seg_s = float(max(cur_s, gs))
+        seg_e = float(max(seg_s, ge))
+        if idx == (len(norm_groups) - 1):
+            seg_e = float(max(seg_s, global_end))
+        if seg_e <= seg_s:
+            continue
 
+        theta_med = _median_theta_deg(chain, theta, gs, ge)
+        if theta_med is None:
+            theta_med = last_theta
+        last_theta = theta_med
+
+        theta_clip = float(np.clip(theta_med, -85.0, 85.0))
+        slope = float(np.tan(np.radians(theta_clip)))
+        L = float(seg_e - seg_s)
+
+        # Segment anchor at right boundary; if target is available, anchor to it.
+        z_end_anchor = (
+            float(np.interp(seg_e, target_s, target_z))
+            if has_target
+            else float(cur_z + slope * L)
+        )
+
+        cp_x = np.array([seg_s, seg_s + (L / 3.0), seg_s + (2.0 * L / 3.0), seg_e], dtype=float)
+        cp_z = np.array(
+            [
+                cur_z,
+                cur_z + slope * (L / 3.0),
+                z_end_anchor - slope * (L / 3.0),
+                z_end_anchor,
+            ],
+            dtype=float,
+        )
+        ctrl = np.vstack([cp_x, cp_z]).T
+        weights = np.ones(ctrl.shape[0], dtype=float)
+        n_samples = int(max(24, math.ceil(L * float(max(samples_per_meter, 2.0)))))
+
+        try:
+            seg_curve = _eval_nurbs_curve(ctrl, weights, degree=degree, n_samples=n_samples)
+            sx = seg_curve[:, 0]
+            sz = seg_curve[:, 1]
+            fin = np.isfinite(sx) & np.isfinite(sz)
+            sx = sx[fin]
+            sz = sz[fin]
+            if sx.size < 2:
+                raise ValueError("invalid NURBS segment")
+        except Exception:
+            sx = np.linspace(seg_s, seg_e, n_samples)
+            sz = np.linspace(cur_z, z_end_anchor, n_samples)
+
+        # Keep direction along chainage.
+        order = np.argsort(sx)
+        sx = sx[order]
+        sz = sz[order]
+
+        if not out_s:
+            out_s.extend(sx.tolist())
+            out_z.extend(sz.tolist())
+        else:
+            out_s.extend(sx[1:].tolist())
+            out_z.extend(sz[1:].tolist())
+
+        # Group boundary intersection for next segment (progressive chainage).
+        cur_s = float(seg_e)
+        cur_z = float(np.interp(cur_s, sx, sz))
+
+    if len(out_s) < 2:
+        return {"chain": [], "elev": []}
+
+    return {"chain": np.asarray(out_s, dtype=float), "elev": np.asarray(out_z, dtype=float)}

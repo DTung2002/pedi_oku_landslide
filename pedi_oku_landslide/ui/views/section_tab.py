@@ -1,12 +1,12 @@
 # pedi_oku_landslide/ui/views/section_tab.py
-import os, math
-from typing import Optional, Tuple, List
+import os, math, json
+from typing import Optional, Tuple, List, Dict, Any
 
 import numpy as np
 import rasterio
 from rasterio.enums import Resampling
 from rasterio.transform import Affine, xy as rio_xy
-from shapely.geometry import LineString
+from shapely.geometry import LineString, Point
 from PyQt5.QtWidgets import QPlainTextEdit
 from PyQt5.QtCore import Qt, pyqtSignal, QPointF, QEvent
 from PyQt5.QtGui import QPen, QBrush, QColor, QImage, QPixmap, QPainterPath, QPainter, QFont, QFontMetrics
@@ -15,7 +15,7 @@ from PyQt5.QtWidgets import (
     QTableWidget, QTableWidgetItem, QTextEdit, QSplitter, QSlider,
     QGraphicsPixmapItem, QGraphicsLineItem, QGraphicsEllipseItem, QGraphicsPathItem,
     QGraphicsSimpleTextItem, QGraphicsView, QMessageBox, QDialog, QDialogButtonBox,
-    QSpinBox, QDoubleSpinBox, QGridLayout,
+    QSpinBox, QDoubleSpinBox, QGridLayout, QSizePolicy, QComboBox, QMenu,
 )
 
 from .ui.ui1_viewer import UI1Viewer
@@ -23,6 +23,13 @@ from .ui.ui1_viewer import UI1Viewer
 # --- tiny layout helpers (alias) ---
 def HBox():
     return QHBoxLayout()
+
+
+class _NoWheelComboBox(QComboBox):
+    """Ignore mouse wheel to avoid accidental role changes while scrolling."""
+    def wheelEvent(self, event):
+        event.ignore()
+
 
 # ---------- helpers ----------
 
@@ -261,14 +268,14 @@ def generate_auto_lines_from_arrays(
     ang_cross = float(np.degrees(np.arctan2(u_norm[1], u_norm[0])))
 
     feats_main.append({
-        "name": "ML-001",
+        "name": "ML1",
         "type": "main",
         "offset_m": 0.0,
         "angle_deg": ang_main,
         "geom": main1,
     })
     feats_cross.append({
-        "name": "CL-001",
+        "name": "CL1",
         "type": "cross",
         "offset_m": 0.0,
         "angle_deg": ang_cross,
@@ -284,7 +291,7 @@ def generate_auto_lines_from_arrays(
             cy = center[1] + off * u_norm[1]
             geom = _build_line((cx, cy), u_main, L)
             feats_main.append({
-                "name": f"ML-{idx:03d}",
+                "name": f"ML{idx}",
                 "type": "main",
                 "offset_m": off,
                 "angle_deg": ang_main,
@@ -301,7 +308,7 @@ def generate_auto_lines_from_arrays(
             cy = center[1] + off * u_main[1]
             geom = _build_line((cx, cy), u_norm, L)
             feats_cross.append({
-                "name": f"CL-{idx:03d}",
+                "name": f"CL{idx}",
                 "type": "cross",
                 "offset_m": off,
                 "angle_deg": ang_cross,
@@ -625,6 +632,7 @@ class _LayeredViewer(UI1Viewer):
             if ev.type() == QEvent.MouseButtonPress and ev.button() == Qt.RightButton:
                 if self._picking and self._p1_pix is not None:
                     self.cancel_pick()
+                    return True
                 return True
 
             if ev.type() == QEvent.MouseButtonPress and ev.button() == Qt.LeftButton:
@@ -667,6 +675,7 @@ class _LayeredViewer(UI1Viewer):
         self.view.translate(delta.x(), delta.y())
         # Restore expected anchor for other interactions
         self.view.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+
 
 from PyQt5.QtWidgets import QDialog, QGridLayout, QSpinBox, QDoubleSpinBox
 
@@ -738,6 +747,10 @@ class SectionSelectionTab(QWidget):
     def __init__(self, base_dir: str, parent=None) -> None:
         super().__init__(parent)
         self.base_dir = base_dir
+        self._splitter: Optional[QSplitter] = None
+        self._left_min_w = 380
+        self._left_default_w = 490
+        self._pending_init_splitter = True
 
         # run context
         self._ctx_ready: bool = False
@@ -770,14 +783,17 @@ class SectionSelectionTab(QWidget):
         self._mask: Optional[np.ndarray] = None  # uint8 0/1 aligned to dz grid
         self._dem_path: Optional[str] = None
 
-        # vector drawing params (sync với UI1)
+        # vector drawing params (UI2-local, độc lập UI1)
         self._vec_step: int = 25
-        self._vec_scale: float = 0.5
+        self._vec_scale: float = 1.0
         self._vec_size_pct: int = 100
+        self._vec_opacity_pct: int = 100
+        self._vec_color: str = "blue"
         self._vec_pen_base: int = 1
         self._vec_arrow_base: float = 12.0
 
         self._sections: List[Tuple[Tuple[float, float], Tuple[float, float]]] = []
+        self._section_meta: List[Dict[str, Any]] = []
 
         self._updating_table: bool = False
 
@@ -801,11 +817,9 @@ class SectionSelectionTab(QWidget):
         self._ui1_dir = os.path.join(run_dir, "ui1")
         self._ui2_dir = os.path.join(run_dir, "ui2")
 
-        # cập nhật thông số vector nếu được truyền từ UI1
-        if vec_step is not None:
-            self._vec_step = int(vec_step)
-        if vec_scale is not None:
-            self._vec_scale = float(vec_scale)
+        # UI2 dùng bộ thông số Vector Display riêng; không sync từ UI1.
+        _ = vec_step
+        _ = vec_scale
 
         # ✨ lưu vào các thuộc tính public để các hàm khác đọc
         self.project = self._ctx_project
@@ -836,67 +850,168 @@ class SectionSelectionTab(QWidget):
         root = QHBoxLayout(self)
         splitter = QSplitter(Qt.Horizontal, self)
         splitter.setChildrenCollapsible(False)
+        self._splitter = splitter
+        splitter.splitterMoved.connect(lambda *_: self._enforce_left_pane_bounds())
         root.addWidget(splitter)
         self.viewer = _LayeredViewer(self)
 
         # left pane
-        left = QWidget(); left_lo = QVBoxLayout(left)
+        left = QWidget(); left.setMinimumWidth(self._left_min_w); left_lo = QVBoxLayout(left)
 
-        grp_proj = QGroupBox("Project"); gl = QVBoxLayout(grp_proj)
-        row1 = HBox(); row1.addWidget(QLabel("Name:"))
+        grp_proj = QGroupBox("Project"); gl = QHBoxLayout(grp_proj)
+        gl.setContentsMargins(8, 8, 8, 8)
+        gl.setSpacing(6)
+        proj_input_h = 30
+        lbl_name = QLabel("Name:")
+        lbl_run = QLabel("Run label:")
+        fm = lbl_name.fontMetrics()
+        proj_label_w = max(fm.horizontalAdvance("Name:"), fm.horizontalAdvance("Run label:")) + 8
         self.edit_project = QLineEdit(); self.edit_project.setPlaceholderText("—")
-        row1.addWidget(self.edit_project, 1); gl.addLayout(row1)
-        row2 = HBox(); row2.addWidget(QLabel("Run label:"))
+        self.edit_project.setFixedHeight(proj_input_h)
+        self.edit_project.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        lbl_name.setFixedWidth(proj_label_w)
+        gl.addWidget(lbl_name)
+        gl.addWidget(self.edit_project, 1)
         self.edit_runlabel = QLineEdit(); self.edit_runlabel.setPlaceholderText("—")
-        row2.addWidget(self.edit_runlabel, 1); gl.addLayout(row2)
+        self.edit_runlabel.setFixedHeight(proj_input_h)
+        self.edit_runlabel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        lbl_run.setFixedWidth(proj_label_w)
+        gl.addWidget(lbl_run)
+        gl.addWidget(self.edit_runlabel, 1)
         left_lo.addWidget(grp_proj)
 
-        grp_layers = QGroupBox("Layers"); ll = QVBoxLayout(grp_layers)
-        r_gf = HBox(); r_gf.addWidget(QLabel("Grid font size:"))
+        grp_layers = QGroupBox("Layers"); ll = QGridLayout(grp_layers)
+        ll.setHorizontalSpacing(6)
+        ll.setVerticalSpacing(6)
+        ll.setColumnStretch(1, 1)
+
+        lbl_gf = QLabel("Grid font size:")
+        lbl_hs = QLabel("Hillshade opacity:")
+        lbl_hm = QLabel("Heatmap opacity:")
+        ll.setColumnMinimumWidth(0, max(
+            lbl_gf.sizeHint().width(),
+            lbl_hs.sizeHint().width(),
+            lbl_hm.sizeHint().width(),
+        ))
+
         self.sld_grid_font = QSlider(Qt.Horizontal); self.sld_grid_font.setRange(8, 72); self.sld_grid_font.setValue(12)
-        r_gf.addWidget(self.sld_grid_font, 1); ll.addLayout(r_gf)
-        r_hs = HBox(); r_hs.addWidget(QLabel("Hillshade opacity:"))
         self.sld_hill = QSlider(Qt.Horizontal); self.sld_hill.setRange(0, 100); self.sld_hill.setValue(100)
-        r_hs.addWidget(self.sld_hill, 1); ll.addLayout(r_hs)
-        r_hm = HBox(); r_hm.addWidget(QLabel("Heatmap opacity:"))
         self.sld_heat = QSlider(Qt.Horizontal); self.sld_heat.setRange(0, 100); self.sld_heat.setValue(75)
-        r_hm.addWidget(self.sld_heat, 1); ll.addLayout(r_hm)
-        r_vs = HBox(); r_vs.addWidget(QLabel("Vector size:"))
-        self.sld_vec_size = QSlider(Qt.Horizontal); self.sld_vec_size.setRange(50, 200); self.sld_vec_size.setValue(50)
-        r_vs.addWidget(self.sld_vec_size, 1); ll.addLayout(r_vs)
-        r_vc = HBox(); r_vc.addWidget(QLabel("Vectors opacity:"))
-        self.sld_vec = QSlider(Qt.Horizontal); self.sld_vec.setRange(0, 100); self.sld_vec.setValue(100)
-        r_vc.addWidget(self.sld_vec, 1); ll.addLayout(r_vc)
+
+        ll.addWidget(lbl_gf, 0, 0); ll.addWidget(self.sld_grid_font, 0, 1)
+        ll.addWidget(lbl_hs, 1, 0); ll.addWidget(self.sld_hill, 1, 1)
+        ll.addWidget(lbl_hm, 2, 0); ll.addWidget(self.sld_heat, 2, 1)
         left_lo.addWidget(grp_layers)
+
+        grp_vec = QGroupBox("Vector Display"); vvl = QVBoxLayout(grp_vec)
+        grid_vec_top = QGridLayout()
+        grid_vec_top.setHorizontalSpacing(8)
+        grid_vec_top.setVerticalSpacing(6)
+        grid_vec_top.setColumnStretch(1, 1)
+        grid_vec_top.setColumnStretch(3, 1)
+        grid_vec_top.setColumnStretch(5, 1)
+
+        lbl_step = QLabel("Step:")
+        lbl_scale = QLabel("Scale:")
+        lbl_color = QLabel("Color:")
+        lbl_size = QLabel("Size:")
+        lbl_opacity = QLabel("Opacity:")
+
+        self.spin_vec_step = QSpinBox()
+        self.spin_vec_step.setRange(1, 200)
+        self.spin_vec_step.setValue(self._vec_step)
+        self.spin_vec_step.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        self.spin_vec_scale = QDoubleSpinBox()
+        self.spin_vec_scale.setRange(0.01, 10.0)
+        self.spin_vec_scale.setSingleStep(1.0)
+        self.spin_vec_scale.setValue(self._vec_scale)
+        self.spin_vec_scale.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        self.combo_vec_color = QComboBox()
+        self.combo_vec_color.addItems(["Blue", "Red", "Green", "White", "Yellow", "Magenta"])
+        self.combo_vec_color.setCurrentText("Blue")
+        self.combo_vec_color.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        self.sld_vec_size = QSlider(Qt.Horizontal)
+        self.sld_vec_size.setRange(80, 500)
+        self.sld_vec_size.setValue(self._vec_size_pct)
+        self.sld_vec_size.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        self.sld_vec_opacity = QSlider(Qt.Horizontal)
+        self.sld_vec_opacity.setRange(0, 100)
+        self.sld_vec_opacity.setValue(self._vec_opacity_pct)
+        self.sld_vec_opacity.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        label_col_w = max(
+            lbl_step.sizeHint().width(),
+            lbl_scale.sizeHint().width(),
+            lbl_color.sizeHint().width(),
+        )
+        for col in (0, 2, 4):
+            grid_vec_top.setColumnMinimumWidth(col, label_col_w)
+        input_min_w = max(
+            self.spin_vec_step.sizeHint().width(),
+            self.spin_vec_scale.sizeHint().width(),
+            self.combo_vec_color.sizeHint().width(),
+        )
+        for w in (self.spin_vec_step, self.spin_vec_scale, self.combo_vec_color):
+            w.setMinimumWidth(input_min_w)
+
+        grid_vec_top.addWidget(lbl_step, 0, 0)
+        grid_vec_top.addWidget(self.spin_vec_step, 0, 1)
+        grid_vec_top.addWidget(lbl_scale, 0, 2)
+        grid_vec_top.addWidget(self.spin_vec_scale, 0, 3)
+        grid_vec_top.addWidget(lbl_color, 0, 4)
+        grid_vec_top.addWidget(self.combo_vec_color, 0, 5)
+        vvl.addLayout(grid_vec_top)
+
+        grid_vec_sliders = QGridLayout()
+        grid_vec_sliders.setHorizontalSpacing(8)
+        grid_vec_sliders.setVerticalSpacing(6)
+        grid_vec_sliders.setColumnStretch(1, 1)
+        grid_vec_sliders.addWidget(lbl_size, 0, 0)
+        grid_vec_sliders.addWidget(self.sld_vec_size, 0, 1)
+        grid_vec_sliders.addWidget(lbl_opacity, 1, 0)
+        grid_vec_sliders.addWidget(self.sld_vec_opacity, 1, 1)
+        vvl.addLayout(grid_vec_sliders)
+
+        row_vec_btn = HBox()
+        self.btn_render_vectors = QPushButton("Render Vectors")
+        row_vec_btn.addWidget(self.btn_render_vectors, 1)
+        vvl.addLayout(row_vec_btn)
+        left_lo.addWidget(grp_vec)
 
         grp_secs = QGroupBox("Sections");
         sl = QVBoxLayout(grp_secs)
-        self.tbl = QTableWidget(0, 3)
-        self.tbl.setHorizontalHeaderLabels(["#", "Start (x,y)", "End (x,y)"])
+        self.tbl = QTableWidget(0, 4)
+        self.tbl.setHorizontalHeaderLabels(["ID", "Start (x,y)", "End (x,y)", "Role"])
+        self.tbl.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tbl.viewport().setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tbl.verticalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tbl.verticalHeader().setVisible(False)
         hdr = self.tbl.horizontalHeader()
         hdr.setStretchLastSection(False)
         hdr.setSectionResizeMode(0, hdr.Fixed)  # cột #
-        hdr.setSectionResizeMode(1, hdr.Fixed)  # Start
-        hdr.setSectionResizeMode(2, hdr.Stretch)  # End (cột cuối cùng fill phần dư)
+        hdr.setSectionResizeMode(1, hdr.Stretch)  # Start
+        hdr.setSectionResizeMode(2, hdr.Stretch)  # End
+        hdr.setSectionResizeMode(3, hdr.Fixed)    # Role
+        self.tbl.setColumnWidth(0, 56)
+        self.tbl.setColumnWidth(3, 100)
         self.tbl.itemChanged.connect(self._on_table_item_changed)
         sl.addWidget(self.tbl)
 
-        # Hàng trên: Auto Line Generation + Preview + Clear (dàn đều chiều ngang)
-        row_top = HBox()
-        self.btn_auto = QPushButton("Auto Line Generation")
-        self.btn_prev = QPushButton("Preview line")
+        # Một hàng nút thao tác Section: Auto Line, Draw Line, Clear All, Confirm
+        row_actions = HBox()
+        self.btn_auto = QPushButton("Auto Line")
+        self.btn_prev = QPushButton("Draw Line")
         self.btn_clear = QPushButton("Clear All")
+        self.btn_confirm = QPushButton("Confirm")
 
-        for b in (self.btn_auto, self.btn_prev, self.btn_clear):
-            # stretch=1 → 3 nút chia đều chiều ngang
-            row_top.addWidget(b, 1)
-        sl.addLayout(row_top)
-
-        # Hàng dưới: Confirm sections, nút kéo dài hết chiều ngang layout
-        row_confirm = HBox()
-        self.btn_confirm = QPushButton("Confirm sections")
-        row_confirm.addWidget(self.btn_confirm, 1)  # stretch=1 → full width
-        sl.addLayout(row_confirm)
+        for b in (self.btn_auto, self.btn_prev, self.btn_clear, self.btn_confirm):
+            # stretch=1 → 4 nút chia đều chiều ngang
+            row_actions.addWidget(b, 1)
+        sl.addLayout(row_actions)
 
         left_lo.addWidget(grp_secs)
 
@@ -917,10 +1032,55 @@ class SectionSelectionTab(QWidget):
         splitter.addWidget(self.viewer)  # khung phải (map)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([600, 700])
+        splitter.setSizes([self._left_default_w, 700])
 
         # Áp style nút
         self._apply_button_style()
+
+    def _left_max_w(self) -> int:
+        base_w = self.width()
+        if self._splitter is not None and self._splitter.width() > 0:
+            base_w = self._splitter.width()
+        if base_w < (self._left_min_w * 2):
+            return -1
+        return max(self._left_min_w, int(base_w * 0.5))
+
+    def _try_apply_initial_splitter_width(self) -> None:
+        if not self._pending_init_splitter or self._splitter is None:
+            return
+        max_w = self._left_max_w()
+        if max_w < 0:
+            return
+        init_left = max(self._left_min_w, min(self._left_default_w, max_w))
+        total = sum(self._splitter.sizes())
+        if total <= 0:
+            total = max(self._splitter.width(), self.width(), init_left + 1)
+        self._splitter.setSizes([init_left, max(1, total - init_left)])
+        self._pending_init_splitter = False
+
+    def _enforce_left_pane_bounds(self) -> None:
+        if self._splitter is None:
+            return
+        self._try_apply_initial_splitter_width()
+        sizes = self._splitter.sizes()
+        if len(sizes) != 2:
+            return
+        left_w, right_w = sizes
+        total = left_w + right_w
+        max_w = self._left_max_w()
+        if max_w < 0:
+            return
+        clamped_left = max(self._left_min_w, min(left_w, max_w))
+        if clamped_left != left_w and total > 0:
+            self._splitter.setSizes([clamped_left, max(1, total - clamped_left)])
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._enforce_left_pane_bounds()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._enforce_left_pane_bounds()
 
 
     def _apply_button_style(self) -> None:
@@ -964,23 +1124,52 @@ class SectionSelectionTab(QWidget):
         # self.setStyleSheet(style)
 
     def _wire(self) -> None:
-        self.sld_vec_size.valueChanged.connect(self._on_vec_size_changed)
         self.sld_grid_font.valueChanged.connect(self.viewer.set_grid_font_size)
         self.sld_hill.valueChanged.connect(lambda v: self.viewer.set_hillshade_opacity(v / 100.0))
         self.sld_heat.valueChanged.connect(lambda v: self.viewer.set_heatmap_opacity(v / 100.0))
-        self.sld_vec.valueChanged.connect(lambda v: self.viewer.set_vector_opacity(v / 100.0))
+        self.sld_vec_size.valueChanged.connect(self._on_vec_size_changed)
+        self.sld_vec_opacity.valueChanged.connect(self._on_vec_opacity_changed)
+        self.btn_render_vectors.clicked.connect(self._on_render_vectors)
         self.btn_clear.clicked.connect(self._on_clear)
         self.btn_prev.clicked.connect(self._on_preview)
         self.btn_confirm.clicked.connect(self._on_confirm_sections)
         self.btn_auto.clicked.connect(self._on_auto_lines)
+        self.tbl.customContextMenuRequested.connect(self._on_sections_table_context_menu)
+        self.tbl.viewport().customContextMenuRequested.connect(self._on_sections_table_context_menu)
+        self.tbl.verticalHeader().customContextMenuRequested.connect(self._on_sections_table_header_context_menu)
 
         self.viewer.sectionPicked.connect(self._on_section_picked)
         self.viewer.cursorMoved.connect(lambda x, y: self.lbl_cursor.setText(f"Cursor: X={x:.2f}, Y={y:.2f}"))
 
+    def _on_render_vectors(self) -> None:
+        self._vec_step = int(self.spin_vec_step.value())
+        self._vec_scale = float(self.spin_vec_scale.value())
+        self._vec_size_pct = int(self.sld_vec_size.value())
+        self._vec_opacity_pct = int(self.sld_vec_opacity.value())
+        self._vec_color = str(self.combo_vec_color.currentText() or "Blue").strip().lower()
+
+        if not self._ctx_ready:
+            self._info("[UI2] Vector display updated (no active context yet).")
+            return
+
+        self._load_dx_dy_and_draw(self._ui1_dir, step=self._vec_step, scale=self._vec_scale)
+        self._ok(
+            f"[UI2] Vectors rendered (step={self._vec_step}, scale={self._vec_scale:.2f}, "
+            f"size={self._vec_size_pct}%, opacity={self._vec_opacity_pct}%, color={self._vec_color})."
+        )
+
     def _on_vec_size_changed(self, v: int) -> None:
         self._vec_size_pct = int(v)
+        # đồng bộ các input hiện tại trước khi redraw
+        self._vec_step = int(self.spin_vec_step.value())
+        self._vec_scale = float(self.spin_vec_scale.value())
+        self._vec_color = str(self.combo_vec_color.currentText() or "Blue").strip().lower()
         if self._ctx_ready:
             self._load_dx_dy_and_draw(self._ui1_dir, step=self._vec_step, scale=self._vec_scale)
+
+    def _on_vec_opacity_changed(self, v: int) -> None:
+        self._vec_opacity_pct = int(v)
+        self.viewer.set_vector_opacity(float(self._vec_opacity_pct) / 100.0)
 
     # ---- core loading/drawing ----
     def _load_layers_and_show(self) -> None:
@@ -1085,17 +1274,16 @@ class SectionSelectionTab(QWidget):
         )
         self.viewer.set_heatmap_rgba(rgba, alpha)
 
-        # --- 7) Vẽ vector (dùng dx/dy vừa đọc) theo tham số từ UI1 ---
+        # --- 7) Vẽ vector (dùng dx/dy vừa đọc) theo tham số Vector Display của UI2 ---
         self._load_dx_dy_and_draw(
             ui1,
             step=self._vec_step,
             scale=self._vec_scale,
         )
 
-        # fit view
-        self.viewer.view.fitInView(
-            self.viewer.scene.itemsBoundingRect(), Qt.KeepAspectRatio
-        )
+        # default zoom = 100% (không fit-to-view)
+        self.viewer.view.resetTransform()
+        self.viewer.view.centerOn(self.viewer.scene.itemsBoundingRect().center())
         self._ok("[UI2] Layers loaded & aligned.")
         self._load_saved_sections()
 
@@ -1128,6 +1316,7 @@ class SectionSelectionTab(QWidget):
         # Xoá mọi thứ hiện tại trước khi load lại
         self.tbl.setRowCount(0)
         self._sections.clear()
+        self._section_meta.clear()
 
         # Xoá line cũ trên map (nếu có)
         for it in self._section_lines:
@@ -1146,7 +1335,13 @@ class SectionSelectionTab(QWidget):
             except Exception:
                 continue
 
-            self._append_section((x1, y1), (x2, y2))
+            meta = {
+                "line_id": str(row.get("line_id", "")).strip(),
+                "line_role": str(row.get("line_role", "")).strip(),
+            }
+            if not meta["line_id"]:
+                meta["line_id"] = str(row.get("name", "")).strip()
+            self._append_section((x1, y1), (x2, y2), meta=meta)
             count += 1
 
         self._ok(f"[UI2] Loaded {count} sections from sections.csv")
@@ -1186,49 +1381,68 @@ class SectionSelectionTab(QWidget):
         pix_h = float(abs(self._tr.e)) if self._tr is not None else 1.0
 
         # scale càng lớn → vector càng dài, giống UI1
+        # size_pct cũng scale theo cả chiều dài + chiều ngang (to lên đồng đều)
+        size_mul = max(0.2, float(self._vec_size_pct) / 100.0)
         k = 0.4  # hệ số hiệu chỉnh, có thể chỉnh 0.3–0.6 tuỳ mắt nhìn
-        vx_pix = (dx / (pix_w + 1e-9)) * scale * k
-        vy_pix = (-dy / (pix_h + 1e-9)) * scale * k  # y pixel hướng xuống
+        vx_pix = (dx / (pix_w + 1e-9)) * scale * k * size_mul
+        vy_pix = (-dy / (pix_h + 1e-9)) * scale * k * size_mul  # y pixel hướng xuống
 
         pts_pix = np.stack([xs, ys], axis=1).astype("float32")
         vec_pix = np.stack([vx_pix, vy_pix], axis=1).astype("float32")
-        # vẽ vector có mũi tên — giống UI1
-        # vẽ vector màu magenta
-        pen = QPen(QColor("#ffffff"))  # hoặc QColor(191, 0, 255)
-        pen.setCosmetic(True)
-        pen.setWidth(max(1, int(round(self._vec_pen_base * (self._vec_size_pct / 100.0)))))
+        # vẽ vector liền khối (thân + đầu mũi tên là một polygon)
+        color_name = str(getattr(self, "_vec_color", "blue") or "blue").strip().lower()
+        color = QColor(color_name)
+        if not color.isValid():
+            color = QColor("blue")
+        shaft_half_w = max(1.2, float(self._vec_pen_base) * 0.5 * size_mul)
+        base_head_len = max(3.0, shaft_half_w * 3.2)
+        base_head_half_w = max(2.0, shaft_half_w * 2.75)
 
         for (x, y), (vx, vy) in zip(pts_pix, vec_pix):
             # đảo hướng y vì raster y+ xuống
             end_x = float(x + vx)
             end_y = float(y - vy)
-            # thân vector
-            line = QGraphicsLineItem(float(x), float(y), end_x, end_y)
-            line.setPen(pen)
-            line.setZValue(2)
-            self.viewer.scene.addItem(line)
-            self.viewer._vec_items.append(line)
+            dxv = end_x - float(x)
+            dyv = end_y - float(y)
+            length = float(np.hypot(dxv, dyv))
+            if not np.isfinite(length) or length <= 1e-6:
+                continue
 
-            # mũi tên (tam giác nhỏ)
-            arr_len = float(self._vec_arrow_base) * (self._vec_size_pct / 100.0)
-            arr_ang = np.deg2rad(45)
-            dx, dy = end_x - x, end_y - y
-            ang = np.arctan2(dy, dx)
-            p1 = QPointF(end_x - arr_len * np.cos(ang - arr_ang),
-                         end_y - arr_len * np.sin(ang - arr_ang))
-            p2 = QPointF(end_x - arr_len * np.cos(ang + arr_ang),
-                         end_y - arr_len * np.sin(ang + arr_ang))
-            arrow = QGraphicsPathItem()
-            path = QPainterPath(QPointF(end_x, end_y))
+            ux = dxv / length
+            uy = dyv / length
+            nx = -uy
+            ny = ux
+
+            head_len = min(base_head_len, length * 0.45); head_len = max(head_len, shaft_half_w * 1.8)
+            head_half_w = max(base_head_half_w, shaft_half_w * 1.05)
+            neck_x = end_x - ux * head_len
+            neck_y = end_y - uy * head_len
+
+            p0 = QPointF(float(x + nx * shaft_half_w), float(y + ny * shaft_half_w))
+            p1 = QPointF(neck_x + nx * shaft_half_w, neck_y + ny * shaft_half_w)
+            p2 = QPointF(neck_x + nx * head_half_w, neck_y + ny * head_half_w)
+            p3 = QPointF(end_x, end_y)
+            p4 = QPointF(neck_x - nx * head_half_w, neck_y - ny * head_half_w)
+            p5 = QPointF(neck_x - nx * shaft_half_w, neck_y - ny * shaft_half_w)
+            p6 = QPointF(float(x - nx * shaft_half_w), float(y - ny * shaft_half_w))
+
+            path = QPainterPath(p0)
             path.lineTo(p1)
             path.lineTo(p2)
-            path.lineTo(QPointF(end_x, end_y))
-            arrow.setPath(path)
+            path.lineTo(p3)
+            path.lineTo(p4)
+            path.lineTo(p5)
+            path.lineTo(p6)
+            path.closeSubpath()
+
+            arrow = QGraphicsPathItem(path)
             arrow.setPen(QPen(Qt.NoPen))
-            arrow.setBrush(QBrush(QColor("#ffffff")))  # cùng màu với thân
+            arrow.setBrush(QBrush(color))
             arrow.setZValue(2)
             self.viewer.scene.addItem(arrow)
             self.viewer._vec_items.append(arrow)
+
+        self.viewer.set_vector_opacity(float(self._vec_opacity_pct) / 100.0)
 
     # ---- section picking ----
     def _on_section_picked(self, x1: float, y1: float, x2: float, y2: float) -> None:
@@ -1240,6 +1454,7 @@ class SectionSelectionTab(QWidget):
             p0: Tuple[float, float],
             p1: Tuple[float, float],
             label: Optional[str] = None,
+            meta: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Lưu section vào bảng + vẽ line cố định trên map."""
         # tránh trigger _on_table_item_changed khi đang chèn row
@@ -1250,22 +1465,37 @@ class SectionSelectionTab(QWidget):
         hdr = self.tbl.horizontalHeader()
         hdr.setStretchLastSection(False)
         hdr.setSectionResizeMode(0, hdr.Fixed)
-        hdr.setSectionResizeMode(1, hdr.Fixed)
+        hdr.setSectionResizeMode(1, hdr.Stretch)
         hdr.setSectionResizeMode(2, hdr.Stretch)
+        hdr.setSectionResizeMode(3, hdr.Fixed)
 
-        line_label = label if label is not None else str(r + 1)
+        meta_row = dict(meta or {})
+        role_txt = self._role_combo_text_from_value(str(meta_row.get("line_role", "") or ""), str(meta_row.get("line_id", "") or ""))
+        meta_row["line_role"] = self._role_value_from_combo_text(role_txt)
+        line_id = str(meta_row.get("line_id", "") or "").strip()
+        if not line_id:
+            line_id = self._next_line_id_for_role(meta_row["line_role"])
+        meta_row["line_id"] = line_id
+        line_label = label if label is not None else line_id
+
         self.tbl.setItem(r, 0, QTableWidgetItem(line_label))
         self.tbl.setItem(r, 1, QTableWidgetItem(f"{p0[0]:.2f}, {p0[1]:.2f}"))
         self.tbl.setItem(r, 2, QTableWidgetItem(f"{p1[0]:.2f}, {p1[1]:.2f}"))
-        self.tbl.verticalHeader().setDefaultSectionSize(22)  # chiều cao mỗi row
-        self.tbl.setColumnWidth(0, 40)  # cột chỉ số
-        self.tbl.setColumnWidth(1, 240)  # Start
+        role_combo = _NoWheelComboBox(self.tbl)
+        role_combo.addItems(["Main", "Cross"])
+        role_combo.setCurrentText(role_txt)
+        self.tbl.setCellWidget(r, 3, role_combo)
+        self.tbl.verticalHeader().setDefaultSectionSize(30)  # chiều cao mỗi row
+        self.tbl.setColumnWidth(0, 56)
+        self.tbl.setColumnWidth(3, 100)
 
         self._updating_table = False
         # cột cuối cùng đang stretch, giữ nguyên
 
         # lưu section
         self._sections.append((p0, p1))
+        self._section_meta.append(meta_row)
+        role_combo.currentIndexChanged.connect(self._on_role_combo_changed)
 
         # 2) vẽ line lên viewer (map → pixel)
         line_item = None
@@ -1285,6 +1515,82 @@ class SectionSelectionTab(QWidget):
         self._section_lines.append(line_item)
         self._section_line_labels.append(label_item)
         self._ok("Section line drawn on map.")
+
+    def _delete_section_row(self, row: int, log_msg: Optional[str] = None) -> bool:
+        if row < 0 or row >= self.tbl.rowCount():
+            return False
+
+        # remove map line
+        if 0 <= row < len(self._section_lines):
+            it = self._section_lines[row]
+            if it is not None:
+                self.viewer.scene.removeItem(it)
+            self._section_lines.pop(row)
+
+        # remove map label
+        if 0 <= row < len(self._section_line_labels):
+            it = self._section_line_labels[row]
+            if it is not None:
+                self.viewer.scene.removeItem(it)
+            self._section_line_labels.pop(row)
+
+        # remove section data/meta
+        if 0 <= row < len(self._sections):
+            self._sections.pop(row)
+        if 0 <= row < len(self._section_meta):
+            self._section_meta.pop(row)
+
+        # remove preview if this row was previewed
+        if self._preview_line is not None:
+            try:
+                self.viewer.scene.removeItem(self._preview_line)
+            except Exception:
+                pass
+            self._preview_line = None
+        if self._preview_label is not None:
+            try:
+                self.viewer.scene.removeItem(self._preview_label)
+            except Exception:
+                pass
+            self._preview_label = None
+
+        self.tbl.removeRow(row)
+        if log_msg:
+            self._ok(log_msg)
+        return True
+
+    def _on_sections_table_context_menu(self, pos) -> None:
+        if self.tbl is None:
+            return
+        idx = self.tbl.indexAt(pos)
+        if not idx.isValid():
+            item = self.tbl.itemAt(pos)
+            if item is None:
+                return
+            row = int(item.row())
+        else:
+            row = int(idx.row())
+        if row < 0 or row >= self.tbl.rowCount():
+            return
+        self.tbl.selectRow(row)
+        menu = QMenu(self.tbl)
+        act_delete = menu.addAction("Delete")
+        chosen = menu.exec_(self.tbl.viewport().mapToGlobal(pos))
+        if chosen is act_delete:
+            self._delete_section_row(row, log_msg=f"Deleted section #{row + 1}.")
+
+    def _on_sections_table_header_context_menu(self, pos) -> None:
+        if self.tbl is None:
+            return
+        row = int(self.tbl.rowAt(pos.y()))
+        if row < 0 or row >= self.tbl.rowCount():
+            return
+        self.tbl.selectRow(row)
+        menu = QMenu(self.tbl)
+        act_delete = menu.addAction("Delete")
+        chosen = menu.exec_(self.tbl.verticalHeader().viewport().mapToGlobal(pos))
+        if chosen is act_delete:
+            self._delete_section_row(row, log_msg=f"Deleted section #{row + 1}.")
 
     def _add_line_label(
             self,
@@ -1355,6 +1661,12 @@ class SectionSelectionTab(QWidget):
         # cập nhật list _sections
         if 0 <= row < len(self._sections):
             self._sections[row] = (p0, p1)
+        if col == 0:
+            while len(self._section_meta) <= row:
+                self._section_meta.append({})
+            if not isinstance(self._section_meta[row], dict):
+                self._section_meta[row] = {}
+            self._section_meta[row]["line_id"] = (self.tbl.item(row, 0).text().strip() if self.tbl.item(row, 0) else "")
 
         # cập nhật line xanh trên map
         if 0 <= row < len(self._section_lines):
@@ -1480,6 +1792,7 @@ class SectionSelectionTab(QWidget):
         # 4) Xoá tất cả section cũ (bảng + line trên map)
         self.tbl.setRowCount(0)
         self._sections.clear()
+        self._section_meta.clear()
         for it in getattr(self, "_section_lines", []):
             if it is not None:
                 self.viewer.scene.removeItem(it)
@@ -1502,7 +1815,15 @@ class SectionSelectionTab(QWidget):
                 return
             x1, y1 = geom.coords[0]
             x2, y2 = geom.coords[-1]
-            self._append_section((x1, y1), (x2, y2))
+            self._append_section(
+                (x1, y1), (x2, y2),
+                meta={
+                    "line_id": str(feat.get("name", "")).strip(),
+                    "line_role": str(feat.get("type", "")).strip(),
+                    "offset_m": float(feat.get("offset_m", 0.0)) if feat.get("offset_m", None) is not None else None,
+                    "angle_deg": float(feat.get("angle_deg", 0.0)) if feat.get("angle_deg", None) is not None else None,
+                }
+            )
 
         for f in mains:
             _add_feat(f)
@@ -1564,6 +1885,7 @@ class SectionSelectionTab(QWidget):
 
         self.tbl.setRowCount(0)
         self._sections.clear()
+        self._section_meta.clear()
 
         # xoá line khỏi scene
         for it in self._section_lines:
@@ -1582,6 +1904,227 @@ class SectionSelectionTab(QWidget):
         if self._preview_label is not None:
             self.viewer.scene.removeItem(self._preview_label)
             self._preview_label = None
+
+    @staticmethod
+    def _normalize_line_role(line_role: str, line_id: str = "") -> str:
+        role = (line_role or "").strip().lower()
+        lid = (line_id or "").strip().lower()
+        if role in ("main", "ml"):
+            return "main"
+        if role in ("cross", "aux", "cl"):
+            return "cross"
+        if lid.startswith("ml") or lid.startswith("main"):
+            return "main"
+        if lid.startswith("cl") or lid.startswith("cross"):
+            return "cross"
+        return ""
+
+    @staticmethod
+    def _role_combo_text_from_value(line_role: str, line_id: str = "") -> str:
+        role = SectionSelectionTab._normalize_line_role(line_role, line_id)
+        return "Cross" if role == "cross" else "Main"
+
+    @staticmethod
+    def _role_value_from_combo_text(text: str) -> str:
+        t = str(text or "").strip().lower()
+        return "cross" if t == "cross" else "main"
+
+    @staticmethod
+    def _parse_auto_line_id(line_id: str) -> Tuple[str, int]:
+        txt = str(line_id or "").strip().upper()
+        if txt.startswith("ML") and txt[2:].isdigit():
+            return "main", int(txt[2:])
+        if txt.startswith("CL") and txt[2:].isdigit():
+            return "cross", int(txt[2:])
+        return "", 0
+
+    def _next_line_id_for_role(self, line_role: str, exclude_row: int = -1) -> str:
+        role = self._normalize_line_role(line_role, "")
+        prefix = "CL" if role == "cross" else "ML"
+        used = set()
+        for r in range(self.tbl.rowCount()):
+            if r == exclude_row:
+                continue
+            cand = ""
+            if 0 <= r < len(self._section_meta) and isinstance(self._section_meta[r], dict):
+                cand = str(self._section_meta[r].get("line_id", "") or "").strip()
+            if not cand:
+                item = self.tbl.item(r, 0)
+                cand = item.text().strip() if item else ""
+            parsed_role, parsed_idx = self._parse_auto_line_id(cand)
+            if parsed_role == role and parsed_idx > 0:
+                used.add(parsed_idx)
+        n = 1
+        while n in used:
+            n += 1
+        return f"{prefix}{n}"
+
+    def _find_role_combo_row(self, combo: QComboBox) -> int:
+        for r in range(self.tbl.rowCount()):
+            if self.tbl.cellWidget(r, 3) is combo:
+                return r
+        return -1
+
+    def _on_role_combo_changed(self, _index: int) -> None:
+        combo = self.sender()
+        if not isinstance(combo, QComboBox):
+            return
+        row = self._find_role_combo_row(combo)
+        if row < 0:
+            return
+        while len(self._section_meta) <= row:
+            self._section_meta.append({})
+        meta = self._section_meta[row]
+        if not isinstance(meta, dict):
+            meta = {}
+            self._section_meta[row] = meta
+        label = (self.tbl.item(row, 0).text().strip() if self.tbl.item(row, 0) else f"{row + 1}")
+        cur_line_id = str(meta.get("line_id", "") or "").strip() or label
+        new_role = self._role_value_from_combo_text(combo.currentText())
+        auto_role, auto_idx = self._parse_auto_line_id(cur_line_id)
+        if (not cur_line_id) or (auto_idx > 0 and auto_role in ("main", "cross")):
+            new_line_id = self._next_line_id_for_role(new_role, exclude_row=row)
+            if new_line_id != cur_line_id:
+                item0 = self.tbl.item(row, 0)
+                if item0 is None:
+                    item0 = QTableWidgetItem(new_line_id)
+                    self.tbl.setItem(row, 0, item0)
+                else:
+                    item0.setText(new_line_id)
+                cur_line_id = new_line_id
+        meta["line_id"] = cur_line_id
+        meta["line_role"] = new_role
+        self._ok(f"[UI2] Line role set: row {row + 1} -> {meta['line_role']}")
+
+    def _get_row_line_role(self, row: int) -> str:
+        combo = self.tbl.cellWidget(row, 3) if self.tbl is not None else None
+        if isinstance(combo, QComboBox):
+            return self._role_value_from_combo_text(combo.currentText())
+        meta = self._section_meta[row] if 0 <= row < len(self._section_meta) else {}
+        line_id = str((meta or {}).get("line_id", "")).strip()
+        return self._normalize_line_role(str((meta or {}).get("line_role", "")).strip(), line_id)
+
+    @staticmethod
+    def _line_order_key(line_id: str, fallback_idx: int) -> Tuple[int, str]:
+        txt = str(line_id or "").strip()
+        digits = "".join(ch for ch in txt if ch.isdigit())
+        if digits:
+            try:
+                return int(digits), txt
+            except Exception:
+                pass
+        return int(fallback_idx), txt
+
+    @staticmethod
+    def _pick_intersection_point(geom_a: LineString, geom_b: LineString) -> Tuple[Optional[Point], str]:
+        try:
+            inter = geom_a.intersection(geom_b)
+        except Exception:
+            return None, "error"
+        if inter is None or getattr(inter, "is_empty", True):
+            return None, "no_intersection"
+        gtype = getattr(inter, "geom_type", "")
+        if gtype == "Point":
+            return inter, "ok"
+        if gtype == "MultiPoint":
+            pts = [p for p in getattr(inter, "geoms", []) if getattr(p, "geom_type", "") == "Point"]
+            if not pts:
+                return None, "multi_no_point"
+            try:
+                mid = geom_a.interpolate(0.5 * float(geom_a.length))
+                pts = sorted(pts, key=lambda p: p.distance(mid))
+            except Exception:
+                pass
+            return pts[0], "multi_point"
+        # Fallback for unexpected overlap geometries (unlikely for current auto-line layout)
+        try:
+            rp = inter.representative_point()
+            if rp is not None and not rp.is_empty:
+                return rp, f"{gtype.lower()}_repr"
+        except Exception:
+            pass
+        return None, f"unsupported_{gtype or 'unknown'}"
+
+    def _save_main_cross_intersections(self, ui2_dir: str) -> Optional[str]:
+        records: List[Dict[str, Any]] = []
+        for r in range(self.tbl.rowCount()):
+            try:
+                p0 = tuple(map(float, self.tbl.item(r, 1).text().split(",")))
+                p1 = tuple(map(float, self.tbl.item(r, 2).text().split(",")))
+            except Exception:
+                continue
+            meta = self._section_meta[r] if 0 <= r < len(self._section_meta) else {}
+            line_id = str((meta or {}).get("line_id", "")).strip()
+            label = (self.tbl.item(r, 0).text().strip() if self.tbl.item(r, 0) else f"{r + 1}")
+            if not line_id:
+                line_id = label
+                if 0 <= r < len(self._section_meta) and isinstance(self._section_meta[r], dict):
+                    self._section_meta[r]["line_id"] = line_id
+            line_role = self._normalize_line_role(self._get_row_line_role(r), line_id)
+            if 0 <= r < len(self._section_meta) and isinstance(self._section_meta[r], dict):
+                self._section_meta[r]["line_role"] = line_role
+            try:
+                geom = LineString([p0, p1])
+            except Exception:
+                continue
+            records.append({
+                "row_index": int(r),
+                "table_label": label,
+                "line_id": line_id,
+                "line_role": line_role,
+                "x1": float(p0[0]),
+                "y1": float(p0[1]),
+                "x2": float(p1[0]),
+                "y2": float(p1[1]),
+                "geom": geom,
+            })
+
+        mains = [rec for rec in records if rec.get("line_role") == "main"]
+        crosses = [rec for rec in records if rec.get("line_role") == "cross"]
+        mains.sort(key=lambda d: self._line_order_key(d.get("line_id", ""), d.get("row_index", 0)))
+        crosses.sort(key=lambda d: self._line_order_key(d.get("line_id", ""), d.get("row_index", 0)))
+
+        payload_items: List[Dict[str, Any]] = []
+        for mi, mrec in enumerate(mains, start=1):
+            for ci, crec in enumerate(crosses, start=1):
+                pt, status = self._pick_intersection_point(mrec["geom"], crec["geom"])
+                x = y = s_m = s_c = None
+                if pt is not None:
+                    try:
+                        x = float(pt.x)
+                        y = float(pt.y)
+                        s_m = float(mrec["geom"].project(pt))
+                        s_c = float(crec["geom"].project(pt))
+                    except Exception:
+                        x = y = s_m = s_c = None
+                        status = "project_error"
+                payload_items.append({
+                    "main_line_id": str(mrec["line_id"]),
+                    "cross_line_id": str(crec["line_id"]),
+                    "main_row_index": int(mrec["row_index"]),
+                    "cross_row_index": int(crec["row_index"]),
+                    "main_label_fixed": f"L{mi}",
+                    "main_order": int(mi),
+                    "cross_order": int(ci),
+                    "x": x,
+                    "y": y,
+                    "s_on_main": s_m,
+                    "s_on_cross": s_c,
+                    "status": status,
+                })
+
+        out_path = os.path.join(ui2_dir, "intersections_main_cross.json")
+        payload = {
+            "version": 1,
+            "main_count": int(len(mains)),
+            "cross_count": int(len(crosses)),
+            "intersection_count": int(len(payload_items)),
+            "ok_count": int(sum(1 for it in payload_items if it.get("status") in ("ok", "multi_point"))),
+            "items": payload_items,
+        }
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        return out_path
 
     def _on_confirm_sections(self) -> None:
         """Ghi ui2/sections.csv và phát 1 signal sang MainWindow/Curve tab."""
@@ -1612,13 +2155,29 @@ class SectionSelectionTab(QWidget):
             import csv
             with open(csv_path, "w", newline="", encoding="utf-8") as f:
                 w = csv.writer(f)
-                w.writerow(["idx", "x1", "y1", "x2", "y2"])
+                w.writerow(["idx", "x1", "y1", "x2", "y2", "line_id", "line_role"])
                 for r in range(self.tbl.rowCount()):
                     p0 = tuple(map(float, self.tbl.item(r, 1).text().split(",")))
                     p1 = tuple(map(float, self.tbl.item(r, 2).text().split(",")))
-                    w.writerow([r + 1, p0[0], p0[1], p1[0], p1[1]])
+                    meta = self._section_meta[r] if 0 <= r < len(self._section_meta) else {}
+                    line_id = str((meta or {}).get("line_id", "")).strip()
+                    if not line_id:
+                        label = (self.tbl.item(r, 0).text().strip() if self.tbl.item(r, 0) else f"{r + 1}")
+                        line_id = label
+                        if 0 <= r < len(self._section_meta) and isinstance(self._section_meta[r], dict):
+                            self._section_meta[r]["line_id"] = line_id
+                    line_role = self._normalize_line_role(self._get_row_line_role(r), line_id)
+                    if 0 <= r < len(self._section_meta) and isinstance(self._section_meta[r], dict):
+                        self._section_meta[r]["line_role"] = line_role
+                    w.writerow([r + 1, p0[0], p0[1], p1[0], p1[1], line_id, line_role])
 
             self._ok(f"Sections saved: {csv_path}")
+            try:
+                inter_path = self._save_main_cross_intersections(ui2_dir)
+                if inter_path:
+                    self._ok(f"[UI2] Intersections saved: {inter_path}")
+            except Exception as e:
+                self._err(f"[UI2] Save intersections error: {e}")
 
         except Exception as e:
             self._err(f"Confirm Sections error: {e}")
@@ -1657,6 +2216,8 @@ class SectionSelectionTab(QWidget):
 
                     if 0 <= r < len(self._sections):
                         self._sections.pop(r)
+                    if 0 <= r < len(self._section_meta):
+                        self._section_meta.pop(r)
 
                     self.tbl.removeRow(r)
 
@@ -1707,11 +2268,25 @@ class SectionSelectionTab(QWidget):
 
         # reset vector params về mặc định
         self._vec_step = 25
-        self._vec_scale = 0.5
+        self._vec_scale = 1.0
+        self._vec_size_pct = 100
+        self._vec_opacity_pct = 100
+        self._vec_color = "blue"
+        if hasattr(self, "spin_vec_step"):
+            self.spin_vec_step.setValue(25)
+        if hasattr(self, "spin_vec_scale"):
+            self.spin_vec_scale.setValue(1.0)
+        if hasattr(self, "combo_vec_color"):
+            self.combo_vec_color.setCurrentText("Blue")
+        if hasattr(self, "sld_vec_size"):
+            self.sld_vec_size.setValue(100)
+        if hasattr(self, "sld_vec_opacity"):
+            self.sld_vec_opacity.setValue(100)
 
         # Xoá sections & line
         if hasattr(self, "tbl"):
             self.tbl.setRowCount(0)
+        self._section_meta.clear()
 
         # Xoá line section đã vẽ
         if hasattr(self, "_section_lines"):

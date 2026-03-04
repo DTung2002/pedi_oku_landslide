@@ -23,7 +23,7 @@ from PyQt5.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QFileDialog,
     QVBoxLayout, QHBoxLayout, QDoubleSpinBox, QComboBox, QTextEdit,
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
-    QGroupBox, QFormLayout, QScrollArea, QMessageBox
+    QGroupBox, QFormLayout, QScrollArea, QMessageBox, QFrame
 )
 
 from pedi_oku_landslide.pipeline.runners.ui1_backend import (
@@ -101,6 +101,7 @@ class UI1App(QWidget):
 
         left_scroll = QScrollArea()
         left_scroll.setWidgetResizable(True)
+        left_scroll.setFrameShape(QFrame.NoFrame)
         left_host = QWidget()
         left_scroll.setWidget(left_host)
         left_panel = QVBoxLayout(left_host)

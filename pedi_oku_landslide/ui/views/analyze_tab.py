@@ -1,10 +1,10 @@
 # pedi_oku_landslide/ui/views/analyze_tab.py
 from typing import Optional
-from PyQt5.QtCore import QObject, QThread, pyqtSignal, Qt
+from PyQt5.QtCore import QObject, QThread, pyqtSignal, Qt, QTimer
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QMessageBox, QGroupBox, QTextEdit, QSplitter, QSizePolicy,
-    QDoubleSpinBox, QComboBox, QSpinBox, QFileDialog
+    QDoubleSpinBox, QComboBox, QSpinBox, QFileDialog, QScrollArea, QGridLayout, QSlider, QFrame
 )
 import os, sys
 from datetime import datetime
@@ -17,6 +17,7 @@ from pedi_oku_landslide.pipeline.ingest import run_ingest
 from pedi_oku_landslide.pipeline.steps.step_smooth import run_smooth
 from pedi_oku_landslide.pipeline.steps.step_sad import run_sad
 from pedi_oku_landslide.pipeline.steps.step_detect import run_detect, render_vectors
+from pedi_oku_landslide.pipeline.steps.step_mask_dxf import run_mask_from_dxf
 
 
 class AnalyzeTab(QWidget):
@@ -32,6 +33,14 @@ class AnalyzeTab(QWidget):
         super().__init__(parent)
         self.base_dir = base_dir
         self._last_run_dir: Optional[str] = None
+        self._splitter: Optional[QSplitter] = None
+        self._left_min_w = 380
+        self._left_default_w = 490
+        self._pending_init_splitter = True
+        self._vec_live_timer = QTimer(self)
+        self._vec_live_timer.setSingleShot(True)
+        self._vec_live_timer.setInterval(80)
+        self._vec_live_timer.timeout.connect(self._on_vec_live_tick)
         self._build_ui()
 
     # ---------- UI ----------
@@ -40,37 +49,48 @@ class AnalyzeTab(QWidget):
 
         splitter = QSplitter(Qt.Horizontal, self)
         splitter.setChildrenCollapsible(False)
+        self._splitter = splitter
+        splitter.splitterMoved.connect(lambda *_: self._enforce_left_pane_bounds())
         root.addWidget(splitter)
 
         # ----- Left pane -----
         left_container = QWidget()
+        left_container.setMinimumWidth(self._left_min_w)
         left_layout = QVBoxLayout(left_container)
 
         # Project group
         grp_proj = QGroupBox("Project")
-        proj_layout = QVBoxLayout(grp_proj)
+        proj_layout = QGridLayout(grp_proj)
+        proj_layout.setHorizontalSpacing(8)
+        proj_layout.setVerticalSpacing(6)
+        proj_layout.setColumnStretch(1, 1)
 
-        # Hàng 1: Project name + nút Load Run…
-        row_proj = QHBoxLayout()
-        row_proj.addWidget(QLabel("Name:"))
+        lbl_name = QLabel("Name:")
+        lbl_run = QLabel("Run label:")
+        label_col_w = max(lbl_name.sizeHint().width(), lbl_run.sizeHint().width())
+        proj_layout.setColumnMinimumWidth(0, label_col_w)
+
+        proj_input_h = 30
         self.edit_project = QLineEdit()
         self.edit_project.setPlaceholderText("e.g. Jimba_01")
-        row_proj.addWidget(self.edit_project, 1)
+        self.edit_project.setFixedHeight(proj_input_h)
+        self.edit_project.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         self.btn_load_run = QPushButton("Load Run")
         self.btn_load_run.setToolTip("Open an existing run folder under output/<Project>/<RunID>")
         self.btn_load_run.clicked.connect(self._on_open_existing_run)
-        row_proj.addWidget(self.btn_load_run)
-
-        proj_layout.addLayout(row_proj)
-
-        # Hàng 2: Run label
-        row_runlabel = QHBoxLayout()
-        row_runlabel.addWidget(QLabel("Run label:"))
         self.edit_runlabel = QLineEdit()
         self.edit_runlabel.setPlaceholderText("e.g. baseline")
-        row_runlabel.addWidget(self.edit_runlabel)
-        proj_layout.addLayout(row_runlabel)
+        self.edit_runlabel.setFixedHeight(proj_input_h)
+        self.edit_runlabel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        # Reserve the same right column width on both rows so inputs end next to Load Run.
+        proj_layout.setColumnMinimumWidth(2, self.btn_load_run.sizeHint().width())
+        proj_layout.addWidget(lbl_name, 0, 0)
+        proj_layout.addWidget(self.edit_project, 0, 1)
+        proj_layout.addWidget(self.btn_load_run, 0, 2)
+        proj_layout.addWidget(lbl_run, 1, 0)
+        proj_layout.addWidget(self.edit_runlabel, 1, 1)
 
         left_layout.addWidget(grp_proj)
 
@@ -78,7 +98,7 @@ class AnalyzeTab(QWidget):
         grp_inputs = QGroupBox("Inputs")
         inputs_layout = QVBoxLayout(grp_inputs)
         inputs_layout.setContentsMargins(6, 8, 6, 8)
-        inputs_layout.setSpacing(2)
+        inputs_layout.setSpacing(6)
 
         self.fp_bdem = FilePicker("BEFORE DEM.tif", "GeoTIFF (*.tif *.tiff)")
         self.fp_basc = FilePicker("BEFORE.asc", "ASC (*.asc)")
@@ -86,16 +106,6 @@ class AnalyzeTab(QWidget):
         self.fp_bpz  = FilePicker("BEFORE_PZ.asc", "ASC (*.asc)")
         self.fp_apz  = FilePicker("AFTER_PZ.asc", "ASC (*.asc)")
         
-        btn_w = max(
-            self.fp_bdem.btn.sizeHint().width(),
-            self.fp_basc.btn.sizeHint().width(),
-            self.fp_aasc.btn.sizeHint().width(),
-            self.fp_bpz.btn.sizeHint().width(),
-            self.fp_apz.btn.sizeHint().width(),
-        ) + 40
-        for fp in (self.fp_bdem, self.fp_basc, self.fp_aasc, self.fp_bpz, self.fp_apz):
-            fp.btn.setFixedWidth(btn_w)
-
         for w in (self.fp_bdem, self.fp_basc, self.fp_aasc, self.fp_bpz, self.fp_apz):
             inputs_layout.addWidget(w)
             
@@ -114,94 +124,181 @@ class AnalyzeTab(QWidget):
         actions.addWidget(self.btn_open_run, 1)
         inputs_layout.addLayout(actions)
 
+        # Keep action buttons at their natural size; only normalize file-picker buttons.
+        file_buttons = [self.fp_bdem.btn, self.fp_basc.btn, self.fp_aasc.btn, self.fp_bpz.btn, self.fp_apz.btn]
+        max_w = max(btn.sizeHint().width() for btn in file_buttons) + 36
+        max_h = max(btn.sizeHint().height() for btn in file_buttons)
+        for btn in file_buttons:
+            btn.setFixedSize(max_w, max_h)
+
         left_layout.addWidget(grp_inputs)
 
         # ===================== Detect Landslide Zone (combined) =====================
         grp_detect = QGroupBox("Detect Landslide Zone")
         lay_detect = QVBoxLayout(grp_detect)
 
-        row_s1 = QHBoxLayout()
-        row_s1.addWidget(QLabel("Smooth Gaussian σ (px):"))
+        lab_smooth = QLabel("Gaussian σ (px):")
         self.spin_sigma = QDoubleSpinBox()
         self.spin_sigma.setRange(0.0, 50.0)
         self.spin_sigma.setSingleStep(0.5)
         self.spin_sigma.setDecimals(1)
         self.spin_sigma.setValue(2.0)
-        row_s1.addWidget(self.spin_sigma)
-        row_s1.addStretch(1)
-        self.btn_smooth = QPushButton("Smooth (preview)")
+        self.spin_sigma.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.btn_smooth = QPushButton("Smooth")
         self.btn_smooth.setEnabled(False)  # bật sau Confirm Input
         self.btn_smooth.clicked.connect(self._on_smooth)
-        row_s1.addWidget(self.btn_smooth)
-        lay_detect.addLayout(row_s1)
 
         # ---- Calculate SAD ----
-        lay_sad = QHBoxLayout()
-
-        lay_sad.addWidget(QLabel("Calculation Method:"))
+        lab_method = QLabel("SAD Method:")
         self.cmb_method = QComboBox()
         self.cmb_method.addItems(["OpenCV", "Traditional"])
         self.cmb_method.setCurrentText("OpenCV")
-        lay_sad.addWidget(self.cmb_method)
+        self.cmb_method.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
-        self.btn_calc_sad = QPushButton("Calculate (SAD + dZ)")
+        self.btn_calc_sad = QPushButton("Calculate")
         self.btn_calc_sad.setEnabled(False)  # bật sau Confirm Input
         self.btn_calc_sad.clicked.connect(self._on_calc_sad)
-        lay_sad.addStretch(1)
-        lay_sad.addWidget(self.btn_calc_sad)
-        lay_detect.addLayout(lay_sad)
 
         # ---- Landslide Zone ----
-        lay_zone = QVBoxLayout()
-
-        # --- Detect row (xuống hàng riêng)
-        row_d = QHBoxLayout()
-        row_d.addWidget(QLabel("Detect displacement (m):"))
+        lab_detect = QLabel("Displacement (m):")
         self.spin_detect_thr = QDoubleSpinBox()
         self.spin_detect_thr.setRange(0.0, 10.0)
         self.spin_detect_thr.setSingleStep(0.1)
         self.spin_detect_thr.setValue(0.8)
-        row_d.addWidget(self.spin_detect_thr)
+        self.spin_detect_thr.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
-        self.btn_detect = QPushButton("Detect Landslide Zone")
+        self.btn_detect = QPushButton("Detect")
         self.btn_detect.setEnabled(False)  # bật sau SAD
         self.btn_detect.clicked.connect(self._on_detect)
-        row_d.addStretch(1)
-        row_d.addWidget(self.btn_detect)
-        lay_zone.addLayout(row_d)
+        # Three aligned rows: label | input | action button.
+        grid_detect = QGridLayout()
+        grid_detect.setHorizontalSpacing(8)
+        grid_detect.setVerticalSpacing(6)
+        grid_detect.setColumnStretch(1, 1)
+        grid_detect.addWidget(lab_smooth, 0, 0)
+        grid_detect.addWidget(self.spin_sigma, 0, 1)
+        grid_detect.addWidget(self.btn_smooth, 0, 2)
+        grid_detect.addWidget(lab_method, 1, 0)
+        grid_detect.addWidget(self.cmb_method, 1, 1)
+        grid_detect.addWidget(self.btn_calc_sad, 1, 2)
+        grid_detect.addWidget(lab_detect, 2, 0)
+        grid_detect.addWidget(self.spin_detect_thr, 2, 1)
+        grid_detect.addWidget(self.btn_detect, 2, 2)
+        lay_detect.addLayout(grid_detect)
 
-        lay_detect.addLayout(lay_zone)
-        # ---- Vectors Adjustment ----
-        grp_vectors = QGroupBox("Vectors Adjustment")
+        # ---- Manual mask from DXF (optional) ----
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setFrameShadow(QFrame.Sunken)
+        lay_detect.addWidget(sep)
+
+        self.fp_mask_dxf = FilePicker("Boundary.dxf", "DXF (*.dxf)")
+        self.btn_import_dxf_mask = QPushButton("Detect from DXF")
+        self.btn_import_dxf_mask.setEnabled(False)  # bật sau SAD (cần dx/dy grid)
+        self.btn_import_dxf_mask.clicked.connect(self._on_import_dxf_mask)
+        row_mask = QHBoxLayout()
+        row_mask.addWidget(self.fp_mask_dxf, 1)
+        row_mask.addWidget(self.btn_import_dxf_mask, 0)
+        lay_detect.addLayout(row_mask)
+
+        self.lbl_mask_source = QLabel("Mask source: not set")
+        self.lbl_mask_source.setWordWrap(True)
+        self.lbl_mask_source.setVisible(False)
+
+        # ---- Vector Display ----
+        grp_vectors = QGroupBox("Vector Display")
         lay_vectors = QVBoxLayout(grp_vectors)
-        row_v = QHBoxLayout()
-        row_v.addWidget(QLabel("Vectors step:"))
+        grid_vec_top = QGridLayout()
+        grid_vec_top.setHorizontalSpacing(8)
+        grid_vec_top.setVerticalSpacing(6)
+        grid_vec_top.setColumnStretch(1, 1)
+        grid_vec_top.setColumnStretch(3, 1)
+        grid_vec_top.setColumnStretch(5, 1)
+
+        lab_step = QLabel("Step:")
+        lab_scale = QLabel("Scale:")
+        lab_color = QLabel("Color:")
+        lab_size = QLabel("Size:")
+        lab_opacity = QLabel("Opacity:")
+
         self.spin_vec_step = QSpinBox()
         self.spin_vec_step.setRange(1, 200)
         self.spin_vec_step.setValue(25)  # mặc định gọn
-        row_v.addWidget(self.spin_vec_step)
-
-        row_v.addWidget(QLabel("Scale:"))
+        self.spin_vec_step.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.spin_vec_scale = QDoubleSpinBox()
         self.spin_vec_scale.setRange(0.01, 10.0)
         self.spin_vec_scale.setSingleStep(1.0)
         self.spin_vec_scale.setValue(1.0)  # theo mét
-        row_v.addWidget(self.spin_vec_scale)
-        row_v.addStretch(1)
+        self.spin_vec_scale.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        # Size slider giống UI2
+        self.sld_vec_size = QSlider(Qt.Horizontal)
+        self.sld_vec_size.setRange(80, 500)
+        self.sld_vec_size.setValue(100)
+        self.sld_vec_size.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        # Opacity slider giống UI2
+        self.sld_vec_opacity = QSlider(Qt.Horizontal)
+        self.sld_vec_opacity.setRange(0, 100)
+        self.sld_vec_opacity.setValue(100)
+        self.sld_vec_opacity.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.sld_vec_size.valueChanged.connect(lambda _v: self._on_vec_display_slider_changed())
+        self.sld_vec_opacity.valueChanged.connect(lambda _v: self._on_vec_display_slider_changed())
+
+        self.combo_vec_color = QComboBox()
+        self.combo_vec_color.addItems(["Blue", "Red", "Green", "White", "Yellow", "Magenta"])
+        self.combo_vec_color.setCurrentText("Blue")
+        self.combo_vec_color.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        # Step/Scale/Color trên 1 hàng, input width bằng nhau
+        label_col_w = max(lab_step.sizeHint().width(), lab_scale.sizeHint().width(), lab_color.sizeHint().width())
+        for col in (0, 2, 4):
+            grid_vec_top.setColumnMinimumWidth(col, label_col_w)
+        input_min_w = max(
+            self.spin_vec_step.sizeHint().width(),
+            self.spin_vec_scale.sizeHint().width(),
+            self.combo_vec_color.sizeHint().width(),
+        )
+        for w in (self.spin_vec_step, self.spin_vec_scale, self.combo_vec_color):
+            w.setMinimumWidth(input_min_w)
+
+        grid_vec_top.addWidget(lab_step, 0, 0)
+        grid_vec_top.addWidget(self.spin_vec_step, 0, 1)
+        grid_vec_top.addWidget(lab_scale, 0, 2)
+        grid_vec_top.addWidget(self.spin_vec_scale, 0, 3)
+        grid_vec_top.addWidget(lab_color, 0, 4)
+        grid_vec_top.addWidget(self.combo_vec_color, 0, 5)
+        lay_vectors.addLayout(grid_vec_top)
+
+        grid_vec_sliders = QGridLayout()
+        grid_vec_sliders.setHorizontalSpacing(8)
+        grid_vec_sliders.setVerticalSpacing(6)
+        grid_vec_sliders.setColumnStretch(1, 1)
+        grid_vec_sliders.addWidget(lab_size, 0, 0)
+        grid_vec_sliders.addWidget(self.sld_vec_size, 0, 1)
+        grid_vec_sliders.addWidget(lab_opacity, 1, 0)
+        grid_vec_sliders.addWidget(self.sld_vec_opacity, 1, 1)
+        lay_vectors.addLayout(grid_vec_sliders)
+
+        row_v3 = QHBoxLayout()
         self.btn_vectors = QPushButton("Render Vectors")
         self.btn_vectors.setEnabled(False)  # bật sau SAD
         self.btn_vectors.clicked.connect(self._on_render_vectors)
-        row_v.addWidget(self.btn_vectors)
-        lay_vectors.addLayout(row_v)
-        # Normalize button widths in Detect panel
+        self.btn_vectors.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        row_v3.addWidget(self.btn_vectors)
+        lay_vectors.addLayout(row_v3)
+        # Force same width as "Detect Landslide Zone" for action buttons.
         btn_detect_w = max(
+            self.btn_detect.sizeHint().width(),
             self.btn_smooth.sizeHint().width(),
             self.btn_calc_sad.sizeHint().width(),
-            self.btn_detect.sizeHint().width(),
+            self.btn_import_dxf_mask.sizeHint().width(),
+            120,  # keep labels fully visible on narrow panes
         )
-        btn_detect_w = int(round(btn_detect_w * 1.5))
-        for b in (self.btn_smooth, self.btn_calc_sad, self.btn_detect):
-            b.setFixedWidth(btn_detect_w)
+        self.btn_smooth.setFixedWidth(btn_detect_w)
+        self.btn_calc_sad.setFixedWidth(btn_detect_w)
+        self.btn_detect.setFixedWidth(btn_detect_w)
+        self.btn_import_dxf_mask.setFixedWidth(btn_detect_w)
         left_layout.addWidget(grp_detect)
         left_layout.addWidget(grp_vectors)
 
@@ -215,7 +312,15 @@ class AnalyzeTab(QWidget):
         left_layout.addWidget(grp_status)
 
         left_layout.addStretch(1)
-        splitter.addWidget(left_container)
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setFrameShape(QFrame.NoFrame)
+        left_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        left_scroll.setMinimumWidth(self._left_min_w)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        left_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        left_scroll.setWidget(left_container)
+        splitter.addWidget(left_scroll)
 
         # ----- Right pane: Preview -----
         right_container = QWidget()
@@ -230,9 +335,60 @@ class AnalyzeTab(QWidget):
         right_layout.addWidget(self.viewer, 1)
 
         splitter.addWidget(right_container)
-        splitter.setSizes([420, 900])  # 30% / 70%
+        splitter.setCollapsible(0, False)
+        splitter.setCollapsible(1, False)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([self._left_default_w, 900])
 
         self._apply_button_style(self)
+
+    def _left_max_w(self) -> int:
+        # Left pane can occupy at most 50% of current window width.
+        base_w = self.width()
+        if self._splitter is not None and self._splitter.width() > 0:
+            base_w = self._splitter.width()
+        # During early layout, widths can be tiny/unstable; defer clamping then.
+        if base_w < (self._left_min_w * 2):
+            return -1
+        return max(self._left_min_w, int(base_w * 0.5))
+
+    def _try_apply_initial_splitter_width(self) -> None:
+        if not self._pending_init_splitter or self._splitter is None:
+            return
+        max_w = self._left_max_w()
+        if max_w < 0:
+            return
+        init_left = max(self._left_min_w, min(self._left_default_w, max_w))
+        total = sum(self._splitter.sizes())
+        if total <= 0:
+            total = max(self._splitter.width(), self.width(), init_left + 1)
+        self._splitter.setSizes([init_left, max(1, total - init_left)])
+        self._pending_init_splitter = False
+
+    def _enforce_left_pane_bounds(self) -> None:
+        if self._splitter is None:
+            return
+        self._try_apply_initial_splitter_width()
+        sizes = self._splitter.sizes()
+        if len(sizes) != 2:
+            return
+        left_w, right_w = sizes
+        total = left_w + right_w
+        max_w = self._left_max_w()
+        if max_w < 0:
+            return
+        clamped_left = max(self._left_min_w, min(left_w, max_w))
+        if clamped_left != left_w and total > 0:
+            self._splitter.setSizes([clamped_left, max(1, total - clamped_left)])
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._enforce_left_pane_bounds()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._enforce_left_pane_bounds()
 
     def _apply_button_style(self, container: QWidget | None = None) -> None:
         """Áp style chung cho tab Analyze (nền trắng + nút xanh)."""
@@ -288,6 +444,57 @@ class AnalyzeTab(QWidget):
         parts = run_id.split("_", 2)
         return parts[2] if len(parts) == 3 else ""
 
+    @staticmethod
+    def _ctx_from_run_dir(base_dir: str, run_dir: str) -> AnalysisContext:
+        parts = os.path.normpath(run_dir).split(os.sep)
+        if len(parts) < 2:
+            raise RuntimeError("Unexpected run folder structure.")
+        run_id = parts[-1]
+        project = parts[-2]
+        return AnalysisContext(
+            project_id=project,
+            run_id=run_id,
+            base_dir=base_dir,
+            project_dir=os.path.join(base_dir, "output", project),
+            run_dir=run_dir,
+            in_dir=os.path.join(run_dir, "input"),
+            out_ui1=os.path.join(run_dir, "ui1"),
+            out_ui2=os.path.join(run_dir, "ui2"),
+            out_ui3=os.path.join(run_dir, "ui3"),
+        )
+
+    def _refresh_mask_source_ui(self, run_dir: Optional[str] = None) -> None:
+        rd = (run_dir or self._last_run_dir or "").strip()
+        if not rd:
+            self.lbl_mask_source.setText("Mask source: not set")
+            return
+
+        ui1_dir = os.path.join(rd, "ui1")
+        mask_tif = os.path.join(ui1_dir, "landslide_mask.tif")
+        meta_json = os.path.join(ui1_dir, "mask_from_dxf_meta.json")
+
+        if not os.path.exists(mask_tif):
+            self.lbl_mask_source.setText("Mask source: not set")
+            return
+
+        dxf_name = ""
+        if os.path.exists(meta_json):
+            try:
+                import json
+                with open(meta_json, "r", encoding="utf-8") as f:
+                    meta = json.load(f) or {}
+                dxf_path = str(meta.get("dxf_path") or "").strip()
+                if dxf_path:
+                    dxf_name = os.path.basename(dxf_path)
+                    self.fp_mask_dxf.set_path(dxf_path)
+            except Exception:
+                pass
+
+        if dxf_name:
+            self.lbl_mask_source.setText(f"Mask source: DXF ({dxf_name})")
+        else:
+            self.lbl_mask_source.setText("Mask source: auto/existing mask raster")
+
     # ---------- Actions ----------
     def _on_confirm_input(self) -> None:
         project = (self.edit_project.text() or "").strip()
@@ -317,6 +524,9 @@ class AnalyzeTab(QWidget):
             self.btn_open_run.setEnabled(True)
             self.btn_smooth.setEnabled(True)  # bật smooth sau khi confirm
             self.btn_calc_sad.setEnabled(True)
+            self.btn_detect.setEnabled(False)
+            self.btn_vectors.setEnabled(False)
+            self.btn_import_dxf_mask.setEnabled(False)
 
             self._ok(
                 "Confirm Input completed.\n"
@@ -330,6 +540,7 @@ class AnalyzeTab(QWidget):
                 preview.get("before_asc_hillshade_png"),
                 preview.get("after_asc_hillshade_png"),
             )
+            self._refresh_mask_source_ui(self._last_run_dir)
 
         except FileExistsError:
             self._err("Run folder already exists (rare). Please try again.")
@@ -436,6 +647,7 @@ class AnalyzeTab(QWidget):
             self.btn_calc_sad.setEnabled(True)
             self.btn_detect.setEnabled(True)
             self.btn_vectors.setEnabled(True)
+            self.btn_import_dxf_mask.setEnabled(True)
 
             # thông báo
             self._ok(
@@ -454,6 +666,7 @@ class AnalyzeTab(QWidget):
             right_img = vectors if os.path.exists(vectors) else dz_png
 
             self.viewer.show_pair(left_img, right_img)
+            self._refresh_mask_source_ui(self._last_run_dir)
 
         except Exception as e:
             self._err(f"Post-process error: {e}")
@@ -462,6 +675,12 @@ class AnalyzeTab(QWidget):
         self.btn_calc_sad.setEnabled(True)
         self.btn_detect.setEnabled(True)
         self.btn_vectors.setEnabled(True)
+        if self._last_run_dir:
+            dx_ok = os.path.exists(os.path.join(self._last_run_dir, "ui1", "dx.tif"))
+            dy_ok = os.path.exists(os.path.join(self._last_run_dir, "ui1", "dy.tif"))
+            self.btn_import_dxf_mask.setEnabled(dx_ok and dy_ok)
+        else:
+            self.btn_import_dxf_mask.setEnabled(False)
         self._err(f"SAD+dZ error: {msg}")
 
     def _on_open_run(self) -> None:
@@ -477,6 +696,120 @@ class AnalyzeTab(QWidget):
                 subprocess.Popen([opener, self._last_run_dir])
         except Exception as e:
             self._err(f"Cannot open folder: {e}")
+
+    def _export_ui1_vectors_json(
+        self,
+        ctx: AnalysisContext,
+        *,
+        step: int,
+        scale: float,
+        vector_color: str,
+        vector_width: float,
+        vector_opacity: float,
+        min_m: float = 0.05,
+        max_m: float = 2.0,
+    ) -> str:
+        """
+        Export sampled vectors currently used by Render Vectors to JSON.
+        Output: <run_dir>/ui1/vector/vectors.json
+        """
+        import json
+        import numpy as np
+        import rasterio
+
+        dx_path = os.path.join(ctx.out_ui1, "dx.tif")
+        dy_path = os.path.join(ctx.out_ui1, "dy.tif")
+        dem_path = os.path.join(ctx.in_dir, "before.asc")
+        mask_path = os.path.join(ctx.out_ui1, "landslide_mask.tif")
+
+        if not (os.path.exists(dx_path) and os.path.exists(dy_path)):
+            raise FileNotFoundError("dx.tif or dy.tif is missing.")
+        if not os.path.exists(dem_path):
+            raise FileNotFoundError("before.asc is missing.")
+
+        with rasterio.open(dx_path) as dx_ds:
+            dX = dx_ds.read(1).astype("float32")
+            transform = dx_ds.transform
+            px_m = abs(float(transform.a))
+            py_m = abs(float(transform.e))
+
+        with rasterio.open(dy_path) as dy_ds:
+            dY = dy_ds.read(1).astype("float32")
+
+        with rasterio.open(dem_path) as dem_ds:
+            dem = dem_ds.read(1).astype("float32")
+            nd = dem_ds.nodata
+            if nd is not None:
+                dem[dem == nd] = np.nan
+
+        if os.path.exists(mask_path):
+            with rasterio.open(mask_path) as msk_ds:
+                in_zone = (msk_ds.read(1) > 0)
+        else:
+            in_zone = np.ones_like(dX, dtype=bool)
+
+        mag_m = np.sqrt((dX * px_m) ** 2 + (dY * py_m) ** 2).astype("float32")
+        sample = np.zeros_like(mag_m, dtype=bool)
+        sample[::max(1, int(step)), ::max(1, int(step))] = True
+        ok = sample & in_zone & np.isfinite(mag_m) & (mag_m >= float(min_m)) & (mag_m <= float(max_m))
+
+        rows, cols = np.where(ok)
+        out_dir = os.path.join(ctx.out_ui1, "vector")
+        os.makedirs(out_dir, exist_ok=True)
+        out_json = os.path.join(out_dir, "vectors.json")
+
+        xw = transform.c + cols * transform.a + transform.a / 2.0
+        yw = transform.f + rows * transform.e + transform.e / 2.0
+
+        dx_px = dX[rows, cols]
+        dy_px = dY[rows, cols]
+        dx_m = dx_px * px_m
+        dy_m = dy_px * py_m
+        z_vals = dem[rows, cols]
+        magnitude_m = np.sqrt(dx_m ** 2 + dy_m ** 2)
+        direction_deg = np.degrees(np.arctan2(dy_m, dx_m))
+
+        vectors = []
+        for i in range(len(rows)):
+            vectors.append({
+                "row": int(rows[i]),
+                "col": int(cols[i]),
+                "x": float(xw[i]),
+                "y": float(yw[i]),
+                "z": (None if not np.isfinite(z_vals[i]) else float(z_vals[i])),
+                "direction_deg": (None if not np.isfinite(direction_deg[i]) else float(direction_deg[i])),
+                "magnitude_m": (None if not np.isfinite(magnitude_m[i]) else float(magnitude_m[i])),
+                "dx_px": (None if not np.isfinite(dx_px[i]) else float(dx_px[i])),
+                "dy_px": (None if not np.isfinite(dy_px[i]) else float(dy_px[i])),
+                "dx_m": (None if not np.isfinite(dx_m[i]) else float(dx_m[i])),
+                "dy_m": (None if not np.isfinite(dy_m[i]) else float(dy_m[i])),
+            })
+
+        payload = {
+            "project_id": ctx.project_id,
+            "run_id": ctx.run_id,
+            "count": len(vectors),
+            "step": int(step),
+            "scale": float(scale),
+            "vector_color": str(vector_color),
+            "vector_width": float(vector_width),
+            "vector_opacity": float(vector_opacity),
+            "filters": {
+                "min_m": float(min_m),
+                "max_m": float(max_m),
+            },
+            "sources": {
+                "dx_tif": dx_path.replace("\\", "/"),
+                "dy_tif": dy_path.replace("\\", "/"),
+                "dem_before_asc": dem_path.replace("\\", "/"),
+                "mask_tif": (mask_path.replace("\\", "/") if os.path.exists(mask_path) else None),
+            },
+            "vectors": vectors,
+        }
+
+        with open(out_json, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        return out_json.replace("\\", "/")
 
     # ---------- Status helpers ----------
     def _append_status(self, text: str) -> None:
@@ -515,43 +848,68 @@ class AnalyzeTab(QWidget):
             self._warn("Please run 'Confirm Input' first.")
             return
         try:
-            # reconstruct ctx
-            parts = os.path.normpath(self._last_run_dir).split(os.sep)
-            if len(parts) < 2:
-                raise RuntimeError("Unexpected run folder structure.")
-            run_id = parts[-1]
-            project = parts[-2]
-
-            ctx = AnalysisContext(
-                project_id=project,
-                run_id=run_id,
-                base_dir=self.base_dir,
-                project_dir=os.path.join(self.base_dir, "output", project),
-                run_dir=self._last_run_dir,
-                in_dir=os.path.join(self._last_run_dir, "input"),
-                out_ui1=os.path.join(self._last_run_dir, "ui1"),
-                out_ui2=os.path.join(self._last_run_dir, "ui2"),
-                out_ui3=os.path.join(self._last_run_dir, "ui3"),
-            )
+            ctx = self._ctx_from_run_dir(self.base_dir, self._last_run_dir)
 
             thr_m = float(self.spin_detect_thr.value())
             out = run_detect(ctx, method="threshold", threshold_m=thr_m)
+
+            # Auto detect overrides manual DXF mask metadata.
+            meta_json = os.path.join(ctx.out_ui1, "mask_from_dxf_meta.json")
+            if os.path.exists(meta_json):
+                try:
+                    os.remove(meta_json)
+                except Exception:
+                    pass
 
             self._ok(f"Detected with threshold = {thr_m:.2f} m\n - {out['mask_tif']}")
             dz_png = os.path.join(ctx.out_ui1, "dz.png")
             overlay = out["mask_png"]  # bước detect đã lưu heatmap overlay
             self.viewer.show_pair(dz_png, overlay)
+            self._refresh_mask_source_ui(ctx.run_dir)
 
         except Exception as e:
             self._err(f"Detect error: {e}")
 
-    def _on_render_vectors(self) -> None:
+    def _on_import_dxf_mask(self) -> None:
         if not self._last_run_dir:
             self._warn("Please run 'Confirm Input' first.")
+            return
+        dxf_path = (self.fp_mask_dxf.path or "").strip()
+        if not dxf_path:
+            self._warn("Please select a DXF boundary file first.")
+            return
+        try:
+            ctx = self._ctx_from_run_dir(self.base_dir, self._last_run_dir)
+            out = run_mask_from_dxf(ctx, dxf_path)
+
+            self._ok(
+                f"DXF mask created.\n"
+                f" - mask: {out.get('mask_tif', '')}\n"
+                f" - polygons: {out.get('polygon_count', 0)}"
+            )
+            self._info(f"Mask pixels in-zone: {out.get('mask_pixels_positive', 0)}")
+
+            dz_png = os.path.join(ctx.out_ui1, "dz.png")
+            left_img = dz_png if os.path.exists(dz_png) else os.path.join(ctx.out_ui1, "before_asc_hillshade.png")
+            right_img = out.get("mask_png", "")
+            if left_img and right_img and os.path.exists(right_img):
+                self.viewer.show_pair(left_img, right_img)
+            self._refresh_mask_source_ui(ctx.run_dir)
+        except Exception as e:
+            self._err(f"DXF mask import error: {e}")
+
+    def _on_render_vectors(self, quiet: bool = False, emit_signal: bool = True) -> None:
+        if not self._last_run_dir:
+            if not quiet:
+                self._warn("Please run 'Confirm Input' first.")
             return
         try:
             step = int(self.spin_vec_step.value())
             scale = float(self.spin_vec_scale.value())
+            color = str(self.combo_vec_color.currentText())
+            size_mul = max(0.2, float(self.sld_vec_size.value()) / 100.0)
+            width = 0.003 * size_mul
+            opacity = max(0.0, min(1.0, float(self.sld_vec_opacity.value()) / 100.0))
 
             # reconstruct ctx
             parts = os.path.normpath(self._last_run_dir).split(os.sep)
@@ -576,22 +934,59 @@ class AnalyzeTab(QWidget):
                 ctx,
                 step=step,
                 scale=scale,
+                vector_color=color,
+                vector_width=width,
+                vector_opacity=opacity,
             )
+
+            json_path = None
+            if not quiet:
+                try:
+                    json_path = self._export_ui1_vectors_json(
+                        ctx,
+                        step=step,
+                        scale=scale,
+                        vector_color=color,
+                        vector_width=width,
+                        vector_opacity=opacity,
+                    )
+                except Exception as e:
+                    self._append_status(f"WARN: Export vector JSON failed: {e}")
 
             # Hiển thị: trái = overlay (nếu có) hoặc dz, phải = vectors overlay
             overlay = os.path.join(ctx.out_ui1, "landslide_overlay.png")
             left_img = overlay if os.path.exists(overlay) else os.path.join(ctx.out_ui1, "dz.png")
             self.viewer.show_pair(left_img, out["vectors_png"])
 
-            self._ok(f"Vectors rendered (step={step}, scale={scale}).")
+            if not quiet:
+                self._ok(
+                    f"Vectors rendered (step={step}, scale={scale}, "
+                    f"size={self.sld_vec_size.value()}%, opacity={self.sld_vec_opacity.value()}%)."
+                )
+                if json_path:
+                    self._info(f"Vector JSON saved: {json_path}")
 
             # emit để MainWindow enable tab Section Selection
-            project = (self.edit_project.text() or "").strip()
-            run_label = (self.edit_runlabel.text() or "").strip()
-            self.vectors_rendered.emit(project, run_label, self._last_run_dir)
+            if emit_signal:
+                project = (self.edit_project.text() or "").strip()
+                run_label = (self.edit_runlabel.text() or "").strip()
+                self.vectors_rendered.emit(project, run_label, self._last_run_dir)
 
         except Exception as e:
-            self._err(f"Render vectors error: {e}")
+            if quiet:
+                self._append_status(f"WARN: Live render vectors skipped: {e}")
+            else:
+                self._err(f"Render vectors error: {e}")
+
+    def _on_vec_display_slider_changed(self) -> None:
+        if not self._last_run_dir:
+            return
+        if not hasattr(self, "btn_vectors") or not self.btn_vectors.isEnabled():
+            return
+        self._vec_live_timer.start()
+
+    def _on_vec_live_tick(self) -> None:
+        self._on_render_vectors(quiet=True, emit_signal=False)
 
     def _on_open_existing_run(self) -> None:
         """
@@ -635,6 +1030,7 @@ class AnalyzeTab(QWidget):
             dy_ok = os.path.exists(os.path.join(ctx.out_ui1, "dy.tif"))
             self.btn_detect.setEnabled(dx_ok and dy_ok)
             self.btn_vectors.setEnabled(dx_ok and dy_ok)
+            self.btn_import_dxf_mask.setEnabled(dx_ok and dy_ok)
 
             # Bật Open run
             self.btn_open_run.setEnabled(True)
@@ -660,6 +1056,7 @@ class AnalyzeTab(QWidget):
 
             if left_img and right_img:
                 self.viewer.show_pair(left_img, right_img)
+            self._refresh_mask_source_ui(ctx.run_dir)
 
             self._ok(
                 "Opened existing run.\n"
@@ -712,6 +1109,10 @@ class AnalyzeTab(QWidget):
             except Exception:
                 # Không fatal, chỉ cố gắng hết sức
                 pass
+        try:
+            self.fp_mask_dxf.clear()
+        except Exception:
+            pass
 
         # 4) Đưa các nút về trạng thái ban đầu
         self.btn_open_run.setEnabled(False)
@@ -719,6 +1120,7 @@ class AnalyzeTab(QWidget):
         self.btn_calc_sad.setEnabled(False)
         self.btn_detect.setEnabled(False)
         self.btn_vectors.setEnabled(False)
+        self.btn_import_dxf_mask.setEnabled(False)
         # Nút Confirm Input luôn bật
         self.btn_confirm.setEnabled(True)
 
@@ -743,6 +1145,18 @@ class AnalyzeTab(QWidget):
             self.spin_vec_scale.setValue(1.0)
         except Exception:
             pass
+        try:
+            self.combo_vec_color.setCurrentText("Blue")
+        except Exception:
+            pass
+        try:
+            self.sld_vec_size.setValue(100)
+        except Exception:
+            pass
+        try:
+            self.sld_vec_opacity.setValue(100)
+        except Exception:
+            pass
 
         # 6) Clear viewer (ảnh bên phải)
         try:
@@ -758,6 +1172,10 @@ class AnalyzeTab(QWidget):
         # 7) Clear status log
         try:
             self.status_text.clear()
+        except Exception:
+            pass
+        try:
+            self.lbl_mask_source.setText("Mask source: not set")
         except Exception:
             pass
 

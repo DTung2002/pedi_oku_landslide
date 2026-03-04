@@ -1,4 +1,4 @@
-﻿# pedi_oku_landslide/pipeline/step_detect.py
+# pedi_oku_landslide/pipeline/step_detect.py
 from __future__ import annotations
 
 import os
@@ -41,7 +41,7 @@ def run_detect(
     import matplotlib.pyplot as plt
     from matplotlib.colors import LightSource
     from rasterio.plot import plotting_extent
-    from scipy.ndimage import uniform_filter
+    from scipy.ndimage import uniform_filter, binary_erosion
 
     dx_path = os.path.join(ctx.out_ui1, "dx.tif")
     dy_path = os.path.join(ctx.out_ui1, "dy.tif")
@@ -88,6 +88,59 @@ def run_detect(
     meta_dx.update(driver="GTiff", count=1, dtype="uint8", nodata=0, compress="lzw")
     with rasterio.open(mask_tif, "w", **meta_dx) as dst:
         dst.write(mask, 1)
+
+    # ---- save boundary elevations of landslide mask (UI1)
+    boundary_elev_json = None
+    try:
+        before_asc = os.path.join(ctx.in_dir, "before.asc")
+        if os.path.exists(before_asc):
+            with rasterio.open(before_asc) as dem_src:
+                dem_bnd = dem_src.read(1).astype("float32")
+                dem_nd = dem_src.nodata
+                dem_tf = dem_src.transform
+                if dem_nd is not None:
+                    dem_bnd[dem_bnd == dem_nd] = np.nan
+
+            if dem_bnd.shape == mask.shape:
+                mask_bool = (mask > 0)
+                if np.any(mask_bool):
+                    eroded = binary_erosion(mask_bool, structure=np.ones((3, 3), dtype=bool), border_value=0)
+                    boundary = mask_bool & (~eroded)
+                    rr, cc = np.where(boundary)
+                    if rr.size > 0:
+                        xs, ys = rasterio.transform.xy(dem_tf, rr.tolist(), cc.tolist(), offset="center")
+                        z = dem_bnd[rr, cc]
+                        pts = []
+                        for i, (r, c, x, y, zv) in enumerate(zip(rr, cc, xs, ys, z)):
+                            pts.append({
+                                "index": int(i),
+                                "row": int(r),
+                                "col": int(c),
+                                "x": (float(x) if np.isfinite(x) else None),
+                                "y": (float(y) if np.isfinite(y) else None),
+                                "elev_m": (float(zv) if np.isfinite(zv) else None),
+                            })
+                        zf = z[np.isfinite(z)]
+                        payload = {
+                            "count": int(len(pts)),
+                            "mask_path": mask_tif.replace("\\", "/"),
+                            "dem_path": before_asc.replace("\\", "/"),
+                            "elev_stats_m": {
+                                "min": (float(np.min(zf)) if zf.size else None),
+                                "max": (float(np.max(zf)) if zf.size else None),
+                                "mean": (float(np.mean(zf)) if zf.size else None),
+                            },
+                            "boundary_points": pts,
+                        }
+                        boundary_elev_json = os.path.join(ctx.out_ui1, "landslide_boundary_elevations.json")
+                        with open(boundary_elev_json, "w", encoding="utf-8") as f:
+                            json.dump(payload, f, ensure_ascii=False, indent=2)
+            else:
+                print("[WARN] before.asc shape != landslide mask shape; skip boundary elevation export.")
+        else:
+            print("[WARN] before.asc not found; skip boundary elevation export.")
+    except Exception as e:
+        print(f"[WARN] Failed to save landslide boundary elevations: {e}")
 
     # ---- crop DEM with mask for UI3 (optional)
     dem_cropped = None
@@ -235,6 +288,7 @@ def run_detect(
     return {
         "mask_tif": mask_tif.replace("\\", "/"),
         "mask_png": mask_png.replace("\\", "/"),
+        "boundary_elev_json": (boundary_elev_json.replace("\\", "/") if boundary_elev_json else None),
         "threshold_m": float(threshold_m),
         "pixel_size_m": float(pix_m),
     }
@@ -245,17 +299,25 @@ def render_vectors(
     ctx: AnalysisContext,
     step: int = 25,
     scale: float = 0.1,
+    vector_color: str = "blue",
+    vector_width: float = 0.01,
+    vector_opacity: float = 1.0,
     min_m: float = 0.05,
     max_m: float = 2.0,
 ) -> dict:
     """
     Vẽ vector dX/dY (đơn vị mét) trên hillshade DEM.
     - Chỉ vẽ bên trong landslide_mask.tif (nếu có).
-    - ĐẢO dấu trục Y để phù hợp hệ toạ độ (hướng tăng dương lên Bắc):
-        U =  dX * px_m
-        V = -dY * py_m
+    - Đồng bộ kiểu UI2 (section_tab): mũi tên polygon liền khối.
+    - Hỗ trợ độ trong suốt vector qua vector_opacity (0..1).
+    - ĐẢO dấu trục Y để phù hợp hệ toạ độ map:
+        U =  dX * scale * 0.4 * size_mul
+        V = -dY * scale * 0.4 * size_mul
+      với size_mul = max(0.2, vector_width / 0.003).
     """
     import matplotlib.pyplot as plt
+    from matplotlib.colors import to_rgba
+    from matplotlib.patches import Polygon as MplPolygon
     from matplotlib.colors import LightSource
     from rasterio.plot import plotting_extent
     from scipy.ndimage import uniform_filter
@@ -314,25 +376,74 @@ def render_vectors(
     Xw = transform.c + cols * transform.a + transform.a / 2.0
     Yw = transform.f + rows * transform.e + transform.e / 2.0
 
-    # --- vector theo mét (ĐẢO dấu trục Y)
-    U = dX[rows, cols] * px_m
-    V = -dY[rows, cols] * py_m  # đảo dấu -> hướng Nam/Đông-Nam nếu dY dương (pixel xuống)
+    # --- đồng bộ style UI2 (section_tab):
+    # scale ảnh hưởng chiều dài; vector_width ảnh hưởng cả chiều dài + bề dày
+    # dạng mũi tên là polygon liền khối (thân + đầu).
+    base_width_ref = 0.003
+    size_mul = max(0.2, float(vector_width) / base_width_ref)
+    k = 0.4
+    scale_eff = max(float(scale), 1e-9)
+
+    dU = dX[rows, cols] * scale_eff * k * size_mul
+    dV = -dY[rows, cols] * scale_eff * k * size_mul
+    lengths = np.hypot(dU, dV)
+
+    pix_ref_m = (px_m + py_m) * 0.5 if (px_m > 0 and py_m > 0) else max(px_m, py_m, 1.0)
+    shaft_half_w_px = max(1.2, 0.5 * size_mul)
+    base_head_len_px = max(3.0, shaft_half_w_px * 3.2)
+    base_head_half_w_px = max(2.0, shaft_half_w_px * 2.75)
+
+    shaft_half_w = shaft_half_w_px * pix_ref_m
+    base_head_len = base_head_len_px * pix_ref_m
+    base_head_half_w = base_head_half_w_px * pix_ref_m
 
     out_png = os.path.join(ctx.out_ui1, "vectors_overlay.png")
-    plt.figure(figsize=(11, 8), dpi=140)
-    plt.imshow(hill, cmap="gray", extent=extent, origin="upper")
-    plt.quiver(
-        Xw, Yw, U, V,
-        color="blue", angles="xy",
-        scale_units="xy", scale=(1.0 / max(scale, 1e-6)),
-        width=0.0018, headwidth=6, headlength=7
-    )
-    plt.title(f"Displacement Vectors (step={step}, scale={scale}, {min_m}–{max_m} m) — masked")
-    plt.xlabel("X (m)"); plt.ylabel("Y (m)")
-    plt.grid(True, linestyle="--", linewidth=0.4, alpha=0.5)
-    plt.tight_layout()
-    plt.savefig(out_png, dpi=260)
-    plt.close()
+    fig, ax = plt.subplots(figsize=(11, 8), dpi=140)
+    ax.imshow(hill, cmap="gray", extent=extent, origin="upper")
+    alpha = max(0.0, min(1.0, float(vector_opacity)))
+    color_rgba = to_rgba(vector_color, alpha=alpha)
+
+    for x0, y0, u, v, ll in zip(Xw, Yw, dU, dV, lengths):
+        if not np.isfinite(ll) or ll <= 1e-9:
+            continue
+        end_x = float(x0 + u)
+        end_y = float(y0 + v)
+        dxv = end_x - float(x0)
+        dyv = end_y - float(y0)
+        length = float(np.hypot(dxv, dyv))
+        if not np.isfinite(length) or length <= 1e-9:
+            continue
+
+        ux = dxv / length
+        uy = dyv / length
+        nx = -uy
+        ny = ux
+
+        head_len = min(base_head_len, length * 0.45)
+        head_len = max(head_len, shaft_half_w * 1.8)
+        head_half_w = max(base_head_half_w, shaft_half_w * 1.05)
+        neck_x = end_x - ux * head_len
+        neck_y = end_y - uy * head_len
+
+        poly = [
+            (float(x0 + nx * shaft_half_w), float(y0 + ny * shaft_half_w)),
+            (float(neck_x + nx * shaft_half_w), float(neck_y + ny * shaft_half_w)),
+            (float(neck_x + nx * head_half_w), float(neck_y + ny * head_half_w)),
+            (float(end_x), float(end_y)),
+            (float(neck_x - nx * head_half_w), float(neck_y - ny * head_half_w)),
+            (float(neck_x - nx * shaft_half_w), float(neck_y - ny * shaft_half_w)),
+            (float(x0 - nx * shaft_half_w), float(y0 - ny * shaft_half_w)),
+        ]
+        patch = MplPolygon(poly, closed=True, facecolor=color_rgba, edgecolor="none", linewidth=0.0, zorder=5)
+        ax.add_patch(patch)
+
+    ax.set_title(f"Displacement Vectors (step={step}, scale={scale}, {min_m}–{max_m} m) — masked")
+    ax.set_xlabel("X (m)")
+    ax.set_ylabel("Y (m)")
+    ax.grid(True, linestyle="--", linewidth=0.4, alpha=0.5)
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=260)
+    plt.close(fig)
     return {"vectors_png": out_png.replace("\\", "/")}
 
 
