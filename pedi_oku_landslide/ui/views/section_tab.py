@@ -18,7 +18,7 @@ from PyQt5.QtWidgets import (
     QSpinBox, QDoubleSpinBox, QGridLayout, QSizePolicy, QComboBox, QMenu,
 )
 
-from .ui.ui1_viewer import UI1Viewer
+from pedi_oku_landslide.ui.components.image_pair_viewer import UI1Viewer
 
 # --- tiny layout helpers (alias) ---
 def HBox():

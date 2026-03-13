@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LightSource
 from pedi_oku_landslide.config.settings import load_config
 from pedi_oku_landslide.core.gis_utils import hillshade
-from pedi_oku_landslide.project.path_manager import AnalysisContext
+from pedi_oku_landslide.services.session_store import AnalysisContext
 def update_ingest_processed(run_dir: str, **kwargs):
     """
     Cập nhật các field trong ingest_meta.json["processed"].

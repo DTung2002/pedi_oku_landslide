@@ -8,11 +8,11 @@ from PyQt5.QtWidgets import (
 )
 import os, sys
 from datetime import datetime
-from pedi_oku_landslide.project.path_manager import (
+from pedi_oku_landslide.services.session_store import (
     create_context, AnalysisContext, load_context_from_run_dir, is_valid_run_dir
 )
 from ..widgets.file_picker import FilePicker
-from ..views.ui.ui1_viewer import UI1Viewer
+from pedi_oku_landslide.ui.components.image_pair_viewer import UI1Viewer
 from pedi_oku_landslide.pipeline.ingest import run_ingest
 from pedi_oku_landslide.pipeline.steps.step_smooth import run_smooth
 from pedi_oku_landslide.pipeline.steps.step_sad import run_sad

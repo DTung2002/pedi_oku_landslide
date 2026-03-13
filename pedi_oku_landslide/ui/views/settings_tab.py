@@ -1,5 +1,5 @@
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QLabel, QComboBox
-from project.settings_store import load_settings, save_settings
+from pedi_oku_landslide.services.app_settings import load_settings, save_settings
 
 class SettingsTab(QWidget):
     SCALES = [50, 75, 100, 125, 150, 200]

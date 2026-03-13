@@ -13,7 +13,8 @@ from .views.section_tab import SectionSelectionTab
 from .views.curve_tab import CurveAnalyzeTab
 from .views.ui4_frontend import UI4FrontendTab
 from .views.settings_dialog import SettingsDialog
-from pedi_oku_landslide.project.settings_store import load_settings
+from pedi_oku_landslide.app.workflow import MainWorkflowCoordinator
+from pedi_oku_landslide.services.app_settings import load_settings
 from PyQt5.QtGui import QIcon
 
 
@@ -191,6 +192,7 @@ class MainWindow(QMainWindow):
         self.internal_root = internal_root
         self.app = app
         self.settings = load_settings(self.app_root)
+        self.workflow = MainWorkflowCoordinator(self)
         self.setWindowIcon(get_app_icon(self.internal_root))
         # Root central
         central = QWidget()
@@ -265,78 +267,13 @@ class MainWindow(QMainWindow):
         # Khóa tab 2–3 khi mở app:
         self.tabs.setCurrentIndex(self._idx_analyze)
 
-        # Kết nối tín hiệu giữa các tab
-        if hasattr(self.analyze_tab, "vectors_rendered"):
-            self.analyze_tab.vectors_rendered.connect(self._on_vectors_ready)
-        else:
-            self.analyze_tab.vectors_ready.connect(self._on_vectors_ready)
-
-        if hasattr(self.section_tab, "sections_confirmed"):
-            self.section_tab.sections_confirmed.connect(self._on_sections_confirmed)
-        if hasattr(self.curve_tab, "curve_saved"):
-            self.curve_tab.curve_saved.connect(self._on_curve_saved)
+        self.workflow.wire()
 
         self.setWindowTitle("PEDI Landslide Analyzer")
         self.resize(1000, 700)
         font_family = load_inter_fonts(self.internal_root)
         self.font_family = font_family
         self.apply_scale(self.settings.ui_scale_percent)
-
-    #  Flow handlers
-    def _on_vectors_ready(self, project: str, run_label: str, run_dir: str) -> None:
-        try:
-            if getattr(self, "section_tab", None):
-                # Lấy step/scale hiện tại từ AnalyzeTab (UI1)
-                vec_step = None
-                vec_scale = None
-                if hasattr(self.analyze_tab, "spin_vec_step"):
-                    try:
-                        vec_step = int(self.analyze_tab.spin_vec_step.value())
-                    except Exception:
-                        pass
-                if hasattr(self.analyze_tab, "spin_vec_scale"):
-                    try:
-                        vec_scale = float(self.analyze_tab.spin_vec_scale.value())
-                    except Exception:
-                        pass
-
-                self.section_tab.set_context(
-                    project,
-                    run_label,
-                    run_dir,
-                    vec_step=vec_step,
-                    vec_scale=vec_scale,
-                )
-
-            if getattr(self, "curve_tab", None):
-                self.curve_tab.set_context(project, run_label, run_dir)
-            if getattr(self, "ui4_tab", None):
-                self.ui4_tab.set_context(project, run_label, run_dir)
-
-            if hasattr(self, "_idx_section"):
-                self.tabs.setCurrentIndex(self._idx_section)
-        except Exception as e:
-            QMessageBox.warning(self, "Error", f"Cannot open Section tab:\n{e}")
-
-
-    def _on_sections_confirmed(self, project: str, run_label: str, run_dir: str) -> None:
-        try:
-            if getattr(self, "curve_tab", None):
-                self.curve_tab.set_context(project, run_label, run_dir)
-            if getattr(self, "ui4_tab", None):
-                self.ui4_tab.set_context(project, run_label, run_dir)
-            # Chuyển sang Curve Analyze ngay sau khi confirm
-            if hasattr(self, "_idx_curve"):
-                self.tabs.setCurrentIndex(self._idx_curve)
-        except Exception as e:
-            QMessageBox.warning(self, "Error", f"Cannot open Curve tab:\n{e}")
-
-    def _on_curve_saved(self, curve_json_path: str) -> None:
-        try:
-            if getattr(self, "ui4_tab", None):
-                self.ui4_tab.on_upstream_curve_saved(curve_json_path)
-        except Exception as e:
-            QMessageBox.warning(self, "Error", f"Cannot update UI4 tab:\n{e}")
 
     def _on_new_session_clicked(self) -> None:
         reply = QMessageBox.question(
@@ -361,15 +298,7 @@ class MainWindow(QMainWindow):
 
 
     def _reset_session(self) -> None:
-        if hasattr(self, "analyze_tab"):
-            self.analyze_tab.reset_session()
-        if hasattr(self, "section_tab"):
-            self.section_tab.reset_session()
-        if hasattr(self, "curve_tab"):
-            self.curve_tab.reset_session()
-        if hasattr(self, "ui4_tab"):
-            self.ui4_tab.reset_session()
-        self.tabs.setCurrentIndex(self._idx_analyze)
+        self.workflow.reset_session()
 
     #  UI scale & stylesheet
     def apply_scale(self, percent: int) -> None:

@@ -15,7 +15,7 @@ try:
 except Exception:
     cv2 = None
 
-from pedi_oku_landslide.project.path_manager import AnalysisContext
+from pedi_oku_landslide.services.session_store import AnalysisContext
 from pedi_oku_landslide.pipeline.ingest import update_ingest_processed
 
 

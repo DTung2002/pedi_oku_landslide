@@ -15,7 +15,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt
 
-from pedi_oku_landslide.project.settings_store import (
+from pedi_oku_landslide.services.app_settings import (
     load_settings,
     save_settings,
     AppSettings,

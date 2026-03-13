@@ -12,7 +12,7 @@ from rasterio.features import rasterize
 from rasterio.plot import plotting_extent
 from rasterio.warp import Resampling, reproject
 
-from pedi_oku_landslide.project.path_manager import AnalysisContext
+from pedi_oku_landslide.services.session_store import AnalysisContext
 
 
 def _parse_lwpolylines_from_dxf(

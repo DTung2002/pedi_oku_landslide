@@ -7,7 +7,7 @@ from rasterio.transform import Affine
 from matplotlib.colors import LightSource
 import matplotlib.pyplot as plt
 
-from pedi_oku_landslide.project.path_manager import AnalysisContext
+from pedi_oku_landslide.services.session_store import AnalysisContext
 from pedi_oku_landslide.core.analysis import smooth_gaussian
 
 def _save_preview_png(arr: np.ndarray, transform: Affine, out_png: str, title: str):
