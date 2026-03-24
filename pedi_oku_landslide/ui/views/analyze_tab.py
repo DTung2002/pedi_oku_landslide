@@ -137,13 +137,21 @@ class AnalyzeTab(QWidget):
         grp_detect = QGroupBox("Detect Landslide Zone")
         lay_detect = QVBoxLayout(grp_detect)
 
-        lab_smooth = QLabel("Gaussian σ (px):")
-        self.spin_sigma = QDoubleSpinBox()
-        self.spin_sigma.setRange(0.0, 50.0)
-        self.spin_sigma.setSingleStep(0.5)
-        self.spin_sigma.setDecimals(1)
-        self.spin_sigma.setValue(2.0)
-        self.spin_sigma.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        # ---- Smooth ----
+        self.lab_smooth_method = QLabel("Smooth Method:")
+        self.cmb_smooth_method = QComboBox()
+        self.cmb_smooth_method.addItems(["Gaussian", "Mean"])
+        self.cmb_smooth_method.setCurrentText("Gaussian")
+        self.cmb_smooth_method.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.cmb_smooth_method.currentTextChanged.connect(self._on_smooth_method_changed)
+
+        self.lab_smooth_param = QLabel("Gaussian σ (px):")
+        self.spin_smooth_param = QDoubleSpinBox()
+        self.spin_smooth_param.setRange(0.0, 50.0)
+        self.spin_smooth_param.setSingleStep(0.5)
+        self.spin_smooth_param.setDecimals(1)
+        self.spin_smooth_param.setValue(2.0)
+        self.spin_smooth_param.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.btn_smooth = QPushButton("Smooth")
         self.btn_smooth.setEnabled(False)  # bật sau Confirm Input
         self.btn_smooth.clicked.connect(self._on_smooth)
@@ -170,20 +178,22 @@ class AnalyzeTab(QWidget):
         self.btn_detect = QPushButton("Detect")
         self.btn_detect.setEnabled(False)  # bật sau SAD
         self.btn_detect.clicked.connect(self._on_detect)
-        # Three aligned rows: label | input | action button.
+        # Aligned rows: label | input | action button.
         grid_detect = QGridLayout()
         grid_detect.setHorizontalSpacing(8)
         grid_detect.setVerticalSpacing(6)
         grid_detect.setColumnStretch(1, 1)
-        grid_detect.addWidget(lab_smooth, 0, 0)
-        grid_detect.addWidget(self.spin_sigma, 0, 1)
-        grid_detect.addWidget(self.btn_smooth, 0, 2)
-        grid_detect.addWidget(lab_method, 1, 0)
-        grid_detect.addWidget(self.cmb_method, 1, 1)
-        grid_detect.addWidget(self.btn_calc_sad, 1, 2)
-        grid_detect.addWidget(lab_detect, 2, 0)
-        grid_detect.addWidget(self.spin_detect_thr, 2, 1)
-        grid_detect.addWidget(self.btn_detect, 2, 2)
+        grid_detect.addWidget(self.lab_smooth_method, 0, 0)
+        grid_detect.addWidget(self.cmb_smooth_method, 0, 1)
+        grid_detect.addWidget(self.lab_smooth_param, 1, 0)
+        grid_detect.addWidget(self.spin_smooth_param, 1, 1)
+        grid_detect.addWidget(self.btn_smooth, 1, 2)
+        grid_detect.addWidget(lab_method, 2, 0)
+        grid_detect.addWidget(self.cmb_method, 2, 1)
+        grid_detect.addWidget(self.btn_calc_sad, 2, 2)
+        grid_detect.addWidget(lab_detect, 3, 0)
+        grid_detect.addWidget(self.spin_detect_thr, 3, 1)
+        grid_detect.addWidget(self.btn_detect, 3, 2)
         lay_detect.addLayout(grid_detect)
 
         # ---- Manual mask from DXF (optional) ----
@@ -547,12 +557,19 @@ class AnalyzeTab(QWidget):
         except Exception as e:
             self._err(f"Error: {e}")
 
+    def _on_smooth_method_changed(self, text: str) -> None:
+        if text == "Gaussian":
+            self.lab_smooth_param.setText("Gaussian σ (px):")
+        else:
+            self.lab_smooth_param.setText("Mean Radius (px):")
+
     def _on_smooth(self) -> None:
         if not self._last_run_dir:
             self._warn("Please run 'Confirm Input' first.")
             return
         try:
-            sigma = float(self.spin_sigma.value())
+            method = self.cmb_smooth_method.currentText()
+            param = float(self.spin_smooth_param.value())
 
             # reconstruct ctx from self._last_run_dir
             parts = os.path.normpath(self._last_run_dir).split(os.sep)
@@ -573,10 +590,10 @@ class AnalyzeTab(QWidget):
                 out_ui3=os.path.join(self._last_run_dir, "ui3"),
             )
 
-            out = run_smooth(ctx, sigma_px=sigma)
+            out = run_smooth(ctx, method=method, param_px=param)
 
             self._ok(
-                f"Smooth completed (σ={sigma}px).\n"
+                f"Smooth completed (method={method}, param={param}px).\n"
                 f"Outputs:\n"
                 f" - {out['before_tif']}\n"
                 f" - {out['after_tif']}"
@@ -1126,7 +1143,8 @@ class AnalyzeTab(QWidget):
 
         # 5) Reset các thông số xử lý
         try:
-            self.spin_sigma.setValue(2.0)
+            self.cmb_smooth_method.setCurrentText("Gaussian")
+            self.spin_smooth_param.setValue(2.0)
         except Exception:
             pass
         try:

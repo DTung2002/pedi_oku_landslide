@@ -8,7 +8,7 @@ from matplotlib.colors import LightSource
 import matplotlib.pyplot as plt
 
 from pedi_oku_landslide.services.session_store import AnalysisContext
-from pedi_oku_landslide.core.analysis import smooth_gaussian
+from pedi_oku_landslide.core.analysis import smooth_gaussian, smooth_mean
 
 def _save_preview_png(arr: np.ndarray, transform: Affine, out_png: str, title: str):
     # hillshade + axes + grid (giống ingest)
@@ -35,13 +35,13 @@ def _save_preview_png(arr: np.ndarray, transform: Affine, out_png: str, title: s
     plt.savefig(out_png, dpi=220)
     plt.close()
 
-def run_smooth(ctx: AnalysisContext, sigma_px: float = 2.0) -> dict:
+def run_smooth(ctx: AnalysisContext, method: str = "Gaussian", param_px: float = 2.0) -> dict:
     """
-    Smooth both BEFORE.asc and AFTER.asc using Gaussian filter (sigma in pixels).
+    Smooth both BEFORE.asc and AFTER.asc using the specified method (Gaussian or Mean).
     Outputs:
       - GeoTIFFs: ui1/before_asc_smooth.tif, ui1/after_asc_smooth.tif
       - PNG previews: ui1/before_asc_smooth.png, ui1/after_asc_smooth.png
-      - JSON: ui1/smooth_meta.json (sigma)
+      - JSON: ui1/smooth_meta.json (method, param_px)
     Returns dict with output paths.
     """
     # ---- read BEFORE.asc
@@ -67,8 +67,12 @@ def run_smooth(ctx: AnalysisContext, sigma_px: float = 2.0) -> dict:
         raise ValueError("BEFORE and AFTER have different CRS. Please reproject first.")
 
     # ---- smooth
-    b_sm = smooth_gaussian(b_arr, sigma_px=sigma_px)
-    a_sm = smooth_gaussian(a_arr, sigma_px=sigma_px)
+    if method == "Mean":
+        b_sm = smooth_mean(b_arr, radius_px=param_px)
+        a_sm = smooth_mean(a_arr, radius_px=param_px)
+    else:
+        b_sm = smooth_gaussian(b_arr, sigma_px=param_px)
+        a_sm = smooth_gaussian(a_arr, sigma_px=param_px)
 
     # ---- write GeoTIFFs
     out_b_tif = os.path.join(ctx.out_ui1, "before_asc_smooth.tif")
@@ -85,13 +89,13 @@ def run_smooth(ctx: AnalysisContext, sigma_px: float = 2.0) -> dict:
     # ---- PNG previews
     out_b_png = os.path.join(ctx.out_ui1, "before_asc_smooth.png")
     out_a_png = os.path.join(ctx.out_ui1, "after_asc_smooth.png")
-    _save_preview_png(b_sm, b_transform, out_b_png, f"before.asc (smooth σ={sigma_px}px)")
-    _save_preview_png(a_sm, a_transform, out_a_png, f"after.asc (smooth σ={sigma_px}px)")
+    _save_preview_png(b_sm, b_transform, out_b_png, f"before.asc (smooth {method} param={param_px}px)")
+    _save_preview_png(a_sm, a_transform, out_a_png, f"after.asc (smooth {method} param={param_px}px)")
 
     # ---- meta
     meta_path = os.path.join(ctx.out_ui1, "smooth_meta.json")
     with open(meta_path, "w", encoding="utf-8") as f:
-        json.dump({"sigma_px": float(sigma_px)}, f, ensure_ascii=False, indent=2)
+        json.dump({"method": method, "param_px": float(param_px)}, f, ensure_ascii=False, indent=2)
 
     return {
         "before_tif": out_b_tif.replace("\\", "/"),

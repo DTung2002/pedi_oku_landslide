@@ -1,4 +1,4 @@
-﻿# --- ADD/UPDATE imports ở đầu file ---
+# --- ADD/UPDATE imports ở đầu file ---
 import math
 import os, json
 from typing import Optional, Dict, Any, List, Callable
@@ -18,7 +18,7 @@ from typing import Tuple, List, Dict, Optional
 # backend UI3 đã có sẵn
 from pedi_oku_landslide.pipeline.runners.ui3_backend import (
     auto_paths, list_lines, compute_profile, render_profile_png,
-    clamp_groups_to_slip, auto_group_profile_by_criteria, auto_group_profile,
+    clamp_groups_to_slip, auto_group_profile_by_criteria,
     estimate_slip_curve, fit_bezier_smooth_curve, evaluate_nurbs_curve
 )
 from PyQt5.QtGui import QPen, QColor
@@ -1496,34 +1496,10 @@ class CurveAnalyzeTab(QWidget):
                 self._err("[UI3] Empty profile.")
                 return
 
-            # 3) Chọn thuật toán Auto-group
-            dlg = QMessageBox(self)
-            dlg.setIcon(QMessageBox.Question)
-            dlg.setWindowTitle("Auto Group Method")
-            dlg.setText("Select grouping method:")
-            dlg.setWindowFlag(Qt.WindowCloseButtonHint, True)
-            dlg.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
-            dlg.setStandardButtons(QMessageBox.NoButton)
-            btn_old = dlg.addButton("Old", QMessageBox.ActionRole)
-            btn_new = dlg.addButton("New", QMessageBox.ActionRole)
-            btn_cancel = dlg.addButton("Cancel", QMessageBox.RejectRole)
-            dlg.exec_()
-
-            clicked = dlg.clickedButton()
-            clicked_text = clicked.text().strip() if clicked is not None else ""
-            if clicked_text == "New":
-                # UI label "New" = criteria mới (internal legacy key kept as "traditional")
-                self._log("[UI3] Auto Group method: New -> new criteria (curve: NURBS)")
-                groups = auto_group_profile_by_criteria(prof)
-                group_method = "traditional"
-            elif clicked_text == "Old":
-                # UI label "Old" = tiêu chí cũ (internal legacy key kept as "new")
-                self._log("[UI3] Auto Group method: Old -> legacy criteria (curve: Bezier)")
-                groups = auto_group_profile(prof)
-                group_method = "new"
-            else:
-                self._log("[UI3] Auto Group canceled.")
-                return
+            # 3) Auto-group (Criteria-based method 2)
+            self._log("[UI3] Auto Group method: Criteria-based (NURBS)")
+            groups = auto_group_profile_by_criteria(prof)
+            group_method = "traditional"
 
             groups = clamp_groups_to_slip(prof, groups)
             if not groups:
@@ -1593,10 +1569,7 @@ class CurveAnalyzeTab(QWidget):
                 except Exception:
                     groups = []
             if not groups:
-                if curve_method == "nurbs":
-                    groups = auto_group_profile_by_criteria(prof)
-                else:
-                    groups = auto_group_profile(prof)
+                groups = auto_group_profile_by_criteria(prof)
                 groups = clamp_groups_to_slip(prof, groups)
                 if not groups:
                     self._warn("[UI3] Auto grouping produced no segments within slip zone.");

@@ -1,5 +1,5 @@
 import numpy as np
-from scipy.ndimage import gaussian_filter
+from scipy.ndimage import gaussian_filter, uniform_filter
 
 def smooth_gaussian(arr: np.ndarray, sigma_px: float) -> np.ndarray:
     """
@@ -15,6 +15,28 @@ def smooth_gaussian(arr: np.ndarray, sigma_px: float) -> np.ndarray:
     work = np.where(nan_mask, med, arr)
     # kernel size ~ 6*sigma + 1 (truncate=3.0 => radius=3*sigma)
     out = gaussian_filter(work, sigma=sigma_px, truncate=3.0)
+    # khôi phục NaN
+    out[nan_mask] = np.nan
+    return out.astype(arr.dtype, copy=False)
+
+def smooth_mean(arr: np.ndarray, radius_px: float) -> np.ndarray:
+    """
+    Mean smoothing (average) in pixel units.
+    - arr: 2D float32/float64 array
+    - radius_px: radius of the window in pixels (e.g., radius 1 = 3x3 window)
+    """
+    if radius_px <= 0:
+        return arr
+    # giữ NaN: tạm thời thay bằng median để tránh rách, sau đó phục hồi NaN
+    nan_mask = ~np.isfinite(arr)
+    med = float(np.nanmedian(arr)) if np.isfinite(np.nanmedian(arr)) else 0.0
+    work = np.where(nan_mask, med, arr)
+    
+    # uniform_filter calculates the multidimensional uniform filter.
+    # size = 2 * radius + 1
+    size = max(1, int(round(radius_px * 2 + 1)))
+    out = uniform_filter(work, size=size)
+    
     # khôi phục NaN
     out[nan_mask] = np.nan
     return out.astype(arr.dtype, copy=False)
