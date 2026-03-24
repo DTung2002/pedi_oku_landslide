@@ -6,10 +6,8 @@ import numpy as np
 import geopandas as gpd
 import rasterio
 from shapely.geometry import LineString
-try:
-    from scipy.signal import savgol_filter
-except Exception:
-    savgol_filter = None
+# savgol_filter disabled as per user request (focus on UI1 Mean Smoothing)
+savgol_filter = None
 import matplotlib
 matplotlib.use("Agg")  # headless
 import pandas as pd
@@ -41,23 +39,26 @@ def auto_paths() -> dict:
                 pass
 
     dem = pick_first_exists([
+        _out("UI1", "before_asc_smooth.tif"),
         _out("UI1", "step1_crop", "before_ground.asc"),
         _out("UI1", "step1_crop", "before_ground.tif"),
         js.get("dem_ground_path", ""),
-        _out("UI1", "step1_crop", "before_crop.asc"),
     ])
 
     dx = pick_first_exists([
+        _out("UI1", "dX.asc"),
         _out("UI1", "step2_sad", "dX.asc"),
         js.get("dx_path", ""),
     ])
 
     dy = pick_first_exists([
+        _out("UI1", "dY.asc"),
         _out("UI1", "step2_sad", "dY.asc"),
         js.get("dy_path", ""),
     ])
 
     dz = pick_first_exists([
+        _out("UI1", "dZ.asc"),
         _out("UI1", "step7_slipzone", "dZ_slipzone.asc"),
         _out("UI1", "step5_dz", "dZ.asc"),
         js.get("dz_path", ""),
@@ -69,6 +70,7 @@ def auto_paths() -> dict:
     ])
 
     slip = pick_first_exists([
+        _out("UI1", "slip_zone.asc"),
         _out("UI1", "step7_slipzone", "slip_zone.asc"),
         js.get("slip_path", ""),
     ])
@@ -405,14 +407,8 @@ def compute_profile(
             d_para[~keep] = np.nan
             theta_deg[~keep] = np.nan
 
-    # smooth ground
-    if xs.size >= smooth_win and smooth_win % 2 == 1:
-        try:
-            elev_s = savgol_filter(elev, smooth_win, smooth_poly, mode="interp")
-        except Exception:
-            elev_s = elev.copy()
-    else:
-        elev_s = elev.copy()
+    # smooth ground (DISABLED SAVITZKY-GOLAY, use UI1 smoothing instead)
+    elev_s = elev.copy()
 
     for d in (dem_ds, dx_ds, dy_ds, dz_ds): d.close()
     if mask_bool is not None and slip_only:
@@ -614,11 +610,7 @@ def render_profile_png(
                 gradient_deg = np.degrees(np.arctan2(dz_s[finite], d_para_s[finite]))
                 gradient_deg = ((gradient_deg + 90.0) % 180.0) - 90.0
 
-                if savgol_filter is not None and gradient_deg.size >= 9:
-                    try:
-                        gradient_deg = savgol_filter(gradient_deg, 9, 2, mode="interp")
-                    except Exception:
-                        pass
+                # savgol_filter disabled
 
                 ax2.plot(ch, gradient_deg, lw=2.2, color="#2ca02c", zorder=5, label="Gradient")
 
@@ -689,11 +681,7 @@ def render_profile_png(
                 # Vector slope angle (deg), normalized to [-90, 90].
                 gradient_deg = np.degrees(np.arctan2(dz[finite_th], d_para[finite_th]))
                 gradient_deg = ((gradient_deg + 90.0) % 180.0) - 90.0
-                if savgol_filter is not None and gradient_deg.size >= 9:
-                    try:
-                        gradient_deg = savgol_filter(gradient_deg, 9, 2, mode="interp")
-                    except Exception:
-                        pass
+                # savgol_filter disabled
                 ax2.plot(chain_f, gradient_deg, color="#2ca02c", lw=2.4, zorder=5, label="Gradient")
 
             ax2.axhline(0.0, color="0.5", lw=1.0, zorder=1)
@@ -1184,10 +1172,7 @@ def estimate_slip_curve(
     min_depth: float = 1.0,
 ) -> dict:
 
-    try:
-        from scipy.signal import savgol_filter as _sg
-    except Exception:
-        _sg = None
+    _sg = None
 
     chain = np.asarray(prof.get("chain"), float)
     elevg = np.asarray(prof.get("elev_s"), float)
