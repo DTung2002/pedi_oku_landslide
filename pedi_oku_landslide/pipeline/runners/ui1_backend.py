@@ -461,6 +461,135 @@ def run_UI1_2_sad_original(
         {"dX_path": dx_path, "dY_path": dy_path}
     )
 
+
+def run_UI1_2_sad_gpu(before_path, after_path, output_dir="output/UI1/step2_sad_gpu",
+                      patch_size_m=20, search_radius_m=2, cellsize=0.2, stride_m=0.2):
+    """
+    GPU-accelerated SAD using PyTorch.
+    Uses vectorized operations across all pixels for each search offset.
+    """
+    import os, time
+    import numpy as np
+    import torch
+    import torch.nn.functional as F
+    from scipy.ndimage import uniform_filter
+    from matplotlib.colors import LightSource
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    # 1) Load data
+    before, profile = load_asc(before_path)
+    after, _ = load_asc(after_path)
+
+    # 2) Hillshade prep (similar to run_UI1_2_sad)
+    def _prep_hs(arr):
+        med = np.nanmedian(arr)
+        if not np.isfinite(med): med = 0.0
+        arr = np.where(~np.isfinite(arr), med, arr).astype(np.float32)
+        k = max(3, int(round(2.0 / max(cellsize, 1e-6))))
+        arr_s = uniform_filter(arr, size=k)
+        ls = LightSource(azdeg=315, altdeg=45)
+        hs = ls.hillshade(arr_s, vert_exag=1.0).astype(np.float32)
+        return hs
+
+    before_hs = _prep_hs(before)
+    after_hs = _prep_hs(after)
+    H, W = before_hs.shape
+
+    # 3) Params
+    PATCH = int(round(patch_size_m / max(cellsize, 1e-6)))
+    if PATCH < 3: PATCH = 3
+    if PATCH % 2 == 0: PATCH += 1
+    HALF = PATCH // 2
+    R = int(round(search_radius_m / max(cellsize, 1e-6)))
+    STRIDE = max(1, int(round(stride_m / max(cellsize, 1e-6))))
+
+    # 4) PyTorch setup
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"[SAD GPU] Using device: {device}")
+
+    b_t = torch.from_numpy(before_hs).to(device).unsqueeze(0).unsqueeze(0) # (1, 1, H, W)
+    a_t = torch.from_numpy(after_hs).to(device).unsqueeze(0).unsqueeze(0) # (1, 1, H, W)
+
+    # Pad after_t for search
+    pad = R + HALF
+    a_pad = F.pad(a_t, (pad, pad, pad, pad), mode='reflect')
+
+    best_sad = torch.full((H, W), float('inf'), device=device)
+    best_dx = torch.zeros((H, W), device=device)
+    best_dy = torch.zeros((H, W), device=device)
+
+    # 5) Vectorized search loop
+    # Optimization: We only care about pixels in the grid defined by STRIDE
+    # But F.avg_pool2d will handle the stride for us.
+    
+    start_time = time.time()
+    for dy_px in range(-R, R + 1):
+        for dx_px in range(-R, R + 1):
+            # Extract shifted 'after' region
+            # Center is at (pad, pad) in a_pad
+            y_start = pad + dy_px - HALF
+            x_start = pad + dx_px - HALF
+            a_slice = a_pad[:, :, y_start : y_start + H + 2*HALF, x_start : x_start + W + 2*HALF]
+            
+            # Compute SAD for all patches at once using avg_pool2d
+            # diff shape: (1, 1, H + 2*HALF, W + 2*HALF)
+            diff = torch.abs(b_t - a_slice[:, :, HALF : HALF + H, HALF : HALF + W]) # Simplified diff
+            # Wait, the above is just pixel-wise diff. We need sum over PATCHxPATCH window.
+            
+            # Correct logic:
+            # We want for each (i, j), sum|before[i-HALF:i+HALF+1, j-HALF:j+HALF+1] - after[i+dy-HALF:..., j+dx-HALF:...]|
+            # This is exactly a convolution with a filter of all ones, OR avg_pool2d.
+            
+            # slice 'after' to match 'before' but shifted
+            a_shift = a_pad[:, :, pad + dy_px : pad + dy_px + H, pad + dx_px : pad + dx_px + W]
+            diff = torch.abs(b_t - a_shift)
+            
+            # sum over window
+            sad_map = F.avg_pool2d(diff, kernel_size=PATCH, stride=1, padding=HALF) * (PATCH * PATCH)
+            
+            # update best
+            mask = sad_map < best_sad
+            best_sad[mask] = sad_map[mask]
+            best_dx[mask] = dx_px
+            best_dy[mask] = dy_px
+
+    # 6) Apply stride and convert back
+    # The frontend expects dX, dY for the FULL grid but filled only at STRIDE locations?
+    # Or just the full grid? run_UI1_2_sad fills everything but loop skips? 
+    # Actually run_UI1_2_sad fills everything with NaN first.
+    
+    dX_np = np.full((H, W), np.nan, dtype=np.float32)
+    dY_np = np.full((H, W), np.nan, dtype=np.float32)
+    
+    # We only take the results at indices specified by STRIDE
+    rows = np.arange(HALF + R, H - HALF - R, STRIDE)
+    cols = np.arange(HALF + R, W - HALF - R, STRIDE)
+    
+    if len(rows) > 0 and len(cols) > 0:
+        # Indexing in PyTorch
+        res_dx = best_dx[0, 0, rows[:, None], cols].cpu().numpy()
+        res_dy = best_dy[0, 0, rows[:, None], cols].cpu().numpy()
+        
+        # dX dương sang phải; dY dương hướng Bắc (trục ảnh y ngược).
+        # off_x_px * cellsize, -off_y_px * cellsize
+        for idx_i, i in enumerate(rows):
+            for idx_j, j in enumerate(cols):
+                dX_np[i, j] = res_dx[idx_i, idx_j] * cellsize
+                dY_np[i, j] = -res_dy[idx_i, idx_j] * cellsize
+
+    # 7) Save
+    dx_path = os.path.join(output_dir, "dX.asc")
+    dy_path = os.path.join(output_dir, "dY.asc")
+    save_asc(dx_path, dX_np, profile)
+    save_asc(dy_path, dY_np, profile)
+    
+    elapsed = time.time() - start_time
+    return (
+        f"[✓] GPU SAD complete ({elapsed:.2f}s) | device={device}, stride_px={STRIDE}, patch_px={PATCH}, search_px={R}",
+        {"dX_path": dx_path, "dY_path": dy_path}
+    )
+
 # Bước 3: UI1_3_plot_vector
 def run_UI1_3_plot_vector(
     dem_path, dx_path, dy_path, slip_zone_path,

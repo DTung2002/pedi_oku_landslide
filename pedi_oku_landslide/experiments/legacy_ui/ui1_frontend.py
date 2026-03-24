@@ -27,8 +27,8 @@ from PyQt5.QtWidgets import (
 )
 
 from pedi_oku_landslide.pipeline.runners.ui1_backend import (
-    run_UI1_1_crop, run_UI1_2_sad, run_UI1_2_sad_original, run_UI1_3_plot_vector_geotiff,
-    run_UI1_4_dz, run_UI1_5_detect_slipzone
+    run_UI1_1_crop, run_UI1_2_sad, run_UI1_2_sad_original, run_UI1_2_sad_gpu,
+    run_UI1_3_plot_vector_geotiff, run_UI1_4_dz, run_UI1_5_detect_slipzone
 )
 
 class ToggleableGroup(QGroupBox):
@@ -128,20 +128,9 @@ class UI1App(QWidget):
         # === SAD engine selector (single) ===
         left_panel.addWidget(QLabel("SAD engine:"))
         self.sad_engine_combo = QComboBox()
-        self.sad_engine_combo.addItems(["OpenCV (fast)", "Original (accurate)"])
-        self.sad_engine_combo.setCurrentIndex(0)  # default: OpenCV
+        self.sad_engine_combo.addItems(["GPU (Ultra fast)", "OpenCV (fast)", "Original (accurate)"])
+        self.sad_engine_combo.setCurrentIndex(0)  # default: GPU
         left_panel.addWidget(self.sad_engine_combo)
-        # --- Disable "Original (accurate)" option ---
-        m = self.sad_engine_combo.model()
-        it = m.item(1)  # index 1 = "Original (accurate)"
-        if it is not None:
-            it.setEnabled(False)  # bôi xám
-            it.setSelectable(False)  # không cho chọn
-            it.setForeground(Qt.gray)  # màu chữ xám
-        # tooltip để người dùng biết lý do
-        self.sad_engine_combo.setItemData(1, "Disabled: using OpenCV SAD for now", Qt.ToolTipRole)
-        # đảm bảo luôn đang ở OpenCV
-        self.sad_engine_combo.setCurrentIndex(0)
 
         self._add_button("Run SAD", self.run_sad, left_panel)
         self.threshold_spin = self._add_labeled_spinbox("Threshold height change (mm):", left_panel, 800)
@@ -309,9 +298,6 @@ class UI1App(QWidget):
             )
 
     def run_sad(self):
-        # Safety guard: nếu vì lý do nào đó combobox đang ở index 1, ép về OpenCV
-        if self.sad_engine_combo.currentIndex() == 1:
-            self.sad_engine_combo.setCurrentIndex(0)
         out1 = "output/UI1/step1_crop"
         out2 = "output/UI1/step2_sad"
         out5dz = "output/UI1/step5_dz"
@@ -328,9 +314,16 @@ class UI1App(QWidget):
 
         cellsize_m = float(self.pixel_size_spin.value()) / 1000.0
 
-        engine = self.sad_engine_combo.currentText() if hasattr(self, "sad_engine_combo") else "OpenCV (fast)"
+        engine = self.sad_engine_combo.currentText() if hasattr(self, "sad_engine_combo") else "GPU (Ultra fast)"
 
-        if "Original" in engine:
+        if "GPU" in engine:
+            status, outputs = run_UI1_2_sad_gpu(
+                before_path=before_crop,
+                after_path=after_crop,
+                output_dir=out2,
+                cellsize=cellsize_m
+            )
+        elif "Original" in engine:
             status, outputs = run_UI1_2_sad_original(
                 before_path=before_crop,
                 after_path=after_crop,
