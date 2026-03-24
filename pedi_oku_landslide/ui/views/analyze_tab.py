@@ -151,8 +151,8 @@ class AnalyzeTab(QWidget):
         # ---- Calculate SAD ----
         lab_method = QLabel("SAD Method:")
         self.cmb_method = QComboBox()
-        self.cmb_method.addItems(["OpenCV", "Traditional"])
-        self.cmb_method.setCurrentText("OpenCV")
+        self.cmb_method.addItems(["GPU", "OpenCV", "Traditional"])
+        self.cmb_method.setCurrentText("GPU")
         self.cmb_method.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         self.btn_calc_sad = QPushButton("Calculate")
@@ -1130,7 +1130,7 @@ class AnalyzeTab(QWidget):
         except Exception:
             pass
         try:
-            self.cmb_method.setCurrentText("OpenCV")
+            self.cmb_method.setCurrentText("GPU")
         except Exception:
             pass
         try:

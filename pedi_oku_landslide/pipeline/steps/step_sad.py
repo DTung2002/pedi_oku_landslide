@@ -15,6 +15,13 @@ try:
 except Exception:
     cv2 = None
 
+try:
+    import torch
+    import torch.nn.functional as F
+except Exception:
+    torch = None
+
+
 from pedi_oku_landslide.services.session_store import AnalysisContext
 from pedi_oku_landslide.pipeline.ingest import update_ingest_processed
 
@@ -249,7 +256,7 @@ def _sad_opencv(before: np.ndarray, after: np.ndarray,
     for y in range(y_min, y_max):
         for x in range(x_min, x_max):
             # Template from BEFORE
-            tpl = b32[y - pr:y + pr + 1, x - pr:x + pr + 1]
+            tpl = b32[y - pr:y + pr + 1, x - pr:y + pr + 1]
             # Search region from AFTER
             y0 = y - (pr + sr)
             y1 = y + (pr + sr) + 1
@@ -274,6 +281,91 @@ def _sad_opencv(before: np.ndarray, after: np.ndarray,
 
             dX[y, x] = dx
             dY[y, x] = dy
+
+    return dX, dY
+
+
+def _sad_gpu(before: np.ndarray, after: np.ndarray,
+             patch_radius_px: int, search_radius_px: int) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    PyTorch-based vectorised search calculating Sum of Squared Differences (SSD).
+    Hardware accelerated on CUDA if available. Output is displacement in pixels.
+    """
+    if torch is None:
+        raise RuntimeError("PyTorch is not available. Please install torch.")
+
+    H, W = before.shape
+    dX = np.full((H, W), np.nan, dtype="float32")
+    dY = np.full((H, W), np.nan, dtype="float32")
+
+    pr = patch_radius_px
+    sr = search_radius_px
+    y_min = pr + sr
+    y_max = H - pr - sr
+    x_min = pr + sr
+    x_max = W - pr - sr
+
+    b, _ = _nan_to_median(before)
+    a, _ = _nan_to_median(after)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"[SAD GPU] Using device: {device}")
+
+    # Convert to tensors (1, 1, H, W)
+    b_t = torch.from_numpy(b.astype("float32")).to(device).unsqueeze(0).unsqueeze(0)
+    a_t = torch.from_numpy(a.astype("float32")).to(device).unsqueeze(0).unsqueeze(0)
+
+    # We want to match `before` patch against regions in `after`.
+    # To do fully vectorized, let's pad `after` to shift easily
+    pad = pr + sr
+    a_pad = F.pad(a_t, (pad, pad, pad, pad), mode='reflect')
+
+    best_ssd = torch.full((H, W), float('inf'), device=device)
+    best_dx = torch.zeros((H, W), device=device)
+    best_dy = torch.zeros((H, W), device=device)
+
+    # Search loop
+    # For TM_SQDIFF equivalent: (b - a)^2
+    patch_size = 2 * pr + 1
+    
+    # We only care about computing for valid center pixels
+    # Valid centers are [y_min:y_max, x_min:x_max] in `before`.
+    # Let's extract the valid region of `before` to save computation.
+    b_valid = b_t[:, :, y_min:y_max, x_min:x_max]
+    
+    for dy in range(-sr, sr + 1):
+        for dx in range(-sr, sr + 1):
+            # Shifted 'after' viewing window, matching the valid centers
+            # Center in padded is `y + pad`, offset by `dy` -> `y + pad + dy`
+            # The window size around it is `+/- pr`
+            y0 = pad + dy + y_min - pr
+            y1 = pad + dy + y_max - 1 + pr + 1
+            x0 = pad + dx + x_min - pr
+            x1 = pad + dx + x_max - 1 + pr + 1
+            
+            a_shift = a_pad[:, :, y0:y1, x0:x1]
+            if a_shift.shape != (1, 1, y_max - y_min + 2*pr, x_max - x_min + 2*pr):
+                continue
+            
+            # Compute SSD over sliding windows of size patch_size
+            diff = (b_t[:, :, y_min - pr : y_max + pr, x_min - pr : x_max + pr] - a_shift) ** 2
+            
+            # Note: The valid region needs summing over patch_size
+            # The valid centers are exactly the result of avg_pool2d on the diff window without padding
+            ssd_map = F.avg_pool2d(diff, kernel_size=patch_size, stride=1, padding=0) * (patch_size ** 2)
+            
+            # View is exactly (1, 1, y_max - y_min, x_max - x_min)
+            mask = ssd_map < best_ssd[y_min:y_max, x_min:x_max].unsqueeze(0).unsqueeze(0)
+            
+            if mask.any():
+                mask_2d = mask[0, 0]
+                best_ssd[y_min:y_max, x_min:x_max][mask_2d] = ssd_map[0, 0][mask_2d]
+                best_dx[y_min:y_max, x_min:x_max][mask_2d] = float(dx)
+                best_dy[y_min:y_max, x_min:x_max][mask_2d] = float(dy)
+                
+    # Copy results to CPU NumPy arrays
+    dX[y_min:y_max, x_min:x_max] = best_dx[y_min:y_max, x_min:x_max].cpu().numpy()
+    dY[y_min:y_max, x_min:x_max] = best_dy[y_min:y_max, x_min:x_max].cpu().numpy()
 
     return dX, dY
 
@@ -364,11 +456,17 @@ def run_sad(ctx: AnalysisContext,
 
     # ---- compute displacement
     if method.lower() == "opencv":
+        print(f"[SAD] Using method OpenCV")
         dX, dY = _sad_opencv(before, after, patch_radius_px, search_radius_px)
+    elif method.lower() in ("gpu", "ultra fast", "pytorch"):
+        print(f"[SAD] Using method GPU")
+        dX, dY = _sad_gpu(before, after, patch_radius_px, search_radius_px)
     elif method.lower() in ("traditional", "sad", "original"):
+        print(f"[SAD] Using method Traditional")
         dX, dY = _sad_traditional(before, after, patch_radius_px, search_radius_px)
     else:
-        raise ValueError("Unknown method. Use 'opencv' or 'traditional'.")
+        raise ValueError("Unknown method. Use 'gpu', 'opencv' or 'traditional'.")
+
 
     # ---- save dX, dY GeoTIFFs
     dx_tif = os.path.join(ctx.out_ui1, "dx.tif")
