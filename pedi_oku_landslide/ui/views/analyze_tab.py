@@ -138,14 +138,14 @@ class AnalyzeTab(QWidget):
         lay_detect = QVBoxLayout(grp_detect)
 
         # ---- Smooth ----
-        self.lab_smooth_method = QLabel("Smooth Method:")
+        self.lab_smooth_method = QLabel("Smooth Filter:")
         self.cmb_smooth_method = QComboBox()
-        self.cmb_smooth_method.addItems(["Gaussian", "Mean"])
-        self.cmb_smooth_method.setCurrentText("Gaussian")
+        self.cmb_smooth_method.addItems(["Mean"])
+        self.cmb_smooth_method.setCurrentText("Mean")
+        self.cmb_smooth_method.setEnabled(False)
         self.cmb_smooth_method.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.cmb_smooth_method.currentTextChanged.connect(self._on_smooth_method_changed)
 
-        self.lab_smooth_param = QLabel("Gaussian σ (px):")
+        self.lab_smooth_param = QLabel("Mean Radius (m):")
         self.spin_smooth_param = QDoubleSpinBox()
         self.spin_smooth_param.setRange(0.0, 50.0)
         self.spin_smooth_param.setSingleStep(0.5)
@@ -159,8 +159,9 @@ class AnalyzeTab(QWidget):
         # ---- Calculate SAD ----
         lab_method = QLabel("SAD Method:")
         self.cmb_method = QComboBox()
-        self.cmb_method.addItems(["GPU", "OpenCV", "Traditional"])
-        self.cmb_method.setCurrentText("GPU")
+        self.cmb_method.addItems(["Traditional"])
+        self.cmb_method.setCurrentText("Traditional")
+        self.cmb_method.setEnabled(False)
         self.cmb_method.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         self.btn_calc_sad = QPushButton("Calculate")
@@ -557,19 +558,13 @@ class AnalyzeTab(QWidget):
         except Exception as e:
             self._err(f"Error: {e}")
 
-    def _on_smooth_method_changed(self, text: str) -> None:
-        if text == "Gaussian":
-            self.lab_smooth_param.setText("Gaussian σ (px):")
-        else:
-            self.lab_smooth_param.setText("Mean Radius (px):")
-
     def _on_smooth(self) -> None:
         if not self._last_run_dir:
             self._warn("Please run 'Confirm Input' first.")
             return
         try:
-            method = self.cmb_smooth_method.currentText()
-            param = float(self.spin_smooth_param.value())
+            method = "Mean"
+            param_m = float(self.spin_smooth_param.value())
 
             # reconstruct ctx from self._last_run_dir
             parts = os.path.normpath(self._last_run_dir).split(os.sep)
@@ -590,10 +585,10 @@ class AnalyzeTab(QWidget):
                 out_ui3=os.path.join(self._last_run_dir, "ui3"),
             )
 
-            out = run_smooth(ctx, method=method, param_px=param)
+            out = run_smooth(ctx, param_m=param_m)
 
             self._ok(
-                f"Smooth completed (method={method}, param={param}px).\n"
+                f"Smooth completed (filter={method}, radius={param_m}m).\n"
                 f"Outputs:\n"
                 f" - {out['before_tif']}\n"
                 f" - {out['after_tif']}"
@@ -625,8 +620,6 @@ class AnalyzeTab(QWidget):
                 out_ui3=os.path.join(self._last_run_dir, "ui3"),
             )
 
-            method = self.cmb_method.currentText().lower()  # "opencv" | "traditional"
-
             # --- disable nút khi đang chạy ---
             self.btn_calc_sad.setEnabled(False)
             self.btn_detect.setEnabled(False)
@@ -637,7 +630,6 @@ class AnalyzeTab(QWidget):
             self._sad_thread = QThread(self)
             self._sad_worker = _SadWorker(
                 ctx=ctx,
-                method=method,
                 patch_size_m=20.0,
                 search_radius_m=2.0,
                 use_smoothed=True
@@ -1143,12 +1135,12 @@ class AnalyzeTab(QWidget):
 
         # 5) Reset các thông số xử lý
         try:
-            self.cmb_smooth_method.setCurrentText("Gaussian")
+            self.cmb_smooth_method.setCurrentText("Mean")
             self.spin_smooth_param.setValue(2.0)
         except Exception:
             pass
         try:
-            self.cmb_method.setCurrentText("GPU")
+            self.cmb_method.setCurrentText("Traditional")
         except Exception:
             pass
         try:
@@ -1209,10 +1201,10 @@ class _SadWorker(QObject):
     finished = pyqtSignal(dict, str)  # (out_dict, method)
     error = pyqtSignal(str)
     t0 = perf_counter()
-    def __init__(self, ctx, method: str, patch_size_m: float, search_radius_m: float, use_smoothed: bool):
+    def __init__(self, ctx, patch_size_m: float, search_radius_m: float, use_smoothed: bool):
         super().__init__()
         self.ctx = ctx
-        self.method = method
+        self.method = "traditional"
         self.patch_size_m = patch_size_m
         self.search_radius_m = search_radius_m
         self.use_smoothed = use_smoothed
@@ -1223,7 +1215,6 @@ class _SadWorker(QObject):
             print("[SAD] run_sad start")
             out = run_sad(
                 self.ctx,
-                method=self.method,
                 patch_size_m=self.patch_size_m,
                 search_radius_m=self.search_radius_m,
                 use_smoothed=self.use_smoothed,

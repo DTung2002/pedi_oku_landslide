@@ -8,7 +8,14 @@ from matplotlib.colors import LightSource
 import matplotlib.pyplot as plt
 
 from pedi_oku_landslide.services.session_store import AnalysisContext
-from pedi_oku_landslide.core.analysis import smooth_gaussian, smooth_mean
+from pedi_oku_landslide.core.analysis import smooth_mean
+
+def _radius_m_to_px(transform: Affine, radius_m: float) -> tuple[float, float]:
+    xres = abs(float(transform.a))
+    yres = abs(float(transform.e))
+    if xres <= 0 or yres <= 0:
+        raise ValueError("Invalid raster resolution: transform.a/transform.e must be non-zero.")
+    return (float(radius_m) / yres, float(radius_m) / xres)  # (row, col)
 
 def _save_preview_png(arr: np.ndarray, transform: Affine, out_png: str, title: str):
     # hillshade + axes + grid (giống ingest)
@@ -35,13 +42,13 @@ def _save_preview_png(arr: np.ndarray, transform: Affine, out_png: str, title: s
     plt.savefig(out_png, dpi=220)
     plt.close()
 
-def run_smooth(ctx: AnalysisContext, method: str = "Gaussian", param_px: float = 2.0) -> dict:
+def run_smooth(ctx: AnalysisContext, param_m: float = 2.0) -> dict:
     """
-    Smooth both BEFORE.asc and AFTER.asc using the specified method (Gaussian or Mean).
+    Smooth both BEFORE.asc and AFTER.asc using Mean filter.
     Outputs:
       - GeoTIFFs: ui1/before_asc_smooth.tif, ui1/after_asc_smooth.tif
       - PNG previews: ui1/before_asc_smooth.png, ui1/after_asc_smooth.png
-      - JSON: ui1/smooth_meta.json (method, param_px)
+      - JSON: ui1/smooth_meta.json (method, param_m, radius_px)
     Returns dict with output paths.
     """
     # ---- read BEFORE.asc
@@ -66,13 +73,12 @@ def run_smooth(ctx: AnalysisContext, method: str = "Gaussian", param_px: float =
     if (b_crs is not None) and (a_crs is not None) and (b_crs != a_crs):
         raise ValueError("BEFORE and AFTER have different CRS. Please reproject first.")
 
-    # ---- smooth
-    if method == "Mean":
-        b_sm = smooth_mean(b_arr, radius_px=param_px)
-        a_sm = smooth_mean(a_arr, radius_px=param_px)
-    else:
-        b_sm = smooth_gaussian(b_arr, sigma_px=param_px)
-        a_sm = smooth_gaussian(a_arr, sigma_px=param_px)
+    # ---- smooth (Mean-only)
+    method = "Mean"
+    b_radius_px = _radius_m_to_px(b_transform, param_m)
+    a_radius_px = _radius_m_to_px(a_transform, param_m)
+    b_sm = smooth_mean(b_arr, radius_px=b_radius_px)
+    a_sm = smooth_mean(a_arr, radius_px=a_radius_px)
 
     # ---- write GeoTIFFs
     out_b_tif = os.path.join(ctx.out_ui1, "before_asc_smooth.tif")
@@ -89,13 +95,33 @@ def run_smooth(ctx: AnalysisContext, method: str = "Gaussian", param_px: float =
     # ---- PNG previews
     out_b_png = os.path.join(ctx.out_ui1, "before_asc_smooth.png")
     out_a_png = os.path.join(ctx.out_ui1, "after_asc_smooth.png")
-    _save_preview_png(b_sm, b_transform, out_b_png, f"before.asc (smooth {method} param={param_px}px)")
-    _save_preview_png(a_sm, a_transform, out_a_png, f"after.asc (smooth {method} param={param_px}px)")
+    _save_preview_png(
+        b_sm,
+        b_transform,
+        out_b_png,
+        f"before.asc (smooth {method} radius={param_m}m, px={b_radius_px[1]:.2f}x{b_radius_px[0]:.2f})",
+    )
+    _save_preview_png(
+        a_sm,
+        a_transform,
+        out_a_png,
+        f"after.asc (smooth {method} radius={param_m}m, px={a_radius_px[1]:.2f}x{a_radius_px[0]:.2f})",
+    )
 
     # ---- meta
     meta_path = os.path.join(ctx.out_ui1, "smooth_meta.json")
     with open(meta_path, "w", encoding="utf-8") as f:
-        json.dump({"method": method, "param_px": float(param_px)}, f, ensure_ascii=False, indent=2)
+        json.dump(
+            {
+                "method": method,
+                "param_m": float(param_m),
+                "before_radius_px_rc": [float(b_radius_px[0]), float(b_radius_px[1])],
+                "after_radius_px_rc": [float(a_radius_px[0]), float(a_radius_px[1])],
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
 
     return {
         "before_tif": out_b_tif.replace("\\", "/"),

@@ -10,18 +10,6 @@ import rasterio
 from rasterio.transform import Affine
 import matplotlib.pyplot as plt
 
-try:
-    import cv2  # OpenCV (optional for "opencv" method)
-except Exception:
-    cv2 = None
-
-try:
-    import torch
-    import torch.nn.functional as F
-except Exception:
-    torch = None
-
-
 from pedi_oku_landslide.services.session_store import AnalysisContext
 from pedi_oku_landslide.pipeline.ingest import update_ingest_processed
 
@@ -223,153 +211,6 @@ def _sad_traditional(before: np.ndarray, after: np.ndarray,
     return dX, dY
 
 
-def _sad_opencv(before: np.ndarray, after: np.ndarray,
-                patch_radius_px: int, search_radius_px: int) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    OpenCV-based search using matchTemplate (TM_SQDIFF) on local windows.
-    Faster than pure Python. Requires cv2.
-    """
-    if cv2 is None:
-        raise RuntimeError("OpenCV is not available. Please install opencv-python.")
-
-    H, W = before.shape
-    dX = np.full((H, W), np.nan, dtype="float32")
-    dY = np.full((H, W), np.nan, dtype="float32")
-
-    pr = patch_radius_px
-    sr = search_radius_px
-    y_min = pr + sr
-    y_max = H - pr - sr
-    x_min = pr + sr
-    x_max = W - pr - sr
-
-    b, _ = _nan_to_median(before)
-    a, _ = _nan_to_median(after)
-
-    # OpenCV expects float32 or uint8
-    b32 = b.astype("float32", copy=False)
-    a32 = a.astype("float32", copy=False)
-
-    patch_size = 2 * pr + 1
-    search_size = 2 * (pr + sr) + 1  # local window around center in AFTER
-
-    for y in range(y_min, y_max):
-        for x in range(x_min, x_max):
-            # Template from BEFORE
-            tpl = b32[y - pr:y + pr + 1, x - pr:y + pr + 1]
-            # Search region from AFTER
-            y0 = y - (pr + sr)
-            y1 = y + (pr + sr) + 1
-            x0 = x - (pr + sr)
-            x1 = x + (pr + sr) + 1
-            roi = a32[y0:y1, x0:x1]
-            if roi.shape[0] < search_size or roi.shape[1] < search_size:
-                continue
-
-            # TM_SQDIFF: best match is MIN location
-            res = cv2.matchTemplate(roi, tpl, method=cv2.TM_SQDIFF)
-            min_val, _, min_loc, _ = cv2.minMaxLoc(res)
-            # min_loc is top-left in roi where template best matches
-            # Convert to displacement relative to center (x, y)
-            # In roi coords: template top-left = (min_loc.x, min_loc.y)
-            # That corresponds to AFTER patch center at:
-            # (x0 + min_loc.x + pr, y0 + min_loc.y + pr)
-            x_after_center = x0 + min_loc[0] + pr
-            y_after_center = y0 + min_loc[1] + pr
-            dx = x_after_center - x
-            dy = y_after_center - y
-
-            dX[y, x] = dx
-            dY[y, x] = dy
-
-    return dX, dY
-
-
-def _sad_gpu(before: np.ndarray, after: np.ndarray,
-             patch_radius_px: int, search_radius_px: int) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    PyTorch-based vectorised search calculating Sum of Squared Differences (SSD).
-    Hardware accelerated on CUDA if available. Output is displacement in pixels.
-    """
-    if torch is None:
-        raise RuntimeError("PyTorch is not available. Please install torch.")
-
-    H, W = before.shape
-    dX = np.full((H, W), np.nan, dtype="float32")
-    dY = np.full((H, W), np.nan, dtype="float32")
-
-    pr = patch_radius_px
-    sr = search_radius_px
-    y_min = pr + sr
-    y_max = H - pr - sr
-    x_min = pr + sr
-    x_max = W - pr - sr
-
-    b, _ = _nan_to_median(before)
-    a, _ = _nan_to_median(after)
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"[SAD GPU] Using device: {device}")
-
-    # Convert to tensors (1, 1, H, W)
-    b_t = torch.from_numpy(b.astype("float32")).to(device).unsqueeze(0).unsqueeze(0)
-    a_t = torch.from_numpy(a.astype("float32")).to(device).unsqueeze(0).unsqueeze(0)
-
-    # We want to match `before` patch against regions in `after`.
-    # To do fully vectorized, let's pad `after` to shift easily
-    pad = pr + sr
-    a_pad = F.pad(a_t, (pad, pad, pad, pad), mode='reflect')
-
-    best_ssd = torch.full((H, W), float('inf'), device=device)
-    best_dx = torch.zeros((H, W), device=device)
-    best_dy = torch.zeros((H, W), device=device)
-
-    # Search loop
-    # For TM_SQDIFF equivalent: (b - a)^2
-    patch_size = 2 * pr + 1
-    
-    # We only care about computing for valid center pixels
-    # Valid centers are [y_min:y_max, x_min:x_max] in `before`.
-    # Let's extract the valid region of `before` to save computation.
-    b_valid = b_t[:, :, y_min:y_max, x_min:x_max]
-    
-    for dy in range(-sr, sr + 1):
-        for dx in range(-sr, sr + 1):
-            # Shifted 'after' viewing window, matching the valid centers
-            # Center in padded is `y + pad`, offset by `dy` -> `y + pad + dy`
-            # The window size around it is `+/- pr`
-            y0 = pad + dy + y_min - pr
-            y1 = pad + dy + y_max - 1 + pr + 1
-            x0 = pad + dx + x_min - pr
-            x1 = pad + dx + x_max - 1 + pr + 1
-            
-            a_shift = a_pad[:, :, y0:y1, x0:x1]
-            if a_shift.shape != (1, 1, y_max - y_min + 2*pr, x_max - x_min + 2*pr):
-                continue
-            
-            # Compute SSD over sliding windows of size patch_size
-            diff = (b_t[:, :, y_min - pr : y_max + pr, x_min - pr : x_max + pr] - a_shift) ** 2
-            
-            # Note: The valid region needs summing over patch_size
-            # The valid centers are exactly the result of avg_pool2d on the diff window without padding
-            ssd_map = F.avg_pool2d(diff, kernel_size=patch_size, stride=1, padding=0) * (patch_size ** 2)
-            
-            # View is exactly (1, 1, y_max - y_min, x_max - x_min)
-            mask = ssd_map < best_ssd[y_min:y_max, x_min:x_max].unsqueeze(0).unsqueeze(0)
-            
-            if mask.any():
-                mask_2d = mask[0, 0]
-                best_ssd[y_min:y_max, x_min:x_max][mask_2d] = ssd_map[0, 0][mask_2d]
-                best_dx[y_min:y_max, x_min:x_max][mask_2d] = float(dx)
-                best_dy[y_min:y_max, x_min:x_max][mask_2d] = float(dy)
-                
-    # Copy results to CPU NumPy arrays
-    dX[y_min:y_max, x_min:x_max] = best_dx[y_min:y_max, x_min:x_max].cpu().numpy()
-    dY[y_min:y_max, x_min:x_max] = best_dy[y_min:y_max, x_min:x_max].cpu().numpy()
-
-    return dX, dY
-
-
 # -------------------- dZ from displacement --------------------
 
 def _dz_from_displacement(before_pz: np.ndarray, after_pz: np.ndarray,
@@ -392,7 +233,6 @@ def _dz_from_displacement(before_pz: np.ndarray, after_pz: np.ndarray,
 # -------------------- Main entry --------------------
 
 def run_sad(ctx: AnalysisContext,
-            method: str = "opencv",
             patch_size_m: float = 20.0,
             search_radius_m: float = 2.0,
             use_smoothed: bool = True,
@@ -403,9 +243,6 @@ def run_sad(ctx: AnalysisContext,
 
     Parameters
     ----------
-    method : "opencv" | "traditional"
-        - "opencv": cv2.matchTemplate (fast, recommended)
-        - "traditional": pure Python SAD (correct but slow)
     patch_size_m : float
         Template window size (meters). (diameter)
     search_radius_m : float
@@ -454,18 +291,10 @@ def run_sad(ctx: AnalysisContext,
     patch_radius_px = max(1, int(round((patch_size_m / pixel_m) / 2.0)))
     search_radius_px = max(1, int(round(search_radius_m / pixel_m)))
 
-    # ---- compute displacement
-    if method.lower() == "opencv":
-        print(f"[SAD] Using method OpenCV")
-        dX, dY = _sad_opencv(before, after, patch_radius_px, search_radius_px)
-    elif method.lower() in ("gpu", "ultra fast", "pytorch"):
-        print(f"[SAD] Using method GPU")
-        dX, dY = _sad_gpu(before, after, patch_radius_px, search_radius_px)
-    elif method.lower() in ("traditional", "sad", "original"):
-        print(f"[SAD] Using method Traditional")
-        dX, dY = _sad_traditional(before, after, patch_radius_px, search_radius_px)
-    else:
-        raise ValueError("Unknown method. Use 'gpu', 'opencv' or 'traditional'.")
+    # ---- compute displacement (Traditional SAD only)
+    method = "traditional"
+    print("[SAD] Using method Traditional")
+    dX, dY = _sad_traditional(before, after, patch_radius_px, search_radius_px)
 
 
     # ---- save dX, dY GeoTIFFs
