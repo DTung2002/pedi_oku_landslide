@@ -11,7 +11,7 @@ from sklearn.cluster import KMeans
 from rasterio.transform import Affine
 from rasterio.warp import reproject, Resampling
 from pedi_oku_landslide.services.session_store import AnalysisContext
-from pedi_oku_landslide.pipeline.ingest import update_ingest_processed
+from pedi_oku_landslide.pipeline.ingest import update_ingest_processed, resolve_run_input_path
 
 
 def _read(path: str):
@@ -92,9 +92,9 @@ def run_detect(
     # ---- save boundary elevations of landslide mask (UI1)
     boundary_elev_json = None
     try:
-        before_asc = os.path.join(ctx.in_dir, "before.asc")
-        if os.path.exists(before_asc):
-            with rasterio.open(before_asc) as dem_src:
+        after_asc = resolve_run_input_path(ctx.run_dir, "after_asc")
+        if os.path.exists(after_asc):
+            with rasterio.open(after_asc) as dem_src:
                 dem_bnd = dem_src.read(1).astype("float32")
                 dem_nd = dem_src.nodata
                 dem_tf = dem_src.transform
@@ -124,7 +124,7 @@ def run_detect(
                         payload = {
                             "count": int(len(pts)),
                             "mask_path": mask_tif.replace("\\", "/"),
-                            "dem_path": before_asc.replace("\\", "/"),
+                            "dem_path": after_asc.replace("\\", "/"),
                             "elev_stats_m": {
                                 "min": (float(np.min(zf)) if zf.size else None),
                                 "max": (float(np.max(zf)) if zf.size else None),
@@ -136,9 +136,9 @@ def run_detect(
                         with open(boundary_elev_json, "w", encoding="utf-8") as f:
                             json.dump(payload, f, ensure_ascii=False, indent=2)
             else:
-                print("[WARN] before.asc shape != landslide mask shape; skip boundary elevation export.")
+                print("[WARN] after.asc shape != landslide mask shape; skip boundary elevation export.")
         else:
-            print("[WARN] before.asc not found; skip boundary elevation export.")
+            print("[WARN] after.asc not found; skip boundary elevation export.")
     except Exception as e:
         print(f"[WARN] Failed to save landslide boundary elevations: {e}")
 
@@ -217,10 +217,10 @@ def run_detect(
         except Exception:
             pass
 
-    # ---- nền hillshade từ BEFORE.asc (tránh masked.filled(np.nan) gây int32 lỗi)
-    before_asc = os.path.join(ctx.in_dir, "before.asc")
-    if os.path.exists(before_asc):
-        with rasterio.open(before_asc) as dem_src:
+    # ---- nền hillshade từ AFTER.asc (tránh masked.filled(np.nan) gây int32 lỗi)
+    after_asc = resolve_run_input_path(ctx.run_dir, "after_asc")
+    if os.path.exists(after_asc):
+        with rasterio.open(after_asc) as dem_src:
             dem = dem_src.read(1).astype("float32")   # <-- đọc thường, ép float32
             nd = dem_src.nodata
             if nd is not None:

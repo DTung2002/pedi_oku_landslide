@@ -13,6 +13,7 @@ from rasterio.plot import plotting_extent
 from rasterio.warp import Resampling, reproject
 
 from pedi_oku_landslide.services.session_store import AnalysisContext
+from pedi_oku_landslide.pipeline.ingest import resolve_run_input_path
 
 
 def _parse_lwpolylines_from_dxf(
@@ -240,7 +241,7 @@ def run_mask_from_dxf(
         dst.write(mask.astype("uint8"), 1)
 
     overlay_png = os.path.join(ctx.out_ui1, "landslide_overlay.png")
-    base_for_overlay = os.path.join(ctx.in_dir, "before.asc")
+    base_for_overlay = resolve_run_input_path(ctx.run_dir, "after_asc")
     if not os.path.exists(base_for_overlay):
         base_for_overlay = dx_tif
     overlay_png = _save_mask_overlay(mask_tif, base_for_overlay, overlay_png)

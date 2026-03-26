@@ -13,7 +13,7 @@ from pedi_oku_landslide.services.session_store import (
 )
 from ..widgets.file_picker import FilePicker
 from pedi_oku_landslide.ui.components.image_pair_viewer import UI1Viewer
-from pedi_oku_landslide.pipeline.ingest import run_ingest
+from pedi_oku_landslide.pipeline.ingest import run_ingest, resolve_run_input_path
 from pedi_oku_landslide.pipeline.steps.step_smooth import run_smooth
 from pedi_oku_landslide.pipeline.steps.step_sad import run_sad
 from pedi_oku_landslide.pipeline.steps.step_detect import run_detect, render_vectors
@@ -731,13 +731,13 @@ class AnalyzeTab(QWidget):
 
         dx_path = os.path.join(ctx.out_ui1, "dx.tif")
         dy_path = os.path.join(ctx.out_ui1, "dy.tif")
-        dem_path = os.path.join(ctx.in_dir, "before.asc")
+        dem_path = resolve_run_input_path(ctx.run_dir, "after_asc")
         mask_path = os.path.join(ctx.out_ui1, "landslide_mask.tif")
 
         if not (os.path.exists(dx_path) and os.path.exists(dy_path)):
             raise FileNotFoundError("dx.tif or dy.tif is missing.")
         if not os.path.exists(dem_path):
-            raise FileNotFoundError("before.asc is missing.")
+            raise FileNotFoundError("after.asc is missing.")
 
         with rasterio.open(dx_path) as dx_ds:
             dX = dx_ds.read(1).astype("float32")
@@ -813,7 +813,7 @@ class AnalyzeTab(QWidget):
             "sources": {
                 "dx_tif": dx_path.replace("\\", "/"),
                 "dy_tif": dy_path.replace("\\", "/"),
-                "dem_before_asc": dem_path.replace("\\", "/"),
+                "dem_after_asc": dem_path.replace("\\", "/"),
                 "mask_tif": (mask_path.replace("\\", "/") if os.path.exists(mask_path) else None),
             },
             "vectors": vectors,
@@ -902,7 +902,7 @@ class AnalyzeTab(QWidget):
             self._info(f"Mask pixels in-zone: {out.get('mask_pixels_positive', 0)}")
 
             dz_png = os.path.join(ctx.out_ui1, "dz.png")
-            left_img = dz_png if os.path.exists(dz_png) else os.path.join(ctx.out_ui1, "before_asc_hillshade.png")
+            left_img = dz_png if os.path.exists(dz_png) else os.path.join(ctx.out_ui1, "after_asc_hillshade.png")
             right_img = out.get("mask_png", "")
             if left_img and right_img and os.path.exists(right_img):
                 self.viewer.show_pair(left_img, right_img)

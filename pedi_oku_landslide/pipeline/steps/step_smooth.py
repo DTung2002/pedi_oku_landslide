@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 
 from pedi_oku_landslide.services.session_store import AnalysisContext
 from pedi_oku_landslide.core.analysis import smooth_mean
+from pedi_oku_landslide.pipeline.ingest import resolve_run_input_path
 
 def _radius_m_to_px(transform: Affine, radius_m: float) -> tuple[float, float]:
     xres = abs(float(transform.a))
@@ -54,9 +55,9 @@ def run_smooth(ctx: AnalysisContext, param_m: float = 2.0) -> dict:
     Returns dict with output paths.
     """
     # ---- read BEFORE/AFTER ASC + AFTER DEM
-    before_path = os.path.join(ctx.in_dir, "before.asc")
-    after_path  = os.path.join(ctx.in_dir, "after.asc")
-    after_dem_path = os.path.join(ctx.in_dir, "after_dem.tif")
+    before_path = resolve_run_input_path(ctx.run_dir, "before_asc")
+    after_path = resolve_run_input_path(ctx.run_dir, "after_asc")
+    after_dem_path = resolve_run_input_path(ctx.run_dir, "after_dem")
     if not (os.path.exists(before_path) and os.path.exists(after_path) and os.path.exists(after_dem_path)):
         raise FileNotFoundError("before.asc, after.asc, or after_dem.tif not found in run/input")
 

@@ -12,6 +12,20 @@ from matplotlib.colors import LightSource
 from pedi_oku_landslide.config.settings import load_config
 from pedi_oku_landslide.core.gis_utils import hillshade
 from pedi_oku_landslide.services.session_store import AnalysisContext
+
+CANONICAL_INPUT_FILENAMES = {
+    "before_dem": "before_dem.tif",
+    "after_dem": "after_dem.tif",
+    "before_asc": "before.asc",
+    "after_asc": "after.asc",
+    "before_pz": "before_pz.asc",
+    "after_pz": "after_pz.asc",
+}
+
+INPUT_KEY_ALIASES = {
+    "before_dem": ("after_dem",),
+    "after_dem": ("before_dem",),
+}
 def update_ingest_processed(run_dir: str, **kwargs):
     """
     Cập nhật các field trong ingest_meta.json["processed"].
@@ -47,12 +61,69 @@ def update_ingest_processed(run_dir: str, **kwargs):
     except Exception as e:
         print(f"[WARN] Failed to write ingest_meta.json: {e}")
 
-def _copy(src: str, dst_dir: str) -> str:
+def _copy(src: str, dst_dir: str, dst_name: Optional[str] = None) -> str:
     """Copy a file to dst_dir (creating it if needed) and return the new path."""
     os.makedirs(dst_dir, exist_ok=True)
-    dst = os.path.join(dst_dir, os.path.basename(src))
+    dst = os.path.join(dst_dir, dst_name or os.path.basename(src))
     shutil.copy2(src, dst)
     return dst
+
+
+def _copy_sibling_prj(src: str, dst: str) -> None:
+    """Copy <src>.prj to <dst>.prj when present, mainly for ASC inputs."""
+    src_prj = os.path.splitext(src)[0] + ".prj"
+    if not os.path.exists(src_prj):
+        return
+    dst_prj = os.path.splitext(dst)[0] + ".prj"
+    try:
+        shutil.copy2(src_prj, dst_prj)
+    except Exception:
+        pass
+
+
+def resolve_run_input_path(run_dir: str, input_key: str) -> str:
+    """
+    Resolve a run-scoped input path.
+
+    Priority:
+    1. canonical filename under run/input
+    2. ingest_meta.json["inputs"][input_key]
+    3. empty string if unresolved
+    """
+    run_dir = os.path.abspath(str(run_dir or "").strip())
+    if not run_dir:
+        return ""
+    input_dir = os.path.join(run_dir, "input")
+    key_candidates = [input_key, *INPUT_KEY_ALIASES.get(input_key, ())]
+    for key_name in key_candidates:
+        canonical_name = CANONICAL_INPUT_FILENAMES.get(key_name, "")
+        if canonical_name:
+            canonical_path = os.path.join(input_dir, canonical_name)
+            if os.path.exists(canonical_path):
+                return canonical_path
+
+    meta_path = os.path.join(run_dir, "ingest_meta.json")
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f) or {}
+            inputs = meta.get("inputs") or {}
+            for key_name in key_candidates:
+                cand = str(inputs.get(key_name) or "").strip()
+                if cand and os.path.exists(cand):
+                    return cand
+        except Exception:
+            pass
+
+    if input_key in ("before_dem", "after_dem") and os.path.isdir(input_dir):
+        tif_candidates = []
+        for name in os.listdir(input_dir):
+            if name.lower().endswith((".tif", ".tiff")):
+                tif_candidates.append(os.path.join(input_dir, name))
+        if tif_candidates:
+            tif_candidates.sort()
+            return tif_candidates[0]
+    return ""
 
 def _load_crs_from_sibling_prj(path: str) -> Optional[CRS]:
     """
@@ -191,8 +262,13 @@ def run_ingest(ctx: AnalysisContext, files: Dict[str, str]) -> Dict:
     if missing:
         raise ValueError(f"Missing required inputs: {', '.join(missing)}")
 
-    # 2) Copy inputs into run/input
-    copied = {k: _copy(files[k], ctx.in_dir) for k in required}
+    # 2) Copy inputs into run/input with canonical names expected by downstream steps
+    copied = {}
+    for k in required:
+        dst_name = CANONICAL_INPUT_FILENAMES.get(k) or os.path.basename(files[k])
+        dst_path = _copy(files[k], ctx.in_dir, dst_name=dst_name)
+        _copy_sibling_prj(files[k], dst_path)
+        copied[k] = dst_path
 
     # 3) Hillshade from AFTER DEM (GeoTIFF) to GeoTIFF preview in ui1
     with rasterio.open(copied["after_dem"]) as ds:

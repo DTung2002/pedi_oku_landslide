@@ -11,7 +11,7 @@ from rasterio.transform import Affine
 import matplotlib.pyplot as plt
 
 from pedi_oku_landslide.services.session_store import AnalysisContext
-from pedi_oku_landslide.pipeline.ingest import update_ingest_processed
+from pedi_oku_landslide.pipeline.ingest import update_ingest_processed, resolve_run_input_path
 
 
 # ------------------------- Low-level helpers -------------------------
@@ -267,8 +267,8 @@ def run_sad(ctx: AnalysisContext,
         a_src = a_smooth
         src_tag = "smoothed"
     else:
-        b_src = os.path.join(ctx.in_dir, "before.asc")
-        a_src = os.path.join(ctx.in_dir, "after.asc")
+        b_src = resolve_run_input_path(ctx.run_dir, "before_asc")
+        a_src = resolve_run_input_path(ctx.run_dir, "after_asc")
         src_tag = "raw"
 
     if not (os.path.exists(b_src) and os.path.exists(a_src)):
@@ -311,8 +311,8 @@ def run_sad(ctx: AnalysisContext,
     _save_png_diverging(dY, transform_b, dy_png, f"dY (pixels) [{src_tag}/{method}]", "pixels")
 
     # ---- compute dZ using BEFORE/AFTER PZ rasters
-    before_pz_path = os.path.join(ctx.in_dir, "before_pz.asc")
-    after_pz_path  = os.path.join(ctx.in_dir, "after_pz.asc")
+    before_pz_path = resolve_run_input_path(ctx.run_dir, "before_pz")
+    after_pz_path = resolve_run_input_path(ctx.run_dir, "after_pz")
     if not (os.path.exists(before_pz_path) and os.path.exists(after_pz_path)):
         raise FileNotFoundError("before_pz.asc / after_pz.asc not found for dZ computation.")
 

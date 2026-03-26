@@ -119,16 +119,13 @@ UI1 input: before.asc
   -> run_ingest creates ui1/before_asc_hillshade.png
   -> run_smooth creates ui1/before_asc_smooth.tif + ui1/before_asc_smooth.png
   -> run_sad uses it directly, or uses before_asc_smooth.tif if smoothing exists
-  -> step_detect uses it to export landslide_boundary_elevations.json
-  -> step_detect uses it as hillshade base for landslide_overlay.png
-  -> step_mask_dxf uses it as overlay base for DXF mask preview
-  -> render_vectors samples elevation from before.asc for ui1/vector/vectors.json
   -> UI3 may fall back to it only if DEM inputs are unavailable
 ```
 
 Role:
 
-- primary pre-event surface raster for displacement base and many UI overlays
+- primary pre-event surface raster in the displacement pair
+- secondary fallback DEM only outside SAD
 
 #### 4. `after.asc`
 
@@ -139,6 +136,11 @@ UI1 input: after.asc
   -> run_ingest creates ui1/after_asc_hillshade.png
   -> run_smooth creates ui1/after_asc_smooth.tif + ui1/after_asc_smooth.png
   -> run_sad uses it directly, or uses after_asc_smooth.tif if smoothing exists
+  -> step_detect uses it to export landslide_boundary_elevations.json
+  -> step_detect uses it as hillshade base for landslide_overlay.png
+  -> step_mask_dxf uses it as overlay base for DXF mask preview
+  -> render_vectors samples elevation from after.asc for ui1/vector/vectors.json
+  -> UI2 uses after_asc_smooth.tif, else after.asc, as the hillshade/map base
   -> contributes to dx/dy estimation
   -> dx/dy then feed landslide detection, vector rendering, UI2 auto-lines, UI3 profiles
 ```
@@ -189,8 +191,8 @@ Role:
 | --- | --- | --- | --- |
 | `before_dem.tif` | `run_ingest` metadata copy | no dedicated derived file | fallback DEM for Detect/UI3/UI4 |
 | `after_dem.tif` | `run_ingest`, `run_smooth` | `after_dem_hillshade.tif`, `after_dem_smooth.tif`, `after_dem_smooth.png` | DEM crop, UI3 ground DEM, UI4 kriging DEM |
-| `before.asc` | `run_ingest`, `run_smooth`, `run_sad` | `before_asc_hillshade.png`, `before_asc_smooth.tif`, `before_asc_smooth.png` | dx/dy base, detect overlay base, vector JSON elevation |
-| `after.asc` | `run_ingest`, `run_smooth`, `run_sad` | `after_asc_hillshade.png`, `after_asc_smooth.tif`, `after_asc_smooth.png` | dx/dy estimation source |
+| `before.asc` | `run_ingest`, `run_smooth`, `run_sad` | `before_asc_hillshade.png`, `before_asc_smooth.tif`, `before_asc_smooth.png` | pre-event half of the displacement pair; fallback DEM only |
+| `after.asc` | `run_ingest`, `run_smooth`, `run_sad`, `run_detect` | `after_asc_hillshade.png`, `after_asc_smooth.tif`, `after_asc_smooth.png` | dx/dy estimation source, detect overlay base, boundary elevation source, vector JSON elevation, UI2 map base |
 | `before_pz.asc` | `run_sad` | contributes to `dz.tif`, `dz.png` | UI3 profile z-difference |
 | `after_pz.asc` | `run_sad` | contributes to `dz.tif`, `dz.png` | UI3 profile z-difference |
 

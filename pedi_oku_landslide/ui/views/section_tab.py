@@ -19,6 +19,7 @@ from PyQt5.QtWidgets import (
 )
 
 from pedi_oku_landslide.ui.components.image_pair_viewer import UI1Viewer
+from pedi_oku_landslide.pipeline.ingest import resolve_run_input_path
 
 # --- tiny layout helpers (alias) ---
 def HBox():
@@ -332,7 +333,7 @@ def generate_auto_lines_from_arrays(
 class _LayeredViewer(UI1Viewer):
     """
     Một viewer dùng chung cho UI2:
-    - Nền: hillshade (before.asc)  → layer 0
+    - Nền: hillshade (after.asc)  → layer 0
     - Heatmap: dZ masked           → layer 1
     - Vectors: dx/dy (mũi tên)     → layer 2
     - Lưới toạ độ + text           → layer 10–11
@@ -1181,11 +1182,11 @@ class SectionSelectionTab(QWidget):
         ui1 = os.path.join(rd, "ui1")
 
         dz_tif = os.path.join(ui1, "dz.tif")
-        before_tif = os.path.join(ui1, "before_asc.tif")
-        before_smooth = os.path.join(ui1, "before_asc_smooth.tif")
-        if _file_exists(before_smooth):
-            before_tif = before_smooth
-        self._dem_path = before_tif
+        after_tif = resolve_run_input_path(rd, "after_asc")
+        after_smooth = os.path.join(ui1, "after_asc_smooth.tif")
+        if _file_exists(after_smooth):
+            after_tif = after_smooth
+        self._dem_path = after_tif
 
         # Có thể có các tên mask khác nhau
         # Có thể có các tên mask khác nhau (ưu tiên detect_mask.tif của UI1 mới)
@@ -1203,14 +1204,14 @@ class SectionSelectionTab(QWidget):
             self._inv_tr = ~self._tr
             W, H = ds.width, ds.height
 
-        # --- 2) đọc BEFORE & resample về grid dZ nếu cần ---
-        with rasterio.open(before_tif) as ds:
+        # --- 2) đọc AFTER & resample về grid dZ nếu cần ---
+        with rasterio.open(after_tif) as ds:
             if (ds.width, ds.height) != (W, H) or ds.transform != self._tr:
-                before = ds.read(
+                after = ds.read(
                     1, out_shape=(H, W), resampling=Resampling.bilinear
                 ).astype("float32")
             else:
-                before = ds.read(1).astype("float32")
+                after = ds.read(1).astype("float32")
 
         # --- 3) đọc dx/dy & align về grid dZ để tính dXY ---
         self._dx, self._dy = None, None
@@ -1247,9 +1248,9 @@ class SectionSelectionTab(QWidget):
             self._mask = np.ones_like(self._dz, dtype="uint8")
             self._info("[UI2] mask.tif not found → using full extent as mask.")
 
-        # --- 5) hillshade từ BEFORE đã align ---
+        # --- 5) hillshade từ AFTER đã align ---
         cell = float(abs(self._tr.a))
-        hs8 = _hillshade(before, cell)
+        hs8 = _hillshade(after, cell)
         self.viewer.set_transform(self._tr)
         self.viewer.set_hillshade(hs8)  # chốt scene rect & fit
         self.viewer.set_hillshade_opacity(self.sld_hill.value() / 100.0)
