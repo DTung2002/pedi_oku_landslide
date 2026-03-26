@@ -164,9 +164,10 @@ def _save_hillshade_png_from_raster(src_path: str, out_png: str, fallback_epsg: 
 
 def run_ingest(ctx: AnalysisContext, files: Dict[str, str]) -> Dict:
     """
-    Ingest 5 inputs into a new run folder, prepare previews, and write metadata.
+    Ingest 6 inputs into a new run folder, prepare previews, and write metadata.
 
     Required keys in `files`:
+      - after_dem  : GeoTIFF (.tif)
       - before_dem : GeoTIFF (.tif)
       - before_asc : ASCII grid (.asc)
       - after_asc  : ASCII grid (.asc)
@@ -185,7 +186,7 @@ def run_ingest(ctx: AnalysisContext, files: Dict[str, str]) -> Dict:
         fallback_epsg = None  # if config not present, just skip fallback
 
     # 1) Validate inputs
-    required = ["before_dem", "before_asc", "after_asc", "before_pz", "after_pz"]
+    required = ["before_dem", "after_dem", "before_asc", "after_asc", "before_pz", "after_pz"]
     missing = [k for k in required if not files.get(k)]
     if missing:
         raise ValueError(f"Missing required inputs: {', '.join(missing)}")
@@ -193,15 +194,15 @@ def run_ingest(ctx: AnalysisContext, files: Dict[str, str]) -> Dict:
     # 2) Copy inputs into run/input
     copied = {k: _copy(files[k], ctx.in_dir) for k in required}
 
-    # 3) Hillshade from BEFORE DEM (GeoTIFF) to GeoTIFF preview in ui1
-    with rasterio.open(copied["before_dem"]) as ds:
+    # 3) Hillshade from AFTER DEM (GeoTIFF) to GeoTIFF preview in ui1
+    with rasterio.open(copied["after_dem"]) as ds:
         dem = ds.read(1).astype("float32")
         meta = ds.meta.copy()
 
     hs_dem = hillshade(dem).astype("float32")
     meta.update(dtype="float32", count=1, compress="lzw")
     os.makedirs(ctx.out_ui1, exist_ok=True)
-    hs_dem_tif = os.path.join(ctx.out_ui1, "before_dem_hillshade.tif")
+    hs_dem_tif = os.path.join(ctx.out_ui1, "after_dem_hillshade.tif")
     with rasterio.open(hs_dem_tif, "w", **meta) as ds:
         ds.write(hs_dem, 1)
 
@@ -237,7 +238,7 @@ def run_ingest(ctx: AnalysisContext, files: Dict[str, str]) -> Dict:
         },
 
         "preview": {
-            "before_dem_hillshade_tif": hs_dem_tif.replace("\\", "/"),
+            "after_dem_hillshade_tif": hs_dem_tif.replace("\\", "/"),
             "before_asc_hillshade_png": hs_before_png.replace("\\", "/"),
             "after_asc_hillshade_png":  hs_after_png.replace("\\", "/"),
         },

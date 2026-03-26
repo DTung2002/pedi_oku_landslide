@@ -101,12 +101,13 @@ class AnalyzeTab(QWidget):
         inputs_layout.setSpacing(6)
 
         self.fp_bdem = FilePicker("BEFORE DEM.tif", "GeoTIFF (*.tif *.tiff)")
+        self.fp_adem = FilePicker("AFTER DEM.tif", "GeoTIFF (*.tif *.tiff)")
         self.fp_basc = FilePicker("BEFORE.asc", "ASC (*.asc)")
         self.fp_aasc = FilePicker("AFTER.asc", "ASC (*.asc)")
         self.fp_bpz  = FilePicker("BEFORE_PZ.asc", "ASC (*.asc)")
         self.fp_apz  = FilePicker("AFTER_PZ.asc", "ASC (*.asc)")
         
-        for w in (self.fp_bdem, self.fp_basc, self.fp_aasc, self.fp_bpz, self.fp_apz):
+        for w in (self.fp_bdem, self.fp_adem, self.fp_basc, self.fp_aasc, self.fp_bpz, self.fp_apz):
             inputs_layout.addWidget(w)
             
         # Actions row (inside Inputs panel)
@@ -125,7 +126,7 @@ class AnalyzeTab(QWidget):
         inputs_layout.addLayout(actions)
 
         # Keep action buttons at their natural size; only normalize file-picker buttons.
-        file_buttons = [self.fp_bdem.btn, self.fp_basc.btn, self.fp_aasc.btn, self.fp_bpz.btn, self.fp_apz.btn]
+        file_buttons = [self.fp_bdem.btn, self.fp_adem.btn, self.fp_basc.btn, self.fp_aasc.btn, self.fp_bpz.btn, self.fp_apz.btn]
         max_w = max(btn.sizeHint().width() for btn in file_buttons) + 36
         max_h = max(btn.sizeHint().height() for btn in file_buttons)
         for btn in file_buttons:
@@ -517,13 +518,14 @@ class AnalyzeTab(QWidget):
 
         files = {
             "before_dem": self.fp_bdem.path,
+            "after_dem":  self.fp_adem.path,
             "before_asc": self.fp_basc.path,
             "after_asc":  self.fp_aasc.path,
             "before_pz":  self.fp_bpz.path,
             "after_pz":   self.fp_apz.path,
         }
         if not all(files.values()):
-            self._warn("Please select all 5 input files.")
+            self._warn("Please select all 6 input files.")
             return
 
         try:
@@ -591,7 +593,8 @@ class AnalyzeTab(QWidget):
                 f"Smooth completed (filter={method}, radius={param_m}m).\n"
                 f"Outputs:\n"
                 f" - {out['before_tif']}\n"
-                f" - {out['after_tif']}"
+                f" - {out['after_tif']}\n"
+                f" - {out['after_dem_tif']}"
             )
             self.viewer.show_pair(out["before_png"], out["after_png"])
 
@@ -1106,8 +1109,8 @@ class AnalyzeTab(QWidget):
         self.edit_project.clear()
         self.edit_runlabel.clear()
 
-        # 3) Clear 5 ô input (FilePicker)
-        for fp in (self.fp_bdem, self.fp_basc, self.fp_aasc, self.fp_bpz, self.fp_apz):
+        # 3) Clear input file pickers
+        for fp in (self.fp_bdem, self.fp_adem, self.fp_basc, self.fp_aasc, self.fp_bpz, self.fp_apz):
             try:
                 if hasattr(fp, "clear"):
                     fp.clear()

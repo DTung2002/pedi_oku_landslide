@@ -174,6 +174,9 @@ class PathManager:
     def before_dem_tif(self) -> str:
         return os.path.join(self.input_dir(), "before_dem.tif")
 
+    def after_dem_tif(self) -> str:
+        return os.path.join(self.input_dir(), "after_dem.tif")
+
     def asc_before(self) -> str:
         return os.path.join(self.input_dir(), "before.asc")
 

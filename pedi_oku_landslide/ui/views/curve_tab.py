@@ -18,7 +18,6 @@ from typing import Tuple, List, Dict, Optional
 # backend UI3 đã có sẵn
 from pedi_oku_landslide.pipeline.runners.ui3_backend import (
     auto_paths, list_lines, compute_profile, render_profile_png,
-    clamp_groups_to_slip, auto_group_profile_by_criteria,
     estimate_slip_curve, fit_bezier_smooth_curve, evaluate_nurbs_curve
 )
 from PyQt5.QtGui import QPen, QColor
@@ -35,6 +34,352 @@ import traceback
 import geopandas as gpd
 from shapely.geometry import LineString
 import rasterio
+
+WORKFLOW_GROUP_MIN_LEN_M = 20.0
+WORKFLOW_GROUPING_PARAMS = {
+    "rdp_eps_m": 0.5,
+    "curvature_thr_abs": 0.2,
+    "min_len_m": WORKFLOW_GROUP_MIN_LEN_M,
+    "narrow_variation_m": 20.0,
+    "graben_edge_window_m": 20.0,
+    "vector_zero_min_abs_dpara_m": 0.05,
+}
+
+
+def _rdp_polyline(points: List[Tuple[float, float]], eps: float) -> List[Tuple[float, float]]:
+    if len(points) <= 2:
+        return points[:]
+    x1, y1 = points[0]
+    x2, y2 = points[-1]
+    dx, dy = (x2 - x1), (y2 - y1)
+    den = math.hypot(dx, dy)
+    max_dist = -1.0
+    idx = -1
+    for i in range(1, len(points) - 1):
+        x0, y0 = points[i]
+        if den == 0:
+            d = math.hypot(x0 - x1, y0 - y1)
+        else:
+            d = abs(dy * x0 - dx * y0 + x2 * y1 - y2 * x1) / den
+        if d > max_dist:
+            max_dist = d
+            idx = i
+    if max_dist > eps and idx > 0:
+        left = _rdp_polyline(points[: idx + 1], eps)
+        right = _rdp_polyline(points[idx:], eps)
+        return left[:-1] + right
+    return [points[0], points[-1]]
+
+
+def _curvature_points_from_rdp(points: List[Tuple[float, float]]) -> List[float]:
+    if len(points) < 3:
+        return [0.0] * len(points)
+    k = [0.0] * len(points)
+    for i in range(1, len(points) - 1):
+        x1, y1 = points[i - 1]
+        x2, y2 = points[i]
+        x3, y3 = points[i + 1]
+        a = math.hypot(x2 - x3, y2 - y3)
+        b = math.hypot(x3 - x1, y3 - y1)
+        c = math.hypot(x1 - x2, y1 - y2)
+        if a == 0 or b == 0 or c == 0:
+            continue
+        s = 0.5 * (a + b + c)
+        area2 = max(s * (s - a) * (s - b) * (s - c), 0.0)
+        if area2 <= 0:
+            continue
+        R = (a * b * c) / (4.0 * math.sqrt(area2))
+        if R == 0:
+            continue
+        curv = 1.0 / R
+        cross = (x2 - x1) * (y3 - y2) - (y2 - y1) * (x3 - x2)
+        k[i] = -curv if cross < 0 else curv
+    return k
+
+
+def _mk_boundary(x: float, reason: str, score: float, fixed: bool = False) -> Dict[str, Any]:
+    return {"x": float(x), "reasons": [str(reason)], "score": float(score), "fixed": bool(fixed)}
+
+
+def _merge_close_boundaries(cands: List[Dict[str, Any]], tol_m: float = 1e-6) -> List[Dict[str, Any]]:
+    if not cands:
+        return []
+    cands = sorted(cands, key=lambda t: float(t["x"]))
+    out: List[Dict[str, Any]] = []
+    for c in cands:
+        if not out:
+            out.append(dict(c))
+            continue
+        if abs(float(c["x"]) - float(out[-1]["x"])) <= float(tol_m):
+            out[-1]["fixed"] = bool(out[-1]["fixed"]) or bool(c["fixed"])
+            out[-1]["reasons"] = sorted(set(list(out[-1]["reasons"]) + list(c["reasons"])))
+            if float(c["score"]) > float(out[-1]["score"]):
+                out[-1]["x"] = float(c["x"])
+                out[-1]["score"] = float(c["score"])
+        else:
+            out.append(dict(c))
+    return out
+
+
+def _pick_graben_endpoints_from_curvature(
+    xs: np.ndarray,
+    ks: np.ndarray,
+    smin: float,
+    smax: float,
+    curvature_thr_abs: float,
+    edge_window_m: float,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    win = max(1e-6, float(edge_window_m))
+    left_mask = np.isfinite(xs) & np.isfinite(ks) & (xs >= smin) & (xs <= min(smax, smin + win))
+    right_mask = np.isfinite(xs) & np.isfinite(ks) & (xs >= max(smin, smax - win)) & (xs <= smax)
+
+    def _pick(mask: np.ndarray, fallback_x: float, reason: str) -> Dict[str, Any]:
+        if int(np.count_nonzero(mask)) <= 0:
+            return _mk_boundary(fallback_x, reason, score=0.0, fixed=True)
+        xw = xs[mask]
+        kw = ks[mask]
+        idx = int(np.argmax(np.abs(kw)))
+        x_best = float(xw[idx])
+        k_best = float(kw[idx])
+        if abs(k_best) <= float(curvature_thr_abs):
+            x_best = float(fallback_x)
+        return _mk_boundary(x_best, reason, score=abs(k_best), fixed=True)
+
+    left = _pick(left_mask, float(smin), "graben_left")
+    right = _pick(right_mask, float(smax), "graben_right")
+    if float(right["x"]) <= float(left["x"]):
+        left = _mk_boundary(float(smin), "graben_left", score=float(left["score"]), fixed=True)
+        right = _mk_boundary(float(smax), "graben_right", score=float(right["score"]), fixed=True)
+    return left, right
+
+
+def _curvature_sign_change_boundaries(
+    xs: np.ndarray,
+    ks: np.ndarray,
+    smin: float,
+    smax: float,
+    curvature_thr_abs: float,
+) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    if xs.size < 2:
+        return out
+    for i in range(xs.size - 1):
+        x0 = float(xs[i]); x1 = float(xs[i + 1])
+        k0 = float(ks[i]); k1 = float(ks[i + 1])
+        if not (np.isfinite(x0) and np.isfinite(x1) and np.isfinite(k0) and np.isfinite(k1)):
+            continue
+        if not (smin <= x0 <= smax and smin <= x1 <= smax):
+            continue
+        if (k0 * k1) >= 0.0:
+            continue
+        if (abs(k0) <= float(curvature_thr_abs)) or (abs(k1) <= float(curvature_thr_abs)):
+            continue
+        den = (k1 - k0)
+        if abs(den) <= 1e-12:
+            continue
+        t = float(np.clip(-k0 / den, 0.0, 1.0))
+        x_cross = x0 + t * (x1 - x0)
+        if smin <= x_cross <= smax:
+            out.append(_mk_boundary(x_cross, "curvature_sign_change", score=min(abs(k0), abs(k1)), fixed=False))
+    return out
+
+
+def _vector_zero_cross_boundaries(
+    chain: np.ndarray,
+    dpara: np.ndarray,
+    smin: float,
+    smax: float,
+    min_abs_dpara_m: float,
+) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    m = np.isfinite(chain) & np.isfinite(dpara) & (chain >= smin) & (chain <= smax)
+    if int(np.count_nonzero(m)) < 2:
+        return out
+    c = np.asarray(chain[m], dtype=float)
+    p = np.asarray(dpara[m], dtype=float)
+    idx = np.argsort(c)
+    c = c[idx]; p = p[idx]
+
+    for i in range(c.size - 1):
+        s0 = float(c[i]); s1 = float(c[i + 1])
+        p0 = float(p[i]); p1 = float(p[i + 1])
+        if not (np.isfinite(s0) and np.isfinite(s1) and np.isfinite(p0) and np.isfinite(p1)):
+            continue
+        if (p0 * p1) >= 0.0:
+            continue
+        if (abs(p0) < float(min_abs_dpara_m)) or (abs(p1) < float(min_abs_dpara_m)):
+            continue
+        den = (p1 - p0)
+        if abs(den) <= 1e-12:
+            continue
+        t = float(np.clip(-p0 / den, 0.0, 1.0))
+        x_cross = s0 + t * (s1 - s0)
+        if smin <= x_cross <= smax:
+            out.append(_mk_boundary(x_cross, "vector_zero_cross", score=min(abs(p0), abs(p1)), fixed=False))
+    return out
+
+
+def _select_boundaries_with_min_gap(
+    candidates: List[Dict[str, Any]],
+    left_boundary: Dict[str, Any],
+    right_boundary: Dict[str, Any],
+    min_gap_m: float,
+) -> List[Dict[str, Any]]:
+    gap = max(1e-6, float(min_gap_m))
+    left_x = float(left_boundary["x"])
+    right_x = float(right_boundary["x"])
+    if right_x <= left_x:
+        return []
+
+    kept: List[Dict[str, Any]] = _merge_close_boundaries([left_boundary, right_boundary])
+    optionals = []
+    for c in (candidates or []):
+        if bool(c.get("fixed", False)):
+            continue
+        x = float(c.get("x", np.nan))
+        if np.isfinite(x) and (left_x < x < right_x):
+            optionals.append(dict(c))
+    optionals = _merge_close_boundaries(optionals)
+    optionals.sort(key=lambda t: (-float(t.get("score", 0.0)), float(t.get("x", 0.0))))
+
+    for c in optionals:
+        x = float(c["x"])
+        if all(abs(x - float(k["x"])) >= gap for k in kept):
+            kept.append(dict(c))
+    kept = _merge_close_boundaries(kept)
+    kept.sort(key=lambda t: float(t["x"]))
+    return kept
+
+
+def auto_group_profile_by_criteria(
+    prof: Dict[str, Any],
+    rdp_eps_m: float = 0.5,
+    curvature_thr_abs: float = 0.2,
+    min_len_m: float = 20.0,
+    narrow_variation_m: float = 20.0,
+    graben_edge_window_m: float = 20.0,
+    vector_zero_min_abs_dpara_m: float = 0.05,
+) -> List[Dict[str, Any]]:
+    chain = np.asarray(prof.get("chain", []), dtype=float)
+    elev_s = np.asarray(prof.get("elev_s", []), dtype=float)
+    dpa = np.asarray(prof.get("d_para", []), dtype=float)
+    if chain.ndim != 1 or elev_s.ndim != 1 or dpa.ndim != 1 or chain.size < 3:
+        return []
+
+    if "slip_span" in prof and prof["slip_span"]:
+        smin, smax = map(float, prof["slip_span"])
+    else:
+        finite = np.isfinite(chain) & np.isfinite(elev_s)
+        if int(np.count_nonzero(finite)) < 2:
+            return []
+        smin = float(np.nanmin(chain[finite]))
+        smax = float(np.nanmax(chain[finite]))
+    if smax < smin:
+        smin, smax = smax, smin
+    if smax <= smin:
+        return []
+
+    finite_curve = np.isfinite(chain) & np.isfinite(elev_s) & (chain >= smin) & (chain <= smax)
+    if int(np.count_nonzero(finite_curve)) < 3:
+        return []
+    pts = list(zip(chain[finite_curve].tolist(), elev_s[finite_curve].tolist()))
+    rdp_pts = _rdp_polyline(pts, float(rdp_eps_m))
+    if len(rdp_pts) < 3:
+        return []
+    rdp_arr = np.asarray(rdp_pts, dtype=float)
+    xs = rdp_arr[:, 0]
+    ks = np.asarray(_curvature_points_from_rdp(rdp_pts), dtype=float)
+
+    left_b, right_b = _pick_graben_endpoints_from_curvature(
+        xs=xs,
+        ks=ks,
+        smin=smin,
+        smax=smax,
+        curvature_thr_abs=float(curvature_thr_abs),
+        edge_window_m=float(graben_edge_window_m),
+    )
+
+    candidates: List[Dict[str, Any]] = [left_b, right_b]
+    candidates.extend(_curvature_sign_change_boundaries(
+        xs=xs,
+        ks=ks,
+        smin=float(left_b["x"]),
+        smax=float(right_b["x"]),
+        curvature_thr_abs=float(curvature_thr_abs),
+    ))
+    candidates.extend(_vector_zero_cross_boundaries(
+        chain=chain,
+        dpara=dpa,
+        smin=float(left_b["x"]),
+        smax=float(right_b["x"]),
+        min_abs_dpara_m=float(vector_zero_min_abs_dpara_m),
+    ))
+
+    kept = _select_boundaries_with_min_gap(
+        candidates=candidates,
+        left_boundary=left_b,
+        right_boundary=right_b,
+        min_gap_m=float(narrow_variation_m),
+    )
+    if len(kept) < 2:
+        return []
+
+    boundaries = [float(k["x"]) for k in kept]
+    reasons = ["/".join(k.get("reasons", [])) for k in kept]
+    colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+              "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"]
+    groups: List[Dict[str, Any]] = []
+    for bi, (s, e) in enumerate(zip(boundaries[:-1], boundaries[1:])):
+        if (e - s) < float(min_len_m):
+            continue
+        idx = len(groups) + 1
+        groups.append({
+            "id": f"G{idx}",
+            "start": float(s),
+            "end": float(e),
+            "color": colors[(idx - 1) % len(colors)],
+            "start_reason": reasons[bi],
+            "end_reason": reasons[bi + 1],
+        })
+    return groups
+
+
+def clamp_groups_to_slip(prof: Dict[str, Any], groups: List[Dict[str, Any]], min_len: float = WORKFLOW_GROUP_MIN_LEN_M) -> List[Dict[str, Any]]:
+    chain = np.asarray(prof.get("chain", []), dtype=float)
+    elevs = np.asarray(prof.get("elev_s", []), dtype=float)
+    if "slip_span" in prof and prof["slip_span"]:
+        smin, smax = map(float, prof["slip_span"])
+    else:
+        keep = np.isfinite(chain) & np.isfinite(elevs)
+        if int(np.count_nonzero(keep)) <= 0:
+            return []
+        smin = float(np.nanmin(chain[keep]))
+        smax = float(np.nanmax(chain[keep]))
+    if smax < smin:
+        smin, smax = smax, smin
+
+    out: List[Dict[str, Any]] = []
+    for g in (groups or []):
+        try:
+            s = float(g.get("start", g.get("start_chainage", 0.0)))
+            e = float(g.get("end", g.get("end_chainage", 0.0)))
+        except Exception:
+            continue
+        if e < s:
+            s, e = e, s
+        s = max(s, smin)
+        e = min(e, smax)
+        if (e - s) >= float(min_len):
+            out.append({
+                "id": str(g.get("id", f"G{len(out) + 1}")),
+                "start": float(s),
+                "end": float(e),
+                "color": g.get("color", None),
+                "start_reason": g.get("start_reason", ""),
+                "end_reason": g.get("end_reason", ""),
+            })
+    return out
+
 
 def _build_gdf_from_sections_csv(csv_path: str, dem_path: str) -> gpd.GeoDataFrame:
     """
@@ -1292,6 +1637,9 @@ class CurveAnalyzeTab(QWidget):
     def _nurbs_json_path_for(self, line_id: str) -> str:
         return os.path.join(self._preview_dir(), f"profile_{line_id}_nurbs.json")
 
+    def _ground_json_path_for(self, line_id: str) -> str:
+        return os.path.join(self._curve_dir(), f"ground_{line_id}.json")
+
     def _on_nurbs_save(self) -> None:
         if not self._active_prof:
             self._warn("[UI3] No active profile to save NURBS.")
@@ -1497,11 +1845,11 @@ class CurveAnalyzeTab(QWidget):
                 return
 
             # 3) Auto-group (Criteria-based method 2)
-            self._log("[UI3] Auto Group method: Criteria-based (NURBS)")
-            groups = auto_group_profile_by_criteria(prof)
+            self._log("[UI3] Auto Group method: Workflow Step-5 criteria")
+            groups = auto_group_profile_by_criteria(prof, **WORKFLOW_GROUPING_PARAMS)
             group_method = "traditional"
 
-            groups = clamp_groups_to_slip(prof, groups)
+            groups = clamp_groups_to_slip(prof, groups, min_len=WORKFLOW_GROUP_MIN_LEN_M)
             if not groups:
                 self._warn("[UI3] Auto grouping produced no segments within slip zone.")
                 return
@@ -1569,8 +1917,8 @@ class CurveAnalyzeTab(QWidget):
                 except Exception:
                     groups = []
             if not groups:
-                groups = auto_group_profile_by_criteria(prof)
-                groups = clamp_groups_to_slip(prof, groups)
+                groups = auto_group_profile_by_criteria(prof, **WORKFLOW_GROUPING_PARAMS)
+                groups = clamp_groups_to_slip(prof, groups, min_len=WORKFLOW_GROUP_MIN_LEN_M)
                 if not groups:
                     self._warn("[UI3] Auto grouping produced no segments within slip zone.");
                     return
@@ -1582,7 +1930,7 @@ class CurveAnalyzeTab(QWidget):
                     curve_method=curve_method,
                 )
             else:
-                groups = clamp_groups_to_slip(prof, groups)
+                groups = clamp_groups_to_slip(prof, groups, min_len=WORKFLOW_GROUP_MIN_LEN_M)
                 if not groups:
                     self._warn("[UI3] No groups within slip zone.");
                     return
@@ -2117,17 +2465,27 @@ class CurveAnalyzeTab(QWidget):
                     return p
             return ""
 
-        # Prefer raw DEM inputs over smoothed/cropped outputs
+        # Prefer smoothed AFTER DEM for ground/profile rendering.
         self.dem_path = _pick_first(
+            os.path.join(run_dir, "ui1", "after_dem_smooth.tif"),
+            meta_inputs.get("after_dem") or "",
             meta_inputs.get("before_dem") or "",
             js.get("dem_ground_path") or "",
             ap.get("dem", ""),
             meta_inputs.get("before_asc") or "",
+            os.path.join(run_dir, "input", "after_dem.tif"),
             os.path.join(run_dir, "input", "before_dem.tif"),
             os.path.join(run_dir, "input", "before.asc"),
             meta_processed.get("dem_cropped") or "",
         )
         self._log(f"[UI3] Ground DEM input: {self.dem_path}")
+        self.ground_export_dem_path = _pick_first(
+            os.path.join(run_dir, "ui1", "after_dem_smooth.tif"),
+            meta_inputs.get("after_dem") or "",
+            os.path.join(run_dir, "input", "after_dem.tif"),
+            self.dem_path,
+        )
+        self._log(f"[UI3] Ground export DEM input: {self.ground_export_dem_path}")
         self.dx_path = _pick_first(
             js.get("dx_path") or "",
             ap.get("dx", ""),
@@ -2191,6 +2549,7 @@ class CurveAnalyzeTab(QWidget):
 
         # 3) Reset các path dữ liệu
         self.dem_path = ""
+        self.ground_export_dem_path = ""
         self.dx_path = ""
         self.dy_path = ""
         self.dz_path = ""
@@ -2464,7 +2823,7 @@ class CurveAnalyzeTab(QWidget):
             groups_now = self._read_groups_from_table() or []
             if groups_now and self._active_prof:
                 try:
-                    groups_now = clamp_groups_to_slip(self._active_prof, groups_now)
+                    groups_now = clamp_groups_to_slip(self._active_prof, groups_now, min_len=WORKFLOW_GROUP_MIN_LEN_M)
                 except Exception:
                     pass
             self._active_groups = groups_now
@@ -2559,7 +2918,7 @@ class CurveAnalyzeTab(QWidget):
         groups = self._read_groups_from_table() or []
         if groups and self._active_prof:
             try:
-                groups = clamp_groups_to_slip(self._active_prof, groups)
+                groups = clamp_groups_to_slip(self._active_prof, groups, min_len=WORKFLOW_GROUP_MIN_LEN_M)
             except Exception:
                 pass
         self._active_groups = groups
@@ -3090,6 +3449,60 @@ class CurveAnalyzeTab(QWidget):
             json.dump(payload, f, ensure_ascii=False, indent=2)
         return out_json
 
+    def _save_ground_json_for_line(self, line_id: str, geom, step_m: float) -> Optional[str]:
+        dem_path = str(getattr(self, "ground_export_dem_path", "") or "").strip()
+        if not dem_path or not os.path.exists(dem_path):
+            return None
+
+        prof = compute_profile(
+            dem_path,
+            self.dx_path,
+            self.dy_path,
+            self.dz_path,
+            geom,
+            step_m=step_m,
+            smooth_win=11,
+            smooth_poly=2,
+            slip_mask_path=self.slip_path,
+            slip_only=False,
+        )
+        if not prof:
+            return None
+
+        chain = np.asarray(prof.get("chain", []), dtype=float)
+        x = np.asarray(prof.get("x", []), dtype=float) if prof.get("x", None) is not None else None
+        y = np.asarray(prof.get("y", []), dtype=float) if prof.get("y", None) is not None else None
+        elev = np.asarray(prof.get("elev_s", []), dtype=float) if prof.get("elev_s", None) is not None else None
+        if chain.size == 0 or elev is None:
+            return None
+
+        rows: List[dict] = []
+        for i in range(int(chain.size)):
+            ch = float(chain[i]) if np.isfinite(chain[i]) else None
+            zz = float(elev[i]) if i < elev.size and np.isfinite(elev[i]) else None
+            if ch is None or zz is None:
+                continue
+            xx = float(x[i]) if x is not None and i < x.size and np.isfinite(x[i]) else None
+            yy = float(y[i]) if y is not None and i < y.size and np.isfinite(y[i]) else None
+            rows.append({
+                "index": i,
+                "chain_m": ch,
+                "x": xx,
+                "y": yy,
+                "ground_m": zz,
+            })
+
+        payload = {
+            "line_id": line_id,
+            "source_dem_path": dem_path.replace("\\", "/"),
+            "count": len(rows),
+            "ground": rows,
+        }
+        out_json = self._ground_json_path_for(line_id)
+        with open(out_json, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        return out_json
+
     # tiện gọi ở mọi nơi hiện tại (giữ chữ ký cũ không tham số)
     def _profile_png_path(self) -> str:
         return self._profile_png_path_for(self._line_id_current())
@@ -3133,7 +3546,7 @@ class CurveAnalyzeTab(QWidget):
         # 3) Lấy nhóm hiện hành (ưu tiên JSON, fallback bảng), rồi clamp theo slip
         groups = self._get_groups_for_current_line()  # <- dùng helper trả list
         if groups:
-            groups = clamp_groups_to_slip(prof, groups)
+            groups = clamp_groups_to_slip(prof, groups, min_len=WORKFLOW_GROUP_MIN_LEN_M)
 
         # 4) Gọi backend vẽ PNG (tô màu theo group nếu có)
         line_id = self._line_id_current()
@@ -3187,6 +3600,12 @@ class CurveAnalyzeTab(QWidget):
                 self._log(f"[UI3] Saved vectors JSON: {vec_json}")
         except Exception as e:
             self._warn(f"[UI3] Cannot save vectors JSON: {e}")
+        try:
+            ground_json = self._save_ground_json_for_line(line_id, geom, step_m=float(self.step_box.value()))
+            if ground_json:
+                self._log(f"[UI3] Saved ground JSON: {ground_json}")
+        except Exception as e:
+            self._warn(f"[UI3] Cannot save ground JSON: {e}")
 
         # KHÔNG vẽ overlay guide nữa vì đã vẽ sẵn trong backend
 
@@ -3227,7 +3646,7 @@ class CurveAnalyzeTab(QWidget):
             line_id = self._line_id_current()
             groups = self._read_groups_from_table()
             if groups:
-                groups = clamp_groups_to_slip(self._active_prof, groups)
+                groups = clamp_groups_to_slip(self._active_prof, groups, min_len=WORKFLOW_GROUP_MIN_LEN_M)
             self._active_groups = groups or []
             params = self._build_default_nurbs_params(
                 line_id=line_id,
@@ -3535,7 +3954,7 @@ class CurveAnalyzeTab(QWidget):
                 slip_mask_path=self.slip_path, slip_only=True
             )
             if prof:
-                groups = auto_group_profile_by_criteria(prof)
+                groups = auto_group_profile_by_criteria(prof, **WORKFLOW_GROUPING_PARAMS)
 
         # clamp trong slip-zone
         try:
@@ -3549,7 +3968,7 @@ class CurveAnalyzeTab(QWidget):
             )
             if prof:
                 prof_for_stats = prof
-                groups = clamp_groups_to_slip(prof, groups)
+                groups = clamp_groups_to_slip(prof, groups, min_len=WORKFLOW_GROUP_MIN_LEN_M)
         except Exception:
             pass
 

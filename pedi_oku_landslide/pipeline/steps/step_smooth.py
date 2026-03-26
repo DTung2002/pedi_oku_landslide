@@ -44,18 +44,21 @@ def _save_preview_png(arr: np.ndarray, transform: Affine, out_png: str, title: s
 
 def run_smooth(ctx: AnalysisContext, param_m: float = 2.0) -> dict:
     """
-    Smooth both BEFORE.asc and AFTER.asc using Mean filter.
+    Smooth BEFORE.asc, AFTER.asc, and AFTER DEM using Mean filter.
     Outputs:
       - GeoTIFFs: ui1/before_asc_smooth.tif, ui1/after_asc_smooth.tif
-      - PNG previews: ui1/before_asc_smooth.png, ui1/after_asc_smooth.png
+                  ui1/after_dem_smooth.tif
+      - PNG previews: ui1/before_asc_smooth.png, ui1/after_asc_smooth.png,
+                      ui1/after_dem_smooth.png
       - JSON: ui1/smooth_meta.json (method, param_m, radius_px)
     Returns dict with output paths.
     """
-    # ---- read BEFORE.asc
+    # ---- read BEFORE/AFTER ASC + AFTER DEM
     before_path = os.path.join(ctx.in_dir, "before.asc")
     after_path  = os.path.join(ctx.in_dir, "after.asc")
-    if not (os.path.exists(before_path) and os.path.exists(after_path)):
-        raise FileNotFoundError("before.asc or after.asc not found in run/input")
+    after_dem_path = os.path.join(ctx.in_dir, "after_dem.tif")
+    if not (os.path.exists(before_path) and os.path.exists(after_path) and os.path.exists(after_dem_path)):
+        raise FileNotFoundError("before.asc, after.asc, or after_dem.tif not found in run/input")
 
     with rasterio.open(before_path) as ds_b:
         b_arr = ds_b.read(1).astype("float32")
@@ -69,32 +72,47 @@ def run_smooth(ctx: AnalysisContext, param_m: float = 2.0) -> dict:
         a_transform = ds_a.transform
         a_crs = ds_a.crs
 
+    with rasterio.open(after_dem_path) as ds_d:
+        d_arr = ds_d.read(1).astype("float32")
+        d_meta = ds_d.meta.copy()
+        d_transform = ds_d.transform
+        d_crs = ds_d.crs
+
     # optional: check CRS一致 (nếu khác, cảnh báo/lỗi)
     if (b_crs is not None) and (a_crs is not None) and (b_crs != a_crs):
         raise ValueError("BEFORE and AFTER have different CRS. Please reproject first.")
+    if (a_crs is not None) and (d_crs is not None) and (a_crs != d_crs):
+        raise ValueError("AFTER.asc and AFTER DEM.tif have different CRS. Please reproject first.")
 
     # ---- smooth (Mean-only)
     method = "Mean"
     b_radius_px = _radius_m_to_px(b_transform, param_m)
     a_radius_px = _radius_m_to_px(a_transform, param_m)
+    d_radius_px = _radius_m_to_px(d_transform, param_m)
     b_sm = smooth_mean(b_arr, radius_px=b_radius_px)
     a_sm = smooth_mean(a_arr, radius_px=a_radius_px)
+    d_sm = smooth_mean(d_arr, radius_px=d_radius_px)
 
     # ---- write GeoTIFFs
     out_b_tif = os.path.join(ctx.out_ui1, "before_asc_smooth.tif")
     out_a_tif = os.path.join(ctx.out_ui1, "after_asc_smooth.tif")
+    out_d_tif = os.path.join(ctx.out_ui1, "after_dem_smooth.tif")
     os.makedirs(ctx.out_ui1, exist_ok=True)
     b_meta.update(dtype="float32", count=1, compress="lzw")
     a_meta.update(dtype="float32", count=1, compress="lzw")
+    d_meta.update(dtype="float32", count=1, compress="lzw")
 
     with rasterio.open(out_b_tif, "w", **b_meta) as d:
         d.write(b_sm, 1)
     with rasterio.open(out_a_tif, "w", **a_meta) as d:
         d.write(a_sm, 1)
+    with rasterio.open(out_d_tif, "w", **d_meta) as d:
+        d.write(d_sm, 1)
 
     # ---- PNG previews
     out_b_png = os.path.join(ctx.out_ui1, "before_asc_smooth.png")
     out_a_png = os.path.join(ctx.out_ui1, "after_asc_smooth.png")
+    out_d_png = os.path.join(ctx.out_ui1, "after_dem_smooth.png")
     _save_preview_png(
         b_sm,
         b_transform,
@@ -107,6 +125,12 @@ def run_smooth(ctx: AnalysisContext, param_m: float = 2.0) -> dict:
         out_a_png,
         f"after.asc (smooth {method} radius={param_m}m, px={a_radius_px[1]:.2f}x{a_radius_px[0]:.2f})",
     )
+    _save_preview_png(
+        d_sm,
+        d_transform,
+        out_d_png,
+        f"after_dem.tif (smooth {method} radius={param_m}m, px={d_radius_px[1]:.2f}x{d_radius_px[0]:.2f})",
+    )
 
     # ---- meta
     meta_path = os.path.join(ctx.out_ui1, "smooth_meta.json")
@@ -117,6 +141,7 @@ def run_smooth(ctx: AnalysisContext, param_m: float = 2.0) -> dict:
                 "param_m": float(param_m),
                 "before_radius_px_rc": [float(b_radius_px[0]), float(b_radius_px[1])],
                 "after_radius_px_rc": [float(a_radius_px[0]), float(a_radius_px[1])],
+                "after_dem_radius_px_rc": [float(d_radius_px[0]), float(d_radius_px[1])],
             },
             f,
             ensure_ascii=False,
@@ -126,7 +151,9 @@ def run_smooth(ctx: AnalysisContext, param_m: float = 2.0) -> dict:
     return {
         "before_tif": out_b_tif.replace("\\", "/"),
         "after_tif":  out_a_tif.replace("\\", "/"),
+        "after_dem_tif": out_d_tif.replace("\\", "/"),
         "before_png": out_b_png.replace("\\", "/"),
         "after_png":  out_a_png.replace("\\", "/"),
+        "after_dem_png": out_d_png.replace("\\", "/"),
         "meta": meta_path.replace("\\", "/"),
     }

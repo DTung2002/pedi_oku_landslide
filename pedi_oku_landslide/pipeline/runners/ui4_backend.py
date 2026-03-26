@@ -415,11 +415,14 @@ def collect_ui4_run_inputs(run_dir: str) -> Dict[str, Any]:
     dxf_boundary = _find_ui4_dxf_boundary(run_dir)
 
     dem_tif_candidates = sorted(glob.glob(os.path.join(input_dir, "*.tif")))
-    # Prefer DEM-like filenames when multiple TIFFs exist in input/.
     dem_preferred = [
+        os.path.join(input_dir, "after_dem.tif"),
+        os.path.join(input_dir, "before_dem.tif"),
+    ]
+    dem_preferred.extend(
         p for p in dem_tif_candidates
         if any(tag in os.path.basename(p).lower() for tag in ("ground", "dem"))
-    ]
+    )
     dem_path = _pick_existing(dem_preferred or dem_tif_candidates)
 
     intersections_json = _pick_existing([os.path.join(ui2_dir, "intersections_main_cross.json")])

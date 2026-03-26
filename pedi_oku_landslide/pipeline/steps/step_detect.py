@@ -151,7 +151,7 @@ def run_detect(
             with open(meta_path, "r", encoding="utf-8") as f:
                 meta = json.load(f) or {}
             inputs = meta.get("inputs") or {}
-            dem_path = inputs.get("before_dem")
+            dem_path = inputs.get("after_dem") or inputs.get("before_dem")
 
         if not dem_path or not os.path.exists(dem_path):
             # fallback: look for GeoTIFF in input dir

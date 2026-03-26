@@ -45,6 +45,12 @@ def auto_paths() -> dict:
         js.get("dem_ground_path", ""),
     ])
 
+    dem_orig = pick_first_exists([
+        _out("UI1", "step1_crop", "before_ground.asc"),
+        _out("UI1", "step1_crop", "before_ground.tif"),
+        js.get("dem_ground_path", ""),
+    ])
+
     dx = pick_first_exists([
         _out("UI1", "dX.asc"),
         _out("UI1", "step2_sad", "dX.asc"),
@@ -75,7 +81,7 @@ def auto_paths() -> dict:
         js.get("slip_path", ""),
     ])
 
-    return {"dem": dem, "dx": dx, "dy": dy, "dz": dz, "lines": lines, "slip": slip}
+    return {"dem": dem, "dem_orig": dem_orig, "dx": dx, "dy": dy, "dz": dz, "lines": lines, "slip": slip}
 
 
 # IO/GEOM HELPERS
@@ -358,6 +364,7 @@ def compute_profile(
     smooth_poly: int = 2,
     slip_mask_path: Optional[str] = None,
     slip_only: bool = True,
+    dem_orig_path: Optional[str] = None,
 ) -> Dict[str, np.ndarray]:
     dem_ds, _ = _open_raster(dem_path)
     dx_ds,  _ = _open_raster(dx_path)
@@ -373,6 +380,12 @@ def compute_profile(
     dx   = _sample(dx_ds,  xs, ys)
     dy   = _sample(dy_ds,  xs, ys)
     dz   = _sample(dz_ds,  xs, ys)
+
+    elev_orig = None
+    if dem_orig_path and os.path.exists(dem_orig_path):
+        dem_orig_ds, _ = _open_raster(dem_orig_path)
+        elev_orig = _sample(dem_orig_ds, xs, ys)
+        dem_orig_ds.close()
 
     # Convert pixel displacement to meters; flip Y to north-up.
     px_m = abs(float(dx_ds.transform.a))
@@ -406,6 +419,8 @@ def compute_profile(
             dz[~keep]   = np.nan
             d_para[~keep] = np.nan
             theta_deg[~keep] = np.nan
+            if elev_orig is not None:
+                elev_orig[~keep] = np.nan
 
     # smooth ground (DISABLED SAVITZKY-GOLAY, use UI1 smoothing instead)
     elev_s = elev.copy()
@@ -430,9 +445,10 @@ def compute_profile(
         "theta": theta_deg,
         "slip_mask": mask_bool,
         "slip_span": slip_span,
+        "elev_orig": elev_orig,
     }
 
-def clamp_groups_to_slip(prof: dict, groups: list, min_len: float = 0.20) -> list:
+def clamp_groups_to_slip(prof: dict, groups: list, min_len: float = 20.0) -> list:
     chain = np.asarray(prof.get("chain"), float)
     elevs = np.asarray(prof.get("elev_s"), float)
 
@@ -845,6 +861,19 @@ def render_profile_png(
                                        ensure_ascii=False, indent=2)
                     except Exception:
                         pass
+                        
+                if save_curve_json and out_png and "elev_s" in prof and prof["elev_s"] is not None:
+                    gjson = out_png.rsplit(".", 1)[0] + "_ground_smoothed.json"
+                    try:
+                        import json as _json
+                        fin = np.isfinite(prof["chain"]) & np.isfinite(prof["elev_s"])
+                        ch_fin = prof["chain"][fin]
+                        el_fin = prof["elev_s"][fin]
+                        with open(gjson, "w", encoding="utf-8") as f:
+                            _json.dump({"ground_smoothed": [{"s": float(s), "z": float(z)} for s, z in zip(ch_fin, el_fin)]}, f,
+                                       ensure_ascii=False, indent=2)
+                    except Exception:
+                        pass
             else:
                 pass
 
@@ -1066,10 +1095,10 @@ def _cluster_chain_marks(chain_marks: np.ndarray, gap_m: float = 0.5) -> List[fl
 def auto_group_profile_by_criteria(
     prof: dict,
     rdp_eps_m: float = 0.5,
-    curvature_thr_abs: float = 2.0,
+    curvature_thr_abs: float = 0.2,
+    min_len_m: float = 20.0,
     horizontal_angle_tol_deg: float = 5.0,
     horizontal_cluster_gap_m: float = 0.5,
-    min_len_m: float = 0.20,
 ) -> list:
     """
     New standalone grouping rule:
