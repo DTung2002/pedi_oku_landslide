@@ -277,6 +277,31 @@ def _mean_filter_profile_by_chain(chain: np.ndarray, elev: np.ndarray, radius_m:
     return out
 
 
+def _profile_elevation_for_curvature(prof: Dict[str, np.ndarray]) -> np.ndarray:
+    chain = np.asarray(prof.get("chain", []), dtype=float)
+    elev = np.asarray(prof.get("elev", []), dtype=float)
+    elev_s = np.asarray(prof.get("elev_s", []), dtype=float)
+    elev_orig = np.asarray(prof.get("elev_orig", []), dtype=float)
+    src = str(prof.get("profile_dem_source", "") or "").strip().lower()
+
+    def _valid(arr: np.ndarray) -> bool:
+        return arr.ndim == 1 and arr.size == chain.size
+
+    if src == "raw":
+        for arr in (elev, elev_s, elev_orig):
+            if _valid(arr):
+                return arr
+    elif src == "smooth":
+        for arr in (elev_s, elev, elev_orig):
+            if _valid(arr):
+                return arr
+    else:
+        for arr in (elev_s, elev, elev_orig):
+            if _valid(arr):
+                return arr
+    return np.array([], dtype=float)
+
+
 def _clip_polyline_to_span(xs: np.ndarray, ys: np.ndarray, smin: float, smax: float) -> Tuple[np.ndarray, np.ndarray]:
     xs = np.asarray(xs, dtype=float)
     ys = np.asarray(ys, dtype=float)
@@ -328,8 +353,7 @@ def extract_curvature_rdp_nodes(
     restrict_to_slip_span: bool = True,
 ) -> Dict[str, np.ndarray]:
     chain = np.asarray(prof.get("chain", []), dtype=float)
-    elev_orig = np.asarray(prof.get("elev_orig", []), dtype=float)
-    elev_s = np.asarray(prof.get("elev_s", []), dtype=float)
+    elev_curve = _profile_elevation_for_curvature(prof)
     empty = {
         "chain": np.array([], dtype=float),
         "elev": np.array([], dtype=float),
@@ -339,12 +363,10 @@ def extract_curvature_rdp_nodes(
     }
     if chain.ndim != 1 or chain.size < 3:
         return empty
-    if elev_orig.ndim != 1 or elev_orig.size != chain.size:
-        elev_orig = elev_s
-    if elev_orig.ndim != 1 or elev_orig.size != chain.size:
+    if elev_curve.ndim != 1 or elev_curve.size != chain.size:
         return empty
 
-    finite = np.isfinite(chain) & np.isfinite(elev_orig)
+    finite = np.isfinite(chain) & np.isfinite(elev_curve)
     finite0 = finite
     if int(np.count_nonzero(finite0)) < 2:
         return empty
@@ -364,7 +386,13 @@ def extract_curvature_rdp_nodes(
         return empty
 
     chain_w = np.asarray(chain[finite], dtype=float)
-    elev_w = np.asarray(elev_orig[finite], dtype=float)
+    elev_w = np.asarray(elev_curve[finite], dtype=float)
+    if restrict_to_slip_span:
+        # Clip the profile first so smoothing + RDP are evaluated on the
+        # visible/slip span itself instead of on the full line and cropped later.
+        chain_w, elev_w = _clip_polyline_to_span(chain_w, elev_w, float(smin), float(smax))
+        if chain_w.size < 3 or elev_w.size != chain_w.size:
+            return empty
     elev_sm = _mean_filter_profile_by_chain(chain_w, elev_w, float(smooth_radius_m))
     finite_sm = np.isfinite(chain_w) & np.isfinite(elev_sm)
     if int(np.count_nonzero(finite_sm)) < 3:
@@ -402,20 +430,33 @@ def _curvature_plot_series(
         prof,
         rdp_eps_m=float(rdp_eps_m),
         smooth_radius_m=float(smooth_radius_m),
+        # Plot curvature like the source document: compute on the full profile,
+        # then crop only for display. This avoids forcing the visible endpoints
+        # to become local-RDP endpoints with curvature fixed at 0.
         restrict_to_slip_span=False,
     )
     xs = np.asarray(nodes.get("chain", []), dtype=float)
     ys = np.asarray(nodes.get("curvature", []), dtype=float)
     if xs.size < 2 or ys.size != xs.size:
         return np.array([], dtype=float), np.array([], dtype=float)
-
     if prof.get("slip_span"):
         try:
             smin, smax = map(float, prof.get("slip_span"))
+            return _clip_polyline_to_span(xs, ys, float(smin), float(smax))
         except Exception:
             return xs, ys
-        return _clip_polyline_to_span(xs, ys, float(smin), float(smax))
     return xs, ys
+
+
+def _group_boundary_style(reasons: List[str]) -> Dict[str, Any]:
+    rs = [str(r).strip().lower() for r in (reasons or []) if str(r).strip()]
+    if any(r in ("slip_span_start", "slip_span_end") for r in rs):
+        return {"color": "#1f77b4", "linestyle": "-", "linewidth": 1.3, "zorder": 10}
+    if any(r.startswith("curvature_gt_") for r in rs):
+        return {"color": "#1f77b4", "linestyle": "-", "linewidth": 1.3, "zorder": 10}
+    if any("vector_angle_zero_deg" == r for r in rs):
+        return {"color": "#d62728", "linestyle": "-", "linewidth": 1.3, "zorder": 10}
+    return {"color": "#555555", "linestyle": (0, (4, 4)), "linewidth": 0.9, "zorder": 10}
 
 def _infer_slip_curve_points(prof, group_ranges, eps_rdp=0.5, k_thr=0.0):
     ch = prof.get("chain")
@@ -665,6 +706,7 @@ def render_profile_png(
     legend_font: int = 20,
     ground_lw: float = 2.2,
     ungrouped_color: str = "#bbbbbb",
+    curvature_series: Optional[Tuple[np.ndarray, np.ndarray]] = None,
 ) -> Tuple[str, Optional[str]]:
 
     if not prof:
@@ -687,6 +729,12 @@ def render_profile_png(
 
     chain = prof["chain"]; elev_s = prof["elev_s"]
     d_para = prof["d_para"]; dz = prof["dz"]; theta = prof["theta"]
+    profile_src = str(prof.get("profile_dem_source", "") or "").strip().lower()
+    ground_label = "Ground"
+    if profile_src == "raw":
+        ground_label = "Ground (raw DEM)"
+    elif profile_src == "smooth":
+        ground_label = "Ground (smoothed DEM)"
 
     if (x_min is None) or (x_max is None):
         if "slip_span" in prof and prof["slip_span"]:
@@ -720,13 +768,13 @@ def render_profile_png(
 
     import matplotlib.pyplot as plt
     with plt.rc_context({'font.size': base_font}):
-        # 2 h├áng: [vectors ; gradient]
+        # 2 rows: [vectors ; gradient/curvature]
         fig = plt.figure(figsize=figsize if figsize else (18, 12), dpi=dpi)
-        gs = fig.add_gridspec(nrows=2, ncols=1, height_ratios=[3, 1], hspace=0.35)
+        gs = fig.add_gridspec(nrows=2, ncols=1, height_ratios=[3.0, 1.45], hspace=0.35)
         ax = fig.add_subplot(gs[0, 0])  # vectors/profile
         ax2 = fig.add_subplot(gs[1, 0], sharex=ax)  # gradient
 
-        ax.plot(chain, elev_s, "k-", lw=ground_lw, label="Ground (smoothed)")
+        ax.plot(chain, elev_s, "k-", lw=ground_lw, label=ground_label)
 
 
         finite = np.isfinite(chain) & np.isfinite(elev_s) & np.isfinite(d_para) & np.isfinite(dz)
@@ -769,6 +817,26 @@ def render_profile_png(
             prof_curv["slip_span"] = (float(plot_span_min), float(plot_span_max))
         else:
             prof_curv["slip_span"] = None
+
+        def _resolve_curvature_series() -> Tuple[np.ndarray, np.ndarray]:
+            if curvature_series is not None:
+                try:
+                    kx = np.asarray(curvature_series[0], dtype=float)
+                    kv = np.asarray(curvature_series[1], dtype=float)
+                    keep = np.isfinite(kx) & np.isfinite(kv)
+                    kx = kx[keep]
+                    kv = kv[keep]
+                    if kx.size >= 2 and kv.size == kx.size:
+                        order = np.argsort(kx)
+                        kx = kx[order]
+                        kv = kv[order]
+                        if (plot_span_min is not None) and (plot_span_max is not None):
+                            kx, kv = _clip_polyline_to_span(kx, kv, float(plot_span_min), float(plot_span_max))
+                        if kx.size >= 2 and kv.size == kx.size:
+                            return kx, kv
+                except Exception:
+                    pass
+            return _curvature_plot_series(prof_curv, rdp_eps_m=0.5, smooth_radius_m=0.0)
         if group_ranges:
             if "slip_span" in prof and prof["slip_span"]:
                 smin, smax = prof["slip_span"]
@@ -833,7 +901,7 @@ def render_profile_png(
             # Curvature from raw DEM profile -> RDP (signed k = 1/R).
             k_curve = None
             try:
-                k_x, k_vals = _curvature_plot_series(prof_curv, rdp_eps_m=0.5, smooth_radius_m=0.0)
+                k_x, k_vals = _resolve_curvature_series()
                 if k_x.size >= 3 and k_vals.size == k_x.size:
                     k_curve = np.asarray(k_vals, dtype=float)
                     ax2r.plot(k_x, k_vals, lw=1.8, color="#1f77b4",
@@ -841,7 +909,7 @@ def render_profile_png(
             except Exception:
                 pass
             ax2r.axhline(float(CURVATURE_THRESHOLD_PLOT_ABS), color="#cc3333", lw=1.1,
-                         linestyle=(0, (4, 3)), zorder=4, label="|Curvature| = 0.02")
+                         linestyle=(0, (4, 3)), zorder=4, label="_nolegend_")
             ax2r.axhline(-float(CURVATURE_THRESHOLD_PLOT_ABS), color="#cc3333", lw=1.1,
                          linestyle=(0, (4, 3)), zorder=4, label="_nolegend_")
             if k_curve is not None and np.any(np.isfinite(k_curve)):
@@ -906,7 +974,7 @@ def render_profile_png(
             # Curvature from raw DEM profile -> RDP (signed k = 1/R).
             k_curve = None
             try:
-                k_x, k_vals = _curvature_plot_series(prof_curv, rdp_eps_m=0.5, smooth_radius_m=0.0)
+                k_x, k_vals = _resolve_curvature_series()
                 if k_x.size >= 3 and k_vals.size == k_x.size:
                     k_curve = np.asarray(k_vals, dtype=float)
                     ax2r.plot(k_x, k_vals, color="#1f77b4", lw=2.0,
@@ -914,7 +982,7 @@ def render_profile_png(
             except Exception:
                 pass
             ax2r.axhline(float(CURVATURE_THRESHOLD_PLOT_ABS), color="#cc3333", lw=1.1,
-                         linestyle=(0, (4, 3)), zorder=4, label="|Curvature| = 0.02")
+                         linestyle=(0, (4, 3)), zorder=4, label="_nolegend_")
             ax2r.axhline(-float(CURVATURE_THRESHOLD_PLOT_ABS), color="#cc3333", lw=1.1,
                          linestyle=(0, (4, 3)), zorder=4, label="_nolegend_")
             if k_curve is not None and np.any(np.isfinite(k_curve)):
@@ -962,7 +1030,7 @@ def render_profile_png(
             except Exception:
                 xmin, xmax = None, None
 
-            bounds_set = set()
+            bounds_meta: Dict[float, Dict[str, Any]] = {}
             for g in group_ranges:
                 try:
                     s = float(g.get("start", g.get("start_chainage", 0.0)))
@@ -974,16 +1042,24 @@ def render_profile_png(
                 if (xmin is not None) and (xmax is not None):
                     s = max(xmin, min(xmax, s))
                     e = max(xmin, min(xmax, e))
-                bounds_set.add(s);
-                bounds_set.add(e)
+                for x, reason in (
+                    (s, str(g.get("start_reason", "") or "").strip()),
+                    (e, str(g.get("end_reason", "") or "").strip()),
+                ):
+                    key = round(float(x), 9)
+                    meta = bounds_meta.setdefault(key, {"x": float(x), "reasons": []})
+                    if reason:
+                        meta["reasons"].append(reason)
 
-            bounds = sorted(bounds_set)
+            bounds_items = sorted(bounds_meta.values(), key=lambda t: float(t["x"]))
+            bounds = [float(it["x"]) for it in bounds_items]
             if bounds:
-                vkw = dict(color="#555555", linestyle=(0, (4, 4)), linewidth=0.9, zorder=10)
-                for x in bounds:
+                for it in bounds_items:
+                    x = float(it["x"])
+                    vkw = _group_boundary_style(list(it.get("reasons", [])))
                     ax.axvline(x, **vkw)
                     ax2.axvline(x, **vkw)
-                # Number group intervals between adjacent dashed boundaries.
+                # Number group intervals between adjacent boundaries.
                 try:
                     import matplotlib.transforms as mtransforms
                     trans = mtransforms.blended_transform_factory(ax.transData, ax.transAxes)

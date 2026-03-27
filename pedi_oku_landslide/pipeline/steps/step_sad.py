@@ -211,6 +211,59 @@ def _sad_traditional(before: np.ndarray, after: np.ndarray,
     return dX, dY
 
 
+def _ssd_opencv(before: np.ndarray, after: np.ndarray,
+                patch_radius_px: int, search_radius_px: int) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    SSD via OpenCV template matching (TM_SQDIFF).
+    For each pixel center, search the best patch position inside a local window.
+    """
+    try:
+        import cv2
+    except Exception as e:
+        raise RuntimeError(
+            f"OpenCV is required for SSD (OpenCV) but could not be imported: {e}"
+        ) from e
+
+    H, W = before.shape
+    dX = np.full((H, W), np.nan, dtype="float32")
+    dY = np.full((H, W), np.nan, dtype="float32")
+
+    pr = patch_radius_px
+    sr = search_radius_px
+    y_min = pr + sr
+    y_max = H - pr - sr
+    x_min = pr + sr
+    x_max = W - pr - sr
+
+    b, _ = _nan_to_median(before)
+    a, _ = _nan_to_median(after)
+
+    patch_size = 2 * pr + 1
+    search_size = patch_size + 2 * sr
+
+    for y in range(y_min, y_max):
+        for x in range(x_min, x_max):
+            pb = b[y - pr:y + pr + 1, x - pr:x + pr + 1]
+            if pb.shape != (patch_size, patch_size):
+                continue
+            search = a[y - pr - sr:y + pr + sr + 1, x - pr - sr:x + pr + sr + 1]
+            if search.shape != (search_size, search_size):
+                continue
+
+            res = cv2.matchTemplate(
+                search.astype("float32", copy=False),
+                pb.astype("float32", copy=False),
+                cv2.TM_SQDIFF,
+            )
+            _min_val, _max_val, min_loc, _max_loc = cv2.minMaxLoc(res)
+            best_dx = int(min_loc[0]) - sr
+            best_dy = int(min_loc[1]) - sr
+            dX[y, x] = best_dx
+            dY[y, x] = best_dy
+
+    return dX, dY
+
+
 # -------------------- dZ from displacement --------------------
 
 def _dz_from_displacement(before_pz: np.ndarray, after_pz: np.ndarray,
@@ -236,6 +289,7 @@ def run_sad(ctx: AnalysisContext,
             patch_size_m: float = 20.0,
             search_radius_m: float = 2.0,
             use_smoothed: bool = True,
+            method: str = "traditional",
             vlim_dz: float | None = None) -> Dict:
     """
     Estimate displacement (dX, dY) between BEFORE.asc and AFTER.asc,
@@ -250,6 +304,8 @@ def run_sad(ctx: AnalysisContext,
     use_smoothed : bool
         If True and smoothed TIFFs exist (before_asc_smooth.tif/after_asc_smooth.tif),
         use them to estimate displacement; otherwise fall back to raw ASC.
+    method : str
+        Displacement method: "traditional" or "ssd_opencv".
     vlim_dz : float | None
         Color limit for dz PNG (symmetric). If None, auto percentile 2–98.
 
@@ -291,10 +347,18 @@ def run_sad(ctx: AnalysisContext,
     patch_radius_px = max(1, int(round((patch_size_m / pixel_m) / 2.0)))
     search_radius_px = max(1, int(round(search_radius_m / pixel_m)))
 
-    # ---- compute displacement (Traditional SAD only)
-    method = "traditional"
-    print("[SAD] Using method Traditional")
-    dX, dY = _sad_traditional(before, after, patch_radius_px, search_radius_px)
+    # ---- compute displacement
+    method_key = str(method or "traditional").strip().lower()
+    if method_key == "traditional":
+        method_label = "Traditional"
+        print("[SAD] Using method Traditional")
+        dX, dY = _sad_traditional(before, after, patch_radius_px, search_radius_px)
+    elif method_key == "ssd_opencv":
+        method_label = "SSD (OpenCV)"
+        print("[SAD] Using method SSD (OpenCV)")
+        dX, dY = _ssd_opencv(before, after, patch_radius_px, search_radius_px)
+    else:
+        raise ValueError(f"Unsupported SAD method: {method}")
 
 
     # ---- save dX, dY GeoTIFFs
@@ -307,8 +371,8 @@ def run_sad(ctx: AnalysisContext,
     # ---- save dX, dY PNG (in pixels)
     dx_png = os.path.join(ctx.out_ui1, "dx.png")
     dy_png = os.path.join(ctx.out_ui1, "dy.png")
-    _save_png_diverging(dX, transform_b, dx_png, f"dX (pixels) [{src_tag}/{method}]", "pixels")
-    _save_png_diverging(dY, transform_b, dy_png, f"dY (pixels) [{src_tag}/{method}]", "pixels")
+    _save_png_diverging(dX, transform_b, dx_png, f"dX (pixels) [{src_tag}/{method_key}]", "pixels")
+    _save_png_diverging(dY, transform_b, dy_png, f"dY (pixels) [{src_tag}/{method_key}]", "pixels")
 
     # ---- compute dZ using BEFORE/AFTER PZ rasters
     before_pz_path = resolve_run_input_path(ctx.run_dir, "before_pz")
@@ -333,13 +397,14 @@ def run_sad(ctx: AnalysisContext,
     _write_geotiff_float32(dz_tif, dz, mm)
 
     dz_png = os.path.join(ctx.out_ui1, "dz.png")
-    _save_png_diverging(dz, transform_bz, dz_png, f"dZ (after_pz shifted - before_pz) [{method}]", "dZ", vlim=vlim_dz)
+    _save_png_diverging(dz, transform_bz, dz_png, f"dZ (after_pz shifted - before_pz) [{method_key}]", "dZ", vlim=vlim_dz)
 
     # ---- write meta
     meta_json = os.path.join(ctx.out_ui1, "sad_meta.json")
     with open(meta_json, "w", encoding="utf-8") as f:
         json.dump({
-            "method": method,
+            "method": method_key,
+            "method_label": method_label,
             "source": src_tag,
             "patch_size_m": float(patch_size_m),
             "search_radius_m": float(search_radius_m),
@@ -367,4 +432,6 @@ def run_sad(ctx: AnalysisContext,
         "dy_png": dy_png.replace("\\", "/"),
         "dz_png": dz_png.replace("\\", "/"),
         "meta": meta_json.replace("\\", "/"),
+        "method": method_key,
+        "method_label": method_label,
     }

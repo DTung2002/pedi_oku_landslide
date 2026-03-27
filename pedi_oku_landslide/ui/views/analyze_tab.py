@@ -160,8 +160,9 @@ class AnalyzeTab(QWidget):
         # ---- Calculate SAD ----
         lab_method = QLabel("SAD Method:")
         self.cmb_method = QComboBox()
-        self.cmb_method.addItems(["Traditional"])
-        self.cmb_method.setCurrentText("Traditional")
+        self.cmb_method.addItem("Traditional", "traditional")
+        self.cmb_method.addItem("SSD (OpenCV)", "ssd_opencv")
+        self.cmb_method.setCurrentIndex(0)
         self.cmb_method.setEnabled(False)
         self.cmb_method.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
@@ -536,6 +537,7 @@ class AnalyzeTab(QWidget):
 
             self.btn_open_run.setEnabled(True)
             self.btn_smooth.setEnabled(True)  # bật smooth sau khi confirm
+            self.cmb_method.setEnabled(True)
             self.btn_calc_sad.setEnabled(True)
             self.btn_detect.setEnabled(False)
             self.btn_vectors.setEnabled(False)
@@ -627,12 +629,14 @@ class AnalyzeTab(QWidget):
             self.btn_calc_sad.setEnabled(False)
             self.btn_detect.setEnabled(False)
             self.btn_vectors.setEnabled(False)
+            self.cmb_method.setEnabled(False)
             self._info("Calculating SAD + dZ in background...")
 
             # --- chạy nền bằng QThread ---
             self._sad_thread = QThread(self)
             self._sad_worker = _SadWorker(
                 ctx=ctx,
+                method=self._selected_sad_method_key(),
                 patch_size_m=20.0,
                 search_radius_m=2.0,
                 use_smoothed=True
@@ -656,6 +660,7 @@ class AnalyzeTab(QWidget):
     def _on_sad_done(self, out: dict, method: str) -> None:
         try:
             # bật lại nút
+            self.cmb_method.setEnabled(True)
             self.btn_calc_sad.setEnabled(True)
             self.btn_detect.setEnabled(True)
             self.btn_vectors.setEnabled(True)
@@ -684,6 +689,7 @@ class AnalyzeTab(QWidget):
             self._err(f"Post-process error: {e}")
 
     def _on_sad_error(self, msg: str) -> None:
+        self.cmb_method.setEnabled(True)
         self.btn_calc_sad.setEnabled(True)
         self.btn_detect.setEnabled(True)
         self.btn_vectors.setEnabled(True)
@@ -1036,6 +1042,7 @@ class AnalyzeTab(QWidget):
 
             # Enable buttons based on what exists
             self.btn_smooth.setEnabled(True)
+            self.cmb_method.setEnabled(True)
             self.btn_calc_sad.setEnabled(True)
 
             dx_ok = os.path.exists(os.path.join(ctx.out_ui1, "dx.tif"))
@@ -1069,6 +1076,7 @@ class AnalyzeTab(QWidget):
             if left_img and right_img:
                 self.viewer.show_pair(left_img, right_img)
             self._refresh_mask_source_ui(ctx.run_dir)
+            self._restore_sad_method_from_run(ctx.run_dir)
 
             self._ok(
                 "Opened existing run.\n"
@@ -1129,6 +1137,7 @@ class AnalyzeTab(QWidget):
         # 4) Đưa các nút về trạng thái ban đầu
         self.btn_open_run.setEnabled(False)
         self.btn_smooth.setEnabled(False)
+        self.cmb_method.setEnabled(False)
         self.btn_calc_sad.setEnabled(False)
         self.btn_detect.setEnabled(False)
         self.btn_vectors.setEnabled(False)
@@ -1143,7 +1152,7 @@ class AnalyzeTab(QWidget):
         except Exception:
             pass
         try:
-            self.cmb_method.setCurrentText("Traditional")
+            self._set_sad_method_combo("traditional")
         except Exception:
             pass
         try:
@@ -1198,16 +1207,43 @@ class AnalyzeTab(QWidget):
         except Exception:
             pass
 
+    def _selected_sad_method_key(self) -> str:
+        data = self.cmb_method.currentData()
+        if isinstance(data, str) and data.strip():
+            return data.strip()
+        txt = (self.cmb_method.currentText() or "").strip().lower()
+        return "ssd_opencv" if "opencv" in txt or "ssd" in txt else "traditional"
+
+    def _set_sad_method_combo(self, method_key: str) -> None:
+        idx = self.cmb_method.findData(method_key)
+        if idx < 0:
+            idx = self.cmb_method.findText("Traditional")
+        if idx >= 0:
+            self.cmb_method.setCurrentIndex(idx)
+
+    def _restore_sad_method_from_run(self, run_dir: str) -> None:
+        meta_path = os.path.join(run_dir, "ui1", "sad_meta.json")
+        if not os.path.isfile(meta_path):
+            self._set_sad_method_combo("traditional")
+            return
+        try:
+            import json
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            self._set_sad_method_combo(str(meta.get("method", "traditional")))
+        except Exception:
+            self._set_sad_method_combo("traditional")
+
 from time import perf_counter
 
 class _SadWorker(QObject):
     finished = pyqtSignal(dict, str)  # (out_dict, method)
     error = pyqtSignal(str)
     t0 = perf_counter()
-    def __init__(self, ctx, patch_size_m: float, search_radius_m: float, use_smoothed: bool):
+    def __init__(self, ctx, method: str, patch_size_m: float, search_radius_m: float, use_smoothed: bool):
         super().__init__()
         self.ctx = ctx
-        self.method = "traditional"
+        self.method = str(method or "traditional")
         self.patch_size_m = patch_size_m
         self.search_radius_m = search_radius_m
         self.use_smoothed = use_smoothed
@@ -1221,10 +1257,11 @@ class _SadWorker(QObject):
                 patch_size_m=self.patch_size_m,
                 search_radius_m=self.search_radius_m,
                 use_smoothed=self.use_smoothed,
+                method=self.method,
                 vlim_dz=None
             )
             dt = perf_counter() - t0
             print(f"[SAD] run_sad done in {dt:.2f}s")
-            self.finished.emit(out, self.method)
+            self.finished.emit(out, str(out.get("method_label") or out.get("method") or self.method))
         except Exception as e:
             self.error.emit(str(e))

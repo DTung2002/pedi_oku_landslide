@@ -11,7 +11,7 @@ from PyQt5.QtWidgets import (
     QScrollArea, QFrame, QTextEdit, QComboBox, QDoubleSpinBox, QSpinBox,
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
     QTableWidget, QTableWidgetItem, QHeaderView, QSizePolicy,
-    QSplitter, QLineEdit, QMessageBox, QColorDialog, QAbstractSpinBox, QFileDialog
+    QSplitter, QLineEdit, QMessageBox, QColorDialog, QAbstractSpinBox, QFileDialog, QCheckBox
 )
 from PyQt5.QtGui import QPixmap, QPixmapCache
 from typing import Tuple, List, Dict, Optional
@@ -41,6 +41,8 @@ WORKFLOW_GROUPING_PARAMS = {
     "rdp_eps_m": 0.5,
     "curvature_thr_abs": 0.02,
     "smooth_radius_m": 0.0,
+    "include_curvature_threshold": True,
+    "include_vector_angle_zero": True,
 }
 
 
@@ -138,6 +140,125 @@ def _merge_close_boundaries(cands: List[Dict[str, Any]], tol_m: float = 1e-6) ->
         else:
             out.append(dict(c))
     return out
+
+
+def _prune_close_curvature_boundaries(
+    cands: List[Dict[str, Any]],
+    min_gap_m: float = 2.0,
+    curvature_reason_prefix: str = "curvature_gt_",
+) -> List[Dict[str, Any]]:
+    if not cands:
+        return []
+    out = [dict(c) for c in sorted(cands, key=lambda t: float(t.get("x", 0.0)))]
+    gap = max(0.0, float(min_gap_m))
+    if gap <= 0.0:
+        return out
+
+    def _has_curvature_reason(c: Dict[str, Any]) -> bool:
+        return any(str(r).startswith(curvature_reason_prefix) for r in list(c.get("reasons", [])))
+
+    changed = True
+    while changed:
+        changed = False
+        i = 0
+        while i < (len(out) - 1):
+            left = out[i]
+            right = out[i + 1]
+            if not (_has_curvature_reason(left) and _has_curvature_reason(right)):
+                i += 1
+                continue
+            if abs(float(right["x"]) - float(left["x"])) >= gap:
+                i += 1
+                continue
+
+            drop_idx = i if float(left.get("score", 0.0)) < float(right.get("score", 0.0)) else (i + 1)
+            kept_idx = (i + 1) if drop_idx == i else i
+            drop = dict(out[drop_idx])
+            keep = dict(out[kept_idx])
+
+            reasons = [str(r) for r in list(drop.get("reasons", [])) if not str(r).startswith(curvature_reason_prefix)]
+            if reasons or bool(drop.get("fixed", False)):
+                drop["reasons"] = reasons
+                drop["score"] = 0.0 if not _has_curvature_reason(drop) else float(drop.get("score", 0.0))
+                out[drop_idx] = drop
+                i += 1
+            else:
+                del out[drop_idx]
+                changed = True
+                if drop_idx < kept_idx:
+                    kept_idx -= 1
+                if kept_idx < len(out):
+                    out[kept_idx] = keep
+        out = _merge_close_boundaries(out, tol_m=1e-6)
+    return out
+
+
+def _prune_vector_zero_boundaries(
+    cands: List[Dict[str, Any]],
+    *,
+    first_curvature_gap_m: float = 2.0,
+    repeat_vector_gap_m: float = 10.0,
+    curvature_reason_prefix: str = "curvature_gt_",
+    vector_reason: str = "vector_angle_zero_deg",
+) -> List[Dict[str, Any]]:
+    if not cands:
+        return []
+    out = [dict(c) for c in sorted(cands, key=lambda t: float(t.get("x", 0.0)))]
+
+    def _has_curvature_reason(c: Dict[str, Any]) -> bool:
+        return any(str(r).startswith(curvature_reason_prefix) for r in list(c.get("reasons", [])))
+
+    def _has_vector_reason(c: Dict[str, Any]) -> bool:
+        return any(str(r) == vector_reason for r in list(c.get("reasons", [])))
+
+    def _drop_vector_reason(idx: int) -> None:
+        cur = dict(out[idx])
+        reasons = [str(r) for r in list(cur.get("reasons", [])) if str(r) != vector_reason]
+        if reasons or bool(cur.get("fixed", False)):
+            cur["reasons"] = reasons
+            out[idx] = cur
+        else:
+            del out[idx]
+
+    # Rule 1: the first surviving vector boundary must not be closer than 2 m
+    # to the nearest preceding curvature boundary.
+    while True:
+        first_idx = next((i for i, c in enumerate(out) if _has_vector_reason(c)), None)
+        if first_idx is None:
+            break
+        curv_idx = None
+        for j in range(first_idx - 1, -1, -1):
+            if _has_curvature_reason(out[j]):
+                curv_idx = j
+                break
+        if curv_idx is None:
+            break
+        dist = float(out[first_idx]["x"]) - float(out[curv_idx]["x"])
+        if dist < float(first_curvature_gap_m):
+            _drop_vector_reason(first_idx)
+            continue
+        break
+
+    # Rule 2: for the following vector boundaries, if there is already a kept
+    # vector boundary within the previous 10 m, drop the current vector reason.
+    last_kept_vector_x: Optional[float] = None
+    i = 0
+    while i < len(out):
+        if not _has_vector_reason(out[i]):
+            i += 1
+            continue
+        x = float(out[i]["x"])
+        if last_kept_vector_x is None:
+            last_kept_vector_x = x
+            i += 1
+            continue
+        if (x - last_kept_vector_x) < float(repeat_vector_gap_m):
+            _drop_vector_reason(i)
+            continue
+        last_kept_vector_x = x
+        i += 1
+
+    return _merge_close_boundaries(out, tol_m=1e-6)
 
 
 def _normalized_vector_angle_deg(theta_deg: np.ndarray) -> np.ndarray:
@@ -329,6 +450,8 @@ def auto_group_profile_by_criteria(
     rdp_eps_m: float = 0.5,
     curvature_thr_abs: float = 0.02,
     smooth_radius_m: float = 0.0,
+    include_curvature_threshold: bool = True,
+    include_vector_angle_zero: bool = True,
 ) -> List[Dict[str, Any]]:
     if "slip_span" in prof and prof["slip_span"]:
         smin, smax = map(float, prof["slip_span"])
@@ -361,7 +484,7 @@ def auto_group_profile_by_criteria(
     )
     xs = np.asarray(nodes.get("chain", []), dtype=float)
     ks = np.asarray(nodes.get("curvature", []), dtype=float)
-    if xs.size >= 3 and ks.size == xs.size:
+    if bool(include_curvature_threshold) and xs.size >= 3 and ks.size == xs.size:
         for i in range(1, xs.size - 1):
             x = float(xs[i])
             k = float(ks[i])
@@ -374,11 +497,20 @@ def auto_group_profile_by_criteria(
                     _mk_boundary(x, f"curvature_gt_{float(curvature_thr_abs):.2f}", score=abs(k), fixed=False)
                 )
 
-    theta = np.asarray(prof.get("theta", []), dtype=float)
-    chain = np.asarray(prof.get("chain", []), dtype=float)
-    boundaries_meta.extend(_vector_horizontal_boundaries(chain, theta, float(smin), float(smax)))
+    if bool(include_vector_angle_zero):
+        theta = np.asarray(prof.get("theta", []), dtype=float)
+        chain = np.asarray(prof.get("chain", []), dtype=float)
+        boundaries_meta.extend(_vector_horizontal_boundaries(chain, theta, float(smin), float(smax)))
 
     boundaries_meta = _merge_close_boundaries(boundaries_meta, tol_m=1e-6)
+    if bool(include_curvature_threshold):
+        boundaries_meta = _prune_close_curvature_boundaries(boundaries_meta, min_gap_m=2.0)
+    if bool(include_vector_angle_zero):
+        boundaries_meta = _prune_vector_zero_boundaries(
+            boundaries_meta,
+            first_curvature_gap_m=2.0,
+            repeat_vector_gap_m=10.0,
+        )
     boundaries_meta = [b for b in boundaries_meta if np.isfinite(float(b.get("x", np.nan)))]
     boundaries_meta.sort(key=lambda t: float(t["x"]))
     if len(boundaries_meta) < 2:
@@ -538,11 +670,16 @@ class AnchorMarkerItem(QGraphicsEllipseItem):
         super().mousePressEvent(event)
 
 class ZoomableGraphicsView(QGraphicsView):
+    sceneMouseMoved = pyqtSignal(float, float)
+    hoverExited = pyqtSignal()
+
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
         self.setRenderHints(self.renderHints() | QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
         self.setDragMode(QGraphicsView.ScrollHandDrag)
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+        self.setMouseTracking(True)
+        self.viewport().setMouseTracking(True)
         self._zoom = 0
 
     def wheelEvent(self, e):
@@ -574,6 +711,21 @@ class ZoomableGraphicsView(QGraphicsView):
     def zoom_out(self):
         self.scale(0.8, 0.8)
         self._zoom -= 1
+
+    def mouseMoveEvent(self, e):
+        try:
+            sp = self.mapToScene(e.pos())
+            self.sceneMouseMoved.emit(float(sp.x()), float(sp.y()))
+        except Exception:
+            pass
+        super().mouseMoveEvent(e)
+
+    def leaveEvent(self, e):
+        try:
+            self.hoverExited.emit()
+        except Exception:
+            pass
+        super().leaveEvent(e)
 
 
 class KeyboardOnlySpinBox(QSpinBox):
@@ -623,11 +775,17 @@ class CurveAnalyzeTab(QWidget):
 
         # paths từ UI1/UI2
         self.dem_path = ""
+        self.dem_path_raw = ""
+        self.dem_path_smooth = ""
+        self.ground_export_dem_path = ""
         self.dx_path = ""
         self.dy_path = ""
         self.dz_path = ""
         self.lines_path = ""
         self.slip_path = ""
+        self.profile_source_combo = None
+        self.curvature_check = None
+        self.vector_zero_check = None
 
         # UI widgets chính (để dùng lại)
         self.line_combo = None
@@ -668,6 +826,7 @@ class CurveAnalyzeTab(QWidget):
         self._plot_w_px = None  # ax_width_px trong PNG
         self._x_min = None  # trục x (chainage) min trên hình
         self._x_max = None  # trục x (chainage) max trên hình
+        self._profile_cursor_label = None
 
         self._build_ui()
     #
@@ -772,7 +931,16 @@ class CurveAnalyzeTab(QWidget):
     def _curve_method_from_group_method(group_method: Optional[str]) -> str:
         gm = str(group_method or "").strip().lower()
         # Auto Group method only controls grouping strategy. Curve editing/rendering is NURBS for all methods.
-        if gm in ("traditional", "new", "test", "raw_dem_curvature"):
+        if gm in (
+            "traditional",
+            "new",
+            "test",
+            "raw_dem_curvature",
+            "profile_dem_rdp_curvature_theta0",
+            "profile_dem_rdp_curvature_only",
+            "profile_dem_rdp_theta0_only",
+            "profile_dem_rdp_span_only",
+        ):
             return "nurbs"
         return "nurbs"
 
@@ -813,7 +981,17 @@ class CurveAnalyzeTab(QWidget):
         cm = self._set_curve_method_for_line(line_id, curve_method or self._curve_method_by_line.get(line_id))
         try:
             groups_for_json = self._groups_with_median_theta(groups, prof)
-            js = {"line": self.line_combo.currentText(), "groups": groups_for_json, "curve_method": cm}
+            curvature_points = self._curvature_points_for_json(prof, groups_for_json)
+            js = {
+                "line": self.line_combo.currentText(),
+                "groups": groups_for_json,
+                "curvature_points": curvature_points,
+                "curve_method": cm,
+                "profile_dem_source": self._current_profile_source_key(),
+                "profile_dem_path": str(getattr(self, "dem_path", "") or "").replace("\\", "/"),
+                "include_curvature_threshold": self._include_curvature_threshold(),
+                "include_vector_angle_zero": self._include_vector_angle_zero(),
+            }
             if group_method:
                 js["group_method"] = str(group_method)
             with open(self._groups_json_path(), "w", encoding="utf-8") as f:
@@ -837,6 +1015,8 @@ class CurveAnalyzeTab(QWidget):
                     self.group_table.setItem(i - 1, 0, QTableWidgetItem(str(g.get("id", f"G{i}"))))
                     self.group_table.setItem(i - 1, 1, QTableWidgetItem(f'{float(g.get("start", 0.0)):.3f}'))
                     self.group_table.setItem(i - 1, 2, QTableWidgetItem(f'{float(g.get("end", 0.0)):.3f}'))
+                    self._set_group_boundary_reason(i - 1, 1, str(g.get("start_reason", "") or ""))
+                    self._set_group_boundary_reason(i - 1, 2, str(g.get("end_reason", "") or ""))
                     self._set_color_cell(i - 1, str(g.get("color", "")).strip())
                 # IMPORTANT: keep itemChanged suppressed for the synthetic UNGROUPED row too.
                 self._append_ungrouped_row(groups, length_m)
@@ -942,6 +1122,49 @@ class CurveAnalyzeTab(QWidget):
             return x_scene, y_scene
         except Exception:
             return None
+
+    def _scene_xy_to_chain_elev(self, scene_x: float, scene_y: float) -> Optional[Tuple[float, float]]:
+        if self._img_ground is None or self._ax_top is None:
+            return None
+        try:
+            ax = self._ax_top
+            x_min = float(ax.get("x_min"))
+            x_max = float(ax.get("x_max"))
+            y_min = float(ax.get("y_min"))
+            y_max = float(ax.get("y_max"))
+            left_px = float(ax.get("left_px"))
+            top_px = float(ax.get("top_px"))
+            w_px = float(ax.get("width_px"))
+            h_px = float(ax.get("height_px"))
+            if not (x_max > x_min and y_max > y_min and w_px > 0 and h_px > 0):
+                return None
+
+            x_local = float(scene_x) - float(self._img_ground.pos().x())
+            y_local = float(scene_y) - float(self._img_ground.pos().y())
+            if not (left_px <= x_local <= (left_px + w_px) and top_px <= y_local <= (top_px + h_px)):
+                return None
+
+            xr = (x_local - left_px) / w_px
+            yr = (y_local - top_px) / h_px
+            chain_m = x_min + xr * (x_max - x_min)
+            elev_m = y_max - yr * (y_max - y_min)
+            return float(chain_m), float(elev_m)
+        except Exception:
+            return None
+
+    def _clear_profile_cursor_readout(self) -> None:
+        if self._profile_cursor_label is not None:
+            self._profile_cursor_label.setText("Cursor: —")
+
+    def _on_profile_scene_mouse_moved(self, scene_x: float, scene_y: float) -> None:
+        if self._profile_cursor_label is None:
+            return
+        vals = self._scene_xy_to_chain_elev(scene_x, scene_y)
+        if vals is None:
+            self._clear_profile_cursor_readout()
+            return
+        chain_m, elev_m = vals
+        self._profile_cursor_label.setText(f"Cursor: chainage={chain_m:.3f} m, elev={elev_m:.3f} m")
 
     def _on_anchor_marker_clicked(self, anchor: dict) -> None:
         try:
@@ -1726,6 +1949,7 @@ class CurveAnalyzeTab(QWidget):
             self._warn("[UI3] Cannot evaluate NURBS curve.")
             return
         out_png = self._nurbs_png_path_for(line_id)
+        curv_series = self._saved_curvature_series_for_line(line_id, self._active_groups if self._active_groups else None, self._active_prof)
         msg, path = render_profile_png(
             self._active_prof, out_png,
             y_min=None, y_max=None,
@@ -1736,6 +1960,7 @@ class CurveAnalyzeTab(QWidget):
             highlight_theta=None,
             group_ranges=self._active_groups if self._active_groups else None,
             ungrouped_color=self._get_ungrouped_color(),
+            curvature_series=curv_series,
             overlay_curves=[(curve["chain"], curve["elev"], "#bf00ff", "Slip curve")]
         )
         self._log(msg)
@@ -1904,23 +2129,31 @@ class CurveAnalyzeTab(QWidget):
             geom = self._gdf.geometry.iloc[row]
 
             # 2) Profile chỉ trong slip-zone
-            prof = compute_profile(
-                self.dem_path, self.dx_path, self.dy_path, self.dz_path,
-                geom,
-                step_m=self.step_box.value(),
-                smooth_win=11, smooth_poly=2,
-                slip_mask_path=self.slip_path,  # phải đúng path
-                slip_only=True,
-                dem_orig_path=self.ground_export_dem_path,
-            )
+            prof = self._compute_profile_for_geom(geom, slip_only=True)
             if not prof:
                 self._err("[UI3] Empty profile.")
                 return
 
             # 3) Auto-group from raw DEM curvature on slip span
-            self._log("[UI3] Auto Group method: raw DEM mean-filter + RDP + curvature")
-            groups = auto_group_profile_by_criteria(prof, **WORKFLOW_GROUPING_PARAMS)
-            group_method = "raw_dem_curvature"
+            include_curvature = self._include_curvature_threshold()
+            include_vector_zero = self._include_vector_angle_zero()
+            parts = [f"{self._current_profile_source_key()} DEM", "RDP"]
+            if include_curvature:
+                parts.append("curvature")
+            if include_vector_zero:
+                parts.append("vector=0")
+            self._log(
+                "[UI3] Auto Group method: " + " + ".join(parts)
+            )
+            groups = auto_group_profile_by_criteria(prof, **self._grouping_params_current())
+            if include_curvature and include_vector_zero:
+                group_method = "profile_dem_rdp_curvature_theta0"
+            elif include_curvature:
+                group_method = "profile_dem_rdp_curvature_only"
+            elif include_vector_zero:
+                group_method = "profile_dem_rdp_theta0_only"
+            else:
+                group_method = "profile_dem_rdp_span_only"
 
             groups = clamp_groups_to_slip(prof, groups, min_len=WORKFLOW_GROUP_MIN_LEN_M)
             if not groups:
@@ -1966,13 +2199,7 @@ class CurveAnalyzeTab(QWidget):
                 return
 
             geom = self._gdf.geometry.iloc[row]
-            prof = compute_profile(
-                self.dem_path, self.dx_path, self.dy_path, self.dz_path,
-                geom, step_m=self.step_box.value(),
-                smooth_win=11, smooth_poly=2,
-                slip_mask_path=self.slip_path, slip_only=False,
-                dem_orig_path=self.ground_export_dem_path,
-            )
+            prof = self._compute_profile_for_geom(geom, slip_only=False)
             if not prof or len(prof.get("chain", [])) < 6:
                 self._warn("[UI3] Empty/too-short slip profile.");
                 return
@@ -1991,7 +2218,7 @@ class CurveAnalyzeTab(QWidget):
                 except Exception:
                     groups = []
             if not groups:
-                groups = auto_group_profile_by_criteria(prof, **WORKFLOW_GROUPING_PARAMS)
+                groups = auto_group_profile_by_criteria(prof, **self._grouping_params_current())
                 groups = clamp_groups_to_slip(prof, groups, min_len=WORKFLOW_GROUP_MIN_LEN_M)
                 if not groups:
                     self._warn("[UI3] Auto grouping produced no segments within slip zone.");
@@ -2102,6 +2329,7 @@ class CurveAnalyzeTab(QWidget):
 
             # 5) Re-render base PNG (no curve baked-in), then draw overlay in scene
             out_png = self._profile_png_path_for(line_id)
+            curv_series = self._saved_curvature_series_for_line(line_id, groups if groups else None, prof)
 
             msg, path = render_profile_png(
                 prof, out_png,
@@ -2112,7 +2340,8 @@ class CurveAnalyzeTab(QWidget):
                 head_len=6.0, head_w=4.0,
                 highlight_theta=None,
                 group_ranges=groups,
-                ungrouped_color=self._get_ungrouped_color()
+                ungrouped_color=self._get_ungrouped_color(),
+                curvature_series=curv_series,
             )
             self._log(msg)
             if not path or not os.path.exists(path):
@@ -2269,6 +2498,18 @@ class CurveAnalyzeTab(QWidget):
         ls.addWidget(btn_render)
         lsd.addLayout(ls)
 
+        row_src = QHBoxLayout()
+        row_src.setSpacing(6)
+        lbl_src = QLabel("Profile DEM:")
+        self.profile_source_combo = NoWheelComboBox()
+        self.profile_source_combo.addItem("Raw DEM", "raw")
+        self.profile_source_combo.addItem("Smoothed DEM", "smooth")
+        self.profile_source_combo.setCurrentIndex(0)
+        self.profile_source_combo.currentIndexChanged.connect(self._on_profile_source_changed)
+        row_src.addWidget(lbl_src)
+        row_src.addWidget(self.profile_source_combo, 1)
+        lsd.addLayout(row_src)
+
         # Advanced controls
         la = QHBoxLayout()
         la.setSpacing(6)
@@ -2333,6 +2574,14 @@ class CurveAnalyzeTab(QWidget):
         self.group_table.itemChanged.connect(self._on_group_table_item_changed)
         _set_table_visible_rows(self.group_table, rows=6, row_h=30)
         lg.addWidget(self.group_table)
+
+        self.curvature_check = QCheckBox("Use curvature > 0.02 as boundary")
+        self.curvature_check.setChecked(True)
+        lg.addWidget(self.curvature_check)
+
+        self.vector_zero_check = QCheckBox("Use vector = 0° as boundary")
+        self.vector_zero_check.setChecked(True)
+        lg.addWidget(self.vector_zero_check)
 
         rowg = QHBoxLayout()
         self.btn_add_g = QPushButton("Add")
@@ -2433,9 +2682,15 @@ class CurveAnalyzeTab(QWidget):
         zoombar.setStyleSheet("QToolBar { spacing: 6px; background: transparent; border: none; }")
         right_wrap.addWidget(zoombar)
 
+        self._profile_cursor_label = QLabel("Cursor: —")
+        self._profile_cursor_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        right_wrap.addWidget(self._profile_cursor_label)
+
         self.scene = QGraphicsScene()
         self.view = ZoomableGraphicsView(self.scene)
         self.view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.view.sceneMouseMoved.connect(self._on_profile_scene_mouse_moved)
+        self.view.hoverExited.connect(self._clear_profile_cursor_readout)
         right_wrap.addWidget(self.view, 1)
 
         splitter.addWidget(right_container)
@@ -2497,6 +2752,276 @@ class CurveAnalyzeTab(QWidget):
         r.setContentsMargins(0, 0, 0, 0)
         return r
 
+    @staticmethod
+    def _pick_existing_path(*cands: str) -> str:
+        for p in cands:
+            if p and os.path.exists(p):
+                return p
+        return ""
+
+    def _current_profile_source_key(self) -> str:
+        try:
+            if self.profile_source_combo is not None:
+                key = str(self.profile_source_combo.currentData() or "").strip().lower()
+                if key in ("raw", "smooth"):
+                    return key
+        except Exception:
+            pass
+        return "raw"
+
+    def _set_profile_source_key(self, key: Optional[str], *, log_paths: bool = False) -> str:
+        src = str(key or "").strip().lower()
+        if src not in ("raw", "smooth"):
+            return self._current_profile_source_key()
+        try:
+            if self.profile_source_combo is not None:
+                idx = self.profile_source_combo.findData(src)
+                if idx >= 0:
+                    old = self.profile_source_combo.blockSignals(True)
+                    self.profile_source_combo.setCurrentIndex(idx)
+                    self.profile_source_combo.blockSignals(old)
+        except Exception:
+            pass
+        self._refresh_profile_source_paths(log_paths=log_paths)
+        return self._current_profile_source_key()
+
+    def _refresh_profile_source_paths(self, log_paths: bool = False) -> None:
+        src = self._current_profile_source_key()
+        if src == "smooth":
+            chosen = self._pick_existing_path(self.dem_path_smooth, self.dem_path_raw)
+        else:
+            chosen = self._pick_existing_path(self.dem_path_raw, self.dem_path_smooth)
+        self.dem_path = chosen
+        self.ground_export_dem_path = chosen
+        if log_paths:
+            self._log(f"[UI3] Profile source: {src}")
+            self._log(f"[UI3] Raw DEM: {self.dem_path_raw}")
+            self._log(f"[UI3] Smoothed DEM: {self.dem_path_smooth}")
+            self._log(f"[UI3] Active profile DEM: {self.dem_path}")
+
+    def _include_vector_angle_zero(self) -> bool:
+        try:
+            if self.vector_zero_check is not None:
+                return bool(self.vector_zero_check.isChecked())
+        except Exception:
+            pass
+        return bool(WORKFLOW_GROUPING_PARAMS.get("include_vector_angle_zero", True))
+
+    def _include_curvature_threshold(self) -> bool:
+        try:
+            if self.curvature_check is not None:
+                return bool(self.curvature_check.isChecked())
+        except Exception:
+            pass
+        return bool(WORKFLOW_GROUPING_PARAMS.get("include_curvature_threshold", True))
+
+    def _grouping_params_current(self) -> Dict[str, Any]:
+        params = dict(WORKFLOW_GROUPING_PARAMS)
+        params["include_curvature_threshold"] = self._include_curvature_threshold()
+        params["include_vector_angle_zero"] = self._include_vector_angle_zero()
+        return params
+
+    def _apply_group_json_settings(self, data: Dict[str, Any], *, log_paths: bool = False) -> None:
+        try:
+            if self.curvature_check is not None and "include_curvature_threshold" in data:
+                self.curvature_check.setChecked(bool(data.get("include_curvature_threshold")))
+        except Exception:
+            pass
+        try:
+            if self.vector_zero_check is not None and "include_vector_angle_zero" in data:
+                self.vector_zero_check.setChecked(bool(data.get("include_vector_angle_zero")))
+        except Exception:
+            pass
+        try:
+            if "profile_dem_source" in data:
+                self._set_profile_source_key(str(data.get("profile_dem_source")), log_paths=log_paths)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _group_signature(groups: List[dict]) -> List[Tuple[str, float, float, str, str]]:
+        sig: List[Tuple[str, float, float, str, str]] = []
+        for i, g in enumerate(groups or [], 1):
+            try:
+                gid = str(g.get("id", g.get("group_id", f"G{i}")) or f"G{i}").strip()
+                s = float(g.get("start", g.get("start_chainage")))
+                e = float(g.get("end", g.get("end_chainage")))
+            except Exception:
+                continue
+            if e < s:
+                s, e = e, s
+            sig.append((
+                gid,
+                round(float(s), 3),
+                round(float(e), 3),
+                str(g.get("start_reason", "") or "").strip(),
+                str(g.get("end_reason", "") or "").strip(),
+            ))
+        return sig
+
+    @staticmethod
+    def _interp_series_y(xs: np.ndarray, ys: np.ndarray, xq: float) -> Optional[float]:
+        xs = np.asarray(xs, dtype=float)
+        ys = np.asarray(ys, dtype=float)
+        if xs.ndim != 1 or ys.ndim != 1 or xs.size < 2 or ys.size != xs.size:
+            return None
+        keep = np.isfinite(xs) & np.isfinite(ys)
+        xs = xs[keep]
+        ys = ys[keep]
+        if xs.size < 2:
+            return None
+        order = np.argsort(xs)
+        xs = xs[order]
+        ys = ys[order]
+        if not np.isfinite(float(xq)):
+            return None
+        if xq < float(xs[0]) or xq > float(xs[-1]):
+            return None
+        if np.any(np.isclose(xs, float(xq), atol=1e-9)):
+            idx = int(np.flatnonzero(np.isclose(xs, float(xq), atol=1e-9))[0])
+            return float(ys[idx])
+        idx = int(np.searchsorted(xs, float(xq)))
+        if idx <= 0 or idx >= xs.size:
+            return None
+        x0 = float(xs[idx - 1]); x1 = float(xs[idx])
+        y0 = float(ys[idx - 1]); y1 = float(ys[idx])
+        if not (np.isfinite(x0) and np.isfinite(x1) and np.isfinite(y0) and np.isfinite(y1)):
+            return None
+        if abs(x1 - x0) <= 1e-12:
+            return None
+        t = (float(xq) - x0) / (x1 - x0)
+        return float(y0 + t * (y1 - y0))
+
+    def _repair_saved_curvature_points(
+        self,
+        points: List[dict],
+        prof: Optional[dict],
+    ) -> List[dict]:
+        repaired = [dict(p) for p in (points or [])]
+        if len(repaired) < 2 or not prof:
+            return repaired
+        try:
+            params = self._grouping_params_current()
+            nodes = extract_curvature_rdp_nodes(
+                prof,
+                rdp_eps_m=float(params.get("rdp_eps_m", 0.5)),
+                smooth_radius_m=float(params.get("smooth_radius_m", 0.0)),
+                restrict_to_slip_span=False,
+            )
+            full_x = np.asarray(nodes.get("chain", []), dtype=float)
+            full_k = np.asarray(nodes.get("curvature", []), dtype=float)
+        except Exception:
+            return repaired
+        if full_x.size < 2 or full_k.size != full_x.size:
+            return repaired
+
+        def _repair_one(item: dict, neighbor: Optional[dict], is_head: bool) -> None:
+            try:
+                idx = int(item.get("index", -1))
+                kval = float(item.get("curvature", np.nan))
+                xval = float(item.get("chain_m", np.nan))
+            except Exception:
+                return
+            if not (np.isfinite(kval) and np.isfinite(xval)):
+                return
+            if abs(kval) > 1e-12:
+                return
+            if is_head:
+                if idx != 0:
+                    return
+            else:
+                try:
+                    if neighbor is None:
+                        return
+                    nidx = int(neighbor.get("index", -1))
+                    if idx != (nidx + 1):
+                        return
+                except Exception:
+                    return
+            kval_new = self._interp_series_y(full_x, full_k, float(xval))
+            if kval_new is None or not np.isfinite(kval_new):
+                return
+            item["curvature"] = float(kval_new)
+            item["curvature_abs"] = abs(float(kval_new))
+
+        _repair_one(repaired[0], repaired[1] if len(repaired) > 1 else None, True)
+        _repair_one(repaired[-1], repaired[-2] if len(repaired) > 1 else None, False)
+        return repaired
+
+    def _saved_curvature_series_for_line(
+        self,
+        line_id: str,
+        current_groups: Optional[List[dict]],
+        prof: Optional[dict] = None,
+    ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+        path = self._groups_json_path_for(line_id)
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f) or {}
+        except Exception:
+            return None
+
+        saved_src = str(data.get("profile_dem_source", "") or "").strip().lower()
+        current_src = self._current_profile_source_key()
+        if saved_src in ("raw", "smooth") and current_src in ("raw", "smooth") and saved_src != current_src:
+            return None
+
+        saved_groups = data.get("groups", []) or []
+        if current_groups is not None:
+            if self._group_signature(saved_groups) != self._group_signature(current_groups):
+                return None
+
+        pts = self._repair_saved_curvature_points(data.get("curvature_points", []) or [], prof)
+        xs: List[float] = []
+        ks: List[float] = []
+        for it in pts:
+            try:
+                x = float(it.get("chain_m"))
+                k = float(it.get("curvature"))
+            except Exception:
+                continue
+            if not (np.isfinite(x) and np.isfinite(k)):
+                continue
+            xs.append(float(x))
+            ks.append(float(k))
+        if len(xs) < 2:
+            return None
+        order = np.argsort(np.asarray(xs, dtype=float))
+        return np.asarray(xs, dtype=float)[order], np.asarray(ks, dtype=float)[order]
+
+    def _on_profile_source_changed(self, _idx: int) -> None:
+        self._refresh_profile_source_paths(log_paths=True)
+        self._active_prof = None
+        if self.line_combo is None or self.line_combo.count() == 0:
+            return
+        self._render_current_safe()
+
+    def _compute_profile_for_geom(self, geom, *, slip_only: bool) -> Optional[dict]:
+        dem_path = str(getattr(self, "dem_path", "") or "").strip()
+        dem_orig_path = str(getattr(self, "ground_export_dem_path", "") or "").strip()
+        if not dem_path:
+            return None
+        prof = compute_profile(
+            dem_path,
+            self.dx_path,
+            self.dy_path,
+            self.dz_path,
+            geom,
+            step_m=self.step_box.value(),
+            smooth_win=11,
+            smooth_poly=2,
+            slip_mask_path=self.slip_path,
+            slip_only=bool(slip_only),
+            dem_orig_path=(dem_orig_path or dem_path),
+        )
+        if not prof:
+            return None
+        prof["profile_dem_source"] = self._current_profile_source_key()
+        prof["profile_dem_path"] = dem_path
+        return prof
+
     # -------------------- Context --------------------
     def set_context(self, project: str, run_label: str, run_dir: str) -> None:
         """Du?c g?i t? MainWindow sau khi Analyze/Section xong."""
@@ -2539,8 +3064,7 @@ class CurveAnalyzeTab(QWidget):
                     return p
             return ""
 
-        # Prefer smoothed AFTER DEM for ground/profile rendering.
-        self.dem_path = _pick_first(
+        self.dem_path_smooth = _pick_first(
             os.path.join(run_dir, "ui1", "after_dem_smooth.tif"),
             meta_inputs.get("after_dem") or "",
             meta_inputs.get("before_dem") or "",
@@ -2552,8 +3076,7 @@ class CurveAnalyzeTab(QWidget):
             os.path.join(run_dir, "input", "before.asc"),
             meta_processed.get("dem_cropped") or "",
         )
-        self._log(f"[UI3] Ground DEM input: {self.dem_path}")
-        self.ground_export_dem_path = _pick_first(
+        self.dem_path_raw = _pick_first(
             meta_inputs.get("after_dem") or "",
             meta_inputs.get("before_dem") or "",
             os.path.join(run_dir, "input", "after_dem.tif"),
@@ -2561,9 +3084,8 @@ class CurveAnalyzeTab(QWidget):
             js.get("dem_ground_path") or "",
             ap.get("dem_orig", ""),
             ap.get("dem", ""),
-            self.dem_path,
         )
-        self._log(f"[UI3] Ground export DEM input: {self.ground_export_dem_path}")
+        self._refresh_profile_source_paths(log_paths=True)
         self.dx_path = _pick_first(
             js.get("dx_path") or "",
             ap.get("dx", ""),
@@ -2627,12 +3149,31 @@ class CurveAnalyzeTab(QWidget):
 
         # 3) Reset các path dữ liệu
         self.dem_path = ""
+        self.dem_path_raw = ""
+        self.dem_path_smooth = ""
         self.ground_export_dem_path = ""
         self.dx_path = ""
         self.dy_path = ""
         self.dz_path = ""
         self.lines_path = ""
         self.slip_path = ""
+        try:
+            if self.profile_source_combo is not None:
+                self.profile_source_combo.blockSignals(True)
+                self.profile_source_combo.setCurrentIndex(0)
+                self.profile_source_combo.blockSignals(False)
+        except Exception:
+            pass
+        try:
+            if self.curvature_check is not None:
+                self.curvature_check.setChecked(True)
+        except Exception:
+            pass
+        try:
+            if self.vector_zero_check is not None:
+                self.vector_zero_check.setChecked(True)
+        except Exception:
+            pass
 
         # 4) Clear combo line (list tuyến cắt)
         try:
@@ -2789,6 +3330,7 @@ class CurveAnalyzeTab(QWidget):
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f) or {}
+            self._apply_group_json_settings(data)
             groups = data.get("groups", [])
             self.group_table.setRowCount(0)
             for g in (groups or []):
@@ -2805,6 +3347,8 @@ class CurveAnalyzeTab(QWidget):
                 self.group_table.setItem(r, 0, QTableWidgetItem(gid or f"G{r + 1}"))
                 self.group_table.setItem(r, 1, QTableWidgetItem(f"{s:.3f}"))
                 self.group_table.setItem(r, 2, QTableWidgetItem(f"{e:.3f}"))
+                self._set_group_boundary_reason(r, 1, str(g.get("start_reason", "") or ""))
+                self._set_group_boundary_reason(r, 2, str(g.get("end_reason", "") or ""))
                 self._set_color_cell(r, str(g.get("color", "")).strip())
                 loaded += 1
             if loaded:
@@ -2970,14 +3514,7 @@ class CurveAnalyzeTab(QWidget):
             if row < 0:
                 return None
             geom = self._gdf.geometry.iloc[row]
-            prof = compute_profile(
-                self.dem_path, self.dx_path, self.dy_path, self.dz_path,
-                geom,
-                step_m=self.step_box.value(),
-                smooth_win=11, smooth_poly=2,
-                slip_mask_path=self.slip_path, slip_only=False,
-                dem_orig_path=self.ground_export_dem_path,
-            )
+            prof = self._compute_profile_for_geom(geom, slip_only=False)
             if not prof or len(prof.get("chain", [])) < 2:
                 return None
             return prof
@@ -3025,6 +3562,7 @@ class CurveAnalyzeTab(QWidget):
                 try:
                     with open(path, "r", encoding="utf-8") as f:
                         js = json.load(f)
+                    self._apply_group_json_settings(js)
                     cm = self._normalize_curve_method(js.get("curve_method"))
                     self._set_curve_method_for_line(self._line_id_current(), cm)
                     for g in js.get("groups", []):
@@ -3033,6 +3571,8 @@ class CurveAnalyzeTab(QWidget):
                         self.group_table.setItem(r, 0, QTableWidgetItem(str(g.get("id", ""))))
                         self.group_table.setItem(r, 1, QTableWidgetItem(f'{float(g.get("start", 0.0)):.3f}'))
                         self.group_table.setItem(r, 2, QTableWidgetItem(f'{float(g.get("end", 0.0)):.3f}'))
+                        self._set_group_boundary_reason(r, 1, str(g.get("start_reason", "") or ""))
+                        self._set_group_boundary_reason(r, 2, str(g.get("end_reason", "") or ""))
                         self._set_color_cell(r, str(g.get("color", "")).strip())
                         loaded += 1
                 except Exception as e:
@@ -3469,6 +4009,45 @@ class CurveAnalyzeTab(QWidget):
             out.append(gg)
         return out
 
+    def _curvature_points_for_json(self, prof: Optional[dict], groups: List[dict]) -> List[dict]:
+        out: List[dict] = []
+        if not prof:
+            return out
+        try:
+            params = self._grouping_params_current()
+            nodes = extract_curvature_rdp_nodes(
+                prof,
+                rdp_eps_m=float(params.get("rdp_eps_m", 0.5)),
+                smooth_radius_m=float(params.get("smooth_radius_m", 0.0)),
+                restrict_to_slip_span=True,
+            )
+            chain = np.asarray(nodes.get("chain", []), dtype=float)
+            elev = np.asarray(nodes.get("elev", []), dtype=float)
+            curv = np.asarray(nodes.get("curvature", []), dtype=float)
+            n = int(min(chain.size, elev.size, curv.size))
+            curvature_thr_abs = float(params.get("curvature_thr_abs", 0.02))
+            include_curvature = bool(params.get("include_curvature_threshold", True))
+            for i in range(n):
+                ch = float(chain[i])
+                zz = float(elev[i])
+                kk = float(curv[i])
+                if not (np.isfinite(ch) and np.isfinite(zz) and np.isfinite(kk)):
+                    continue
+                gid, color = self._group_for_chainage(groups or [], ch)
+                out.append({
+                    "index": i,
+                    "chain_m": ch,
+                    "elev_m": zz,
+                    "curvature": kk,
+                    "curvature_abs": abs(kk),
+                    "group_id": gid,
+                    "group_color": color,
+                    "passes_curvature_threshold": bool(include_curvature and (abs(kk) > curvature_thr_abs)),
+                })
+        except Exception:
+            return []
+        return out
+
     @staticmethod
     def _profile_slip_span_range(prof: Optional[dict]) -> Optional[Tuple[float, float]]:
         chain = np.asarray((prof or {}).get("chain", []), dtype=float)
@@ -3555,6 +4134,8 @@ class CurveAnalyzeTab(QWidget):
         payload = {
             "line_id": line_id,
             "count": len(rows),
+            "profile_dem_source": self._current_profile_source_key(),
+            "profile_dem_path": str(getattr(self, "ground_export_dem_path", "") or "").replace("\\", "/"),
             "slip_span": ([float(span_min), float(span_max)] if (span_min is not None and span_max is not None) else None),
             "groups": groups or [],
             "vectors": rows,
@@ -3618,6 +4199,7 @@ class CurveAnalyzeTab(QWidget):
             "line_id": line_id,
             "source_dem_path": dem_path.replace("\\", "/"),
             "count": len(rows),
+            "profile_dem_source": self._current_profile_source_key(),
             "slip_span": ([float(span_min), float(span_max)] if (span_min is not None and span_max is not None) else None),
             "ground": rows,
         }
@@ -3655,14 +4237,7 @@ class CurveAnalyzeTab(QWidget):
 
         # 2) Tính profile (ground full line, không giới hạn slip-zone)
         geom = self._gdf.geometry.iloc[row]
-        prof = compute_profile(
-            self.dem_path, self.dx_path, self.dy_path, self.dz_path,
-            geom,
-            step_m=self.step_box.value(),
-            smooth_win=11, smooth_poly=2,
-            slip_mask_path=self.slip_path, slip_only=False,
-            dem_orig_path=self.ground_export_dem_path,
-        )
+        prof = self._compute_profile_for_geom(geom, slip_only=False)
         if not prof:
             self._log("[!] Empty profile.")
             return
@@ -3675,6 +4250,7 @@ class CurveAnalyzeTab(QWidget):
         # 4) Gọi backend vẽ PNG (tô màu theo group nếu có)
         line_id = self._line_id_current()
         out_png = self._profile_png_path_for(line_id)
+        curv_series = self._saved_curvature_series_for_line(line_id, groups if groups else None, prof)
 
         msg, path = render_profile_png(
             prof, out_png,
@@ -3685,7 +4261,8 @@ class CurveAnalyzeTab(QWidget):
             head_len=6.0, head_w=4.0,
             highlight_theta=None,
             group_ranges=groups if groups else None,
-            ungrouped_color=self._get_ungrouped_color()
+            ungrouped_color=self._get_ungrouped_color(),
+            curvature_series=curv_series,
         )
         self._log(msg)
         if not path or not os.path.exists(path):
@@ -3791,6 +4368,26 @@ class CurveAnalyzeTab(QWidget):
             self.group_table.setItem(row, col, item)
         item.setText(f"{float(val):.3f}")
 
+    def _set_group_boundary_reason(self, row: int, col: int, reason: str) -> None:
+        if col not in (1, 2):
+            return
+        item = self.group_table.item(row, col)
+        if item is None:
+            item = QTableWidgetItem("")
+            self.group_table.setItem(row, col, item)
+        item.setData(Qt.UserRole + 1, str(reason or ""))
+
+    def _get_group_boundary_reason(self, row: int, col: int) -> str:
+        if col not in (1, 2):
+            return ""
+        item = self.group_table.item(row, col)
+        if item is None:
+            return ""
+        try:
+            return str(item.data(Qt.UserRole + 1) or "").strip()
+        except Exception:
+            return ""
+
     def _nearest_group_row(self, row: int, step: int) -> Optional[int]:
         r = int(row) + int(step)
         while 0 <= r < self.group_table.rowCount():
@@ -3884,7 +4481,14 @@ class CurveAnalyzeTab(QWidget):
                 if s is None or e is None:
                     continue
                 if e < s: s, e = e, s
-                out.append({"id": gid, "start": s, "end": e, "color": self._get_color_cell_value(r)})
+                out.append({
+                    "id": gid,
+                    "start": s,
+                    "end": e,
+                    "start_reason": self._get_group_boundary_reason(r, 1),
+                    "end_reason": self._get_group_boundary_reason(r, 2),
+                    "color": self._get_color_cell_value(r),
+                })
             except Exception:
                 continue
         return out
@@ -4034,6 +4638,7 @@ class CurveAnalyzeTab(QWidget):
                 import json
                 with open(js_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
+                self._apply_group_json_settings(data)
                 cm = self._normalize_curve_method(data.get("curve_method"))
                 self._set_curve_method_for_line(line_id, cm)
                 gs = data.get("groups", [])
@@ -4051,6 +4656,8 @@ class CurveAnalyzeTab(QWidget):
                     norm.append({
                         "id": g.get("id", f"G{i}"),
                         "start": s, "end": e,
+                        "start_reason": str(g.get("start_reason", "") or ""),
+                        "end_reason": str(g.get("end_reason", "") or ""),
                         "color": g.get("color", "")
                     })
                 if norm:
@@ -4071,27 +4678,15 @@ class CurveAnalyzeTab(QWidget):
             # cần profile để auto
             row = self.line_combo.currentIndex()
             geom = self._gdf.geometry.iloc[row]
-            prof = compute_profile(
-                self.dem_path, self.dx_path, self.dy_path, self.dz_path,
-                geom, step_m=self.step_box.value(),
-                smooth_win=11, smooth_poly=2,
-                slip_mask_path=self.slip_path, slip_only=True,
-                dem_orig_path=self.ground_export_dem_path,
-            )
+            prof = self._compute_profile_for_geom(geom, slip_only=True)
             if prof:
-                groups = auto_group_profile_by_criteria(prof, **WORKFLOW_GROUPING_PARAMS)
+                groups = auto_group_profile_by_criteria(prof, **self._grouping_params_current())
 
         # clamp trong slip-zone
         try:
             row = self.line_combo.currentIndex()
             geom = self._gdf.geometry.iloc[row]
-            prof = compute_profile(
-                self.dem_path, self.dx_path, self.dy_path, self.dz_path,
-                geom, step_m=self.step_box.value(),
-                smooth_win=11, smooth_poly=2,
-                slip_mask_path=self.slip_path, slip_only=True,
-                dem_orig_path=self.ground_export_dem_path,
-            )
+            prof = self._compute_profile_for_geom(geom, slip_only=True)
             if prof:
                 prof_for_stats = prof
                 groups = clamp_groups_to_slip(prof, groups, min_len=WORKFLOW_GROUP_MIN_LEN_M)
@@ -4102,7 +4697,17 @@ class CurveAnalyzeTab(QWidget):
         line_id = self._line_id_current()
         curve_method = self._get_curve_method_for_line(line_id)
         groups_for_json = self._groups_with_median_theta(groups, prof_for_stats)
-        js = {"line": self.line_combo.currentText(), "groups": groups_for_json, "curve_method": curve_method}
+        curvature_points = self._curvature_points_for_json(prof_for_stats, groups_for_json)
+        js = {
+            "line": self.line_combo.currentText(),
+            "groups": groups_for_json,
+            "curvature_points": curvature_points,
+            "curve_method": curve_method,
+            "profile_dem_source": self._current_profile_source_key(),
+            "profile_dem_path": str(getattr(self, "dem_path", "") or "").replace("\\", "/"),
+            "include_curvature_threshold": self._include_curvature_threshold(),
+            "include_vector_angle_zero": self._include_vector_angle_zero(),
+        }
         try:
             with open(self._groups_json_path(), "w", encoding="utf-8") as f:
                 json.dump(js, f, ensure_ascii=False, indent=2)
