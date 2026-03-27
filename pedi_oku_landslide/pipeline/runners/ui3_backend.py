@@ -1,16 +1,18 @@
 # ui3_backend.py
 import json
+import math
 import os
-from typing import Dict, Any, Optional, Tuple, List
-import numpy as np
+from typing import Any, Dict, List, Optional, Tuple
+
 import geopandas as gpd
+import matplotlib
+import matplotlib.colors as mcolors
+import numpy as np
+import pandas as pd
 import rasterio
 from shapely.geometry import LineString
-# savgol_filter disabled as per user request (focus on UI1 Mean Smoothing)
-savgol_filter = None
-import matplotlib
+
 matplotlib.use("Agg")  # headless
-import pandas as pd
 from pedi_oku_landslide.core.paths import OUTPUT_ROOT
 
 CURVATURE_THRESHOLD_PLOT_ABS = 0.02
@@ -91,8 +93,6 @@ def _open_raster(path: str):
     ds = rasterio.open(path)
     arr = ds.read(1).astype("float32")
     return ds, arr
-
-from shapely.geometry import LineString
 
 def _ensure_lines_crs(lines_path: str, dst_crs) -> gpd.GeoDataFrame:
     gdf = gpd.read_file(lines_path)
@@ -196,8 +196,6 @@ def _rdp_polyline(points, eps):
         return left[:-1] + right
     else:
         return [points[0], points[-1]]
-import math
-
 def _curvature_series(x, y):
     n = len(x)
     k = [0.0] * n
@@ -1346,10 +1344,6 @@ def export_csv(prof: Dict[str, np.ndarray], out_csv: Optional[str]) -> Tuple[str
 
 
 # === [UI3] Auto-group helpers (RDP + Curvature + θ-rate) ===
-import matplotlib.colors as mcolors
-
-
-
 def _cluster_chain_marks(chain_marks: np.ndarray, gap_m: float = 0.5) -> List[float]:
     vals = np.asarray(chain_marks, dtype=float)
     vals = vals[np.isfinite(vals)]

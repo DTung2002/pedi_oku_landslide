@@ -13,3 +13,8 @@ dist.*
 .cache/
 .tmp/
 temp/
+__pycache__/
+*.py[cod]
+
+# Test artifacts
+tests/out_cv/

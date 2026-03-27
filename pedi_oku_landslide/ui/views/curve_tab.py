@@ -1,40 +1,61 @@
-# --- ADD/UPDATE imports ở đầu file ---
 import math
-import os, json
-from typing import Optional, Dict, Any, List, Callable
 import os
-import numpy as np
-from PyQt5.QtCore import Qt, pyqtSignal, QSize, QTimer
-from PyQt5.QtGui import QFont, QPixmap, QPainter, QColor, QPainterPath
-from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QGroupBox,
-    QScrollArea, QFrame, QTextEdit, QComboBox, QDoubleSpinBox, QSpinBox,
-    QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
-    QTableWidget, QTableWidgetItem, QHeaderView, QSizePolicy,
-    QSplitter, QLineEdit, QMessageBox, QColorDialog, QAbstractSpinBox, QFileDialog, QCheckBox
-)
-from PyQt5.QtGui import QPixmap, QPixmapCache
-from typing import Tuple, List, Dict, Optional
-# backend UI3 đã có sẵn
-from pedi_oku_landslide.pipeline.runners.ui3_backend import (
-    auto_paths, list_lines, compute_profile, render_profile_png,
-    estimate_slip_curve, fit_bezier_smooth_curve, evaluate_nurbs_curve,
-    extract_curvature_rdp_nodes,
-)
-from PyQt5.QtGui import QPen, QColor
-# ===================== ZOOMABLE GRAPHICS VIEW =====================
-from PyQt5.QtWidgets import QGraphicsView, QToolBar, QAction
-from typing import List, Tuple, Dict, Optional
-from PyQt5.QtGui import QPen, QColor
-from PyQt5.QtWidgets import (
-    QGraphicsLineItem, QGraphicsRectItem, QGraphicsPathItem,
-    QGraphicsEllipseItem, QGraphicsSimpleTextItem
-)
+import json
 import csv
 import traceback
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+import numpy as np
 import geopandas as gpd
-from shapely.geometry import LineString
 import rasterio
+from PyQt5.QtCore import Qt, pyqtSignal, QSize, QTimer
+from PyQt5.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap, QPixmapCache
+from PyQt5.QtWidgets import (
+    QAction,
+    QAbstractSpinBox,
+    QCheckBox,
+    QColorDialog,
+    QComboBox,
+    QDoubleSpinBox,
+    QFileDialog,
+    QFrame,
+    QGraphicsEllipseItem,
+    QGraphicsLineItem,
+    QGraphicsPathItem,
+    QGraphicsPixmapItem,
+    QGraphicsRectItem,
+    QGraphicsScene,
+    QGraphicsSimpleTextItem,
+    QGraphicsView,
+    QGroupBox,
+    QHeaderView,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QSpinBox,
+    QSplitter,
+    QTableWidget,
+    QTableWidgetItem,
+    QTextEdit,
+    QToolBar,
+    QVBoxLayout,
+    QWidget,
+)
+from shapely.geometry import LineString
+
+from pedi_oku_landslide.pipeline.runners.ui3_backend import (
+    auto_paths,
+    compute_profile,
+    estimate_slip_curve,
+    evaluate_nurbs_curve,
+    extract_curvature_rdp_nodes,
+    fit_bezier_smooth_curve,
+    render_profile_png,
+)
 
 WORKFLOW_GROUP_MIN_LEN_M = 0.0
 WORKFLOW_GROUPING_PARAMS = {
@@ -44,78 +65,6 @@ WORKFLOW_GROUPING_PARAMS = {
     "include_curvature_threshold": True,
     "include_vector_angle_zero": True,
 }
-
-
-def _rdp_polyline(points: List[Tuple[float, float]], eps: float) -> List[Tuple[float, float]]:
-    if len(points) <= 2:
-        return points[:]
-    x1, y1 = points[0]
-    x2, y2 = points[-1]
-    dx, dy = (x2 - x1), (y2 - y1)
-    den = math.hypot(dx, dy)
-    max_dist = -1.0
-    idx = -1
-    for i in range(1, len(points) - 1):
-        x0, y0 = points[i]
-        if den == 0:
-            d = math.hypot(x0 - x1, y0 - y1)
-        else:
-            d = abs(dy * x0 - dx * y0 + x2 * y1 - y2 * x1) / den
-        if d > max_dist:
-            max_dist = d
-            idx = i
-    if max_dist > eps and idx > 0:
-        left = _rdp_polyline(points[: idx + 1], eps)
-        right = _rdp_polyline(points[idx:], eps)
-        return left[:-1] + right
-    return [points[0], points[-1]]
-
-
-def _curvature_points_from_rdp(points: List[Tuple[float, float]]) -> List[float]:
-    if len(points) < 3:
-        return [0.0] * len(points)
-    k = [0.0] * len(points)
-    for i in range(1, len(points) - 1):
-        x1, y1 = points[i - 1]
-        x2, y2 = points[i]
-        x3, y3 = points[i + 1]
-        a = math.hypot(x2 - x3, y2 - y3)
-        b = math.hypot(x3 - x1, y3 - y1)
-        c = math.hypot(x1 - x2, y1 - y2)
-        if a == 0 or b == 0 or c == 0:
-            continue
-        s = 0.5 * (a + b + c)
-        area2 = max(s * (s - a) * (s - b) * (s - c), 0.0)
-        if area2 <= 0:
-            continue
-        R = (a * b * c) / (4.0 * math.sqrt(area2))
-        if R == 0:
-            continue
-        curv = 1.0 / R
-        cross = (x2 - x1) * (y3 - y2) - (y2 - y1) * (x3 - x2)
-        k[i] = -curv if cross < 0 else curv
-    return k
-
-
-def _mean_filter_profile_by_chain(chain: np.ndarray, elev: np.ndarray, radius_m: float) -> np.ndarray:
-    chain = np.asarray(chain, dtype=float)
-    elev = np.asarray(elev, dtype=float)
-    out = np.full(elev.shape, np.nan, dtype=float)
-    if chain.ndim != 1 or elev.ndim != 1 or chain.size != elev.size:
-        return out
-    finite = np.isfinite(chain) & np.isfinite(elev)
-    if int(np.count_nonzero(finite)) <= 0:
-        return out
-    c = chain[finite]
-    z = elev[finite]
-    radius = max(0.0, float(radius_m))
-    vals = np.full(z.shape, np.nan, dtype=float)
-    for i in range(c.size):
-        mask = np.abs(c - c[i]) <= radius
-        if int(np.count_nonzero(mask)) > 0:
-            vals[i] = float(np.mean(z[mask]))
-    out[finite] = vals
-    return out
 
 
 def _mk_boundary(x: float, reason: str, score: float, fixed: bool = False) -> Dict[str, Any]:
@@ -313,136 +262,6 @@ def _vector_horizontal_boundaries(
         if smin <= x_cross <= smax:
             out.append(_mk_boundary(x_cross, "vector_angle_zero_deg", score=0.0, fixed=False))
     return _merge_close_boundaries(out, tol_m=1e-6)
-
-
-def _pick_graben_endpoints_from_curvature(
-    xs: np.ndarray,
-    ks: np.ndarray,
-    smin: float,
-    smax: float,
-    curvature_thr_abs: float,
-    edge_window_m: float,
-) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    win = max(1e-6, float(edge_window_m))
-    left_mask = np.isfinite(xs) & np.isfinite(ks) & (xs >= smin) & (xs <= min(smax, smin + win))
-    right_mask = np.isfinite(xs) & np.isfinite(ks) & (xs >= max(smin, smax - win)) & (xs <= smax)
-
-    def _pick(mask: np.ndarray, fallback_x: float, reason: str) -> Dict[str, Any]:
-        if int(np.count_nonzero(mask)) <= 0:
-            return _mk_boundary(fallback_x, reason, score=0.0, fixed=True)
-        xw = xs[mask]
-        kw = ks[mask]
-        idx = int(np.argmax(np.abs(kw)))
-        x_best = float(xw[idx])
-        k_best = float(kw[idx])
-        if abs(k_best) <= float(curvature_thr_abs):
-            x_best = float(fallback_x)
-        return _mk_boundary(x_best, reason, score=abs(k_best), fixed=True)
-
-    left = _pick(left_mask, float(smin), "graben_left")
-    right = _pick(right_mask, float(smax), "graben_right")
-    if float(right["x"]) <= float(left["x"]):
-        left = _mk_boundary(float(smin), "graben_left", score=float(left["score"]), fixed=True)
-        right = _mk_boundary(float(smax), "graben_right", score=float(right["score"]), fixed=True)
-    return left, right
-
-
-def _curvature_sign_change_boundaries(
-    xs: np.ndarray,
-    ks: np.ndarray,
-    smin: float,
-    smax: float,
-    curvature_thr_abs: float,
-) -> List[Dict[str, Any]]:
-    out: List[Dict[str, Any]] = []
-    if xs.size < 2:
-        return out
-    for i in range(xs.size - 1):
-        x0 = float(xs[i]); x1 = float(xs[i + 1])
-        k0 = float(ks[i]); k1 = float(ks[i + 1])
-        if not (np.isfinite(x0) and np.isfinite(x1) and np.isfinite(k0) and np.isfinite(k1)):
-            continue
-        if not (smin <= x0 <= smax and smin <= x1 <= smax):
-            continue
-        if (k0 * k1) >= 0.0:
-            continue
-        if (abs(k0) <= float(curvature_thr_abs)) or (abs(k1) <= float(curvature_thr_abs)):
-            continue
-        den = (k1 - k0)
-        if abs(den) <= 1e-12:
-            continue
-        t = float(np.clip(-k0 / den, 0.0, 1.0))
-        x_cross = x0 + t * (x1 - x0)
-        if smin <= x_cross <= smax:
-            out.append(_mk_boundary(x_cross, "curvature_sign_change", score=min(abs(k0), abs(k1)), fixed=False))
-    return out
-
-
-def _vector_zero_cross_boundaries(
-    chain: np.ndarray,
-    dpara: np.ndarray,
-    smin: float,
-    smax: float,
-    min_abs_dpara_m: float,
-) -> List[Dict[str, Any]]:
-    out: List[Dict[str, Any]] = []
-    m = np.isfinite(chain) & np.isfinite(dpara) & (chain >= smin) & (chain <= smax)
-    if int(np.count_nonzero(m)) < 2:
-        return out
-    c = np.asarray(chain[m], dtype=float)
-    p = np.asarray(dpara[m], dtype=float)
-    idx = np.argsort(c)
-    c = c[idx]; p = p[idx]
-
-    for i in range(c.size - 1):
-        s0 = float(c[i]); s1 = float(c[i + 1])
-        p0 = float(p[i]); p1 = float(p[i + 1])
-        if not (np.isfinite(s0) and np.isfinite(s1) and np.isfinite(p0) and np.isfinite(p1)):
-            continue
-        if (p0 * p1) >= 0.0:
-            continue
-        if (abs(p0) < float(min_abs_dpara_m)) or (abs(p1) < float(min_abs_dpara_m)):
-            continue
-        den = (p1 - p0)
-        if abs(den) <= 1e-12:
-            continue
-        t = float(np.clip(-p0 / den, 0.0, 1.0))
-        x_cross = s0 + t * (s1 - s0)
-        if smin <= x_cross <= smax:
-            out.append(_mk_boundary(x_cross, "vector_zero_cross", score=min(abs(p0), abs(p1)), fixed=False))
-    return out
-
-
-def _select_boundaries_with_min_gap(
-    candidates: List[Dict[str, Any]],
-    left_boundary: Dict[str, Any],
-    right_boundary: Dict[str, Any],
-    min_gap_m: float,
-) -> List[Dict[str, Any]]:
-    gap = max(1e-6, float(min_gap_m))
-    left_x = float(left_boundary["x"])
-    right_x = float(right_boundary["x"])
-    if right_x <= left_x:
-        return []
-
-    kept: List[Dict[str, Any]] = _merge_close_boundaries([left_boundary, right_boundary])
-    optionals = []
-    for c in (candidates or []):
-        if bool(c.get("fixed", False)):
-            continue
-        x = float(c.get("x", np.nan))
-        if np.isfinite(x) and (left_x < x < right_x):
-            optionals.append(dict(c))
-    optionals = _merge_close_boundaries(optionals)
-    optionals.sort(key=lambda t: (-float(t.get("score", 0.0)), float(t.get("x", 0.0))))
-
-    for c in optionals:
-        x = float(c["x"])
-        if all(abs(x - float(k["x"])) >= gap for k in kept):
-            kept.append(dict(c))
-    kept = _merge_close_boundaries(kept)
-    kept.sort(key=lambda t: float(t["x"]))
-    return kept
 
 
 def auto_group_profile_by_criteria(
@@ -2746,11 +2565,6 @@ class CurveAnalyzeTab(QWidget):
     def showEvent(self, event) -> None:
         super().showEvent(event)
         self._enforce_left_pane_bounds()
-
-    def _row(self) -> QHBoxLayout:
-        r = QHBoxLayout()
-        r.setContentsMargins(0, 0, 0, 0)
-        return r
 
     @staticmethod
     def _pick_existing_path(*cands: str) -> str:
