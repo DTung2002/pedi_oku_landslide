@@ -272,10 +272,28 @@ def auto_group_profile_by_criteria(
     include_curvature_threshold: bool = True,
     include_vector_angle_zero: bool = True,
 ) -> List[Dict[str, Any]]:
-    if "slip_span" in prof and prof["slip_span"]:
+    chain = np.asarray(prof.get("chain", []), dtype=float)
+    slip_mask = np.asarray(prof.get("slip_mask", [])) if prof.get("slip_mask", None) is not None else None
+    if slip_mask is not None and slip_mask.shape == chain.shape:
+        finite_mask = np.isfinite(chain) & (slip_mask == True)
+        if int(np.count_nonzero(finite_mask)) >= 2:
+            smin = float(np.nanmin(chain[finite_mask]))
+            smax = float(np.nanmax(chain[finite_mask]))
+        elif "slip_span" in prof and prof["slip_span"]:
+            smin, smax = map(float, prof["slip_span"])
+        else:
+            elev_raw = np.asarray(prof.get("elev_orig", []), dtype=float)
+            elev_fallback = np.asarray(prof.get("elev_s", []), dtype=float)
+            if elev_raw.ndim != 1 or elev_raw.size != chain.size:
+                elev_raw = elev_fallback
+            finite = np.isfinite(chain) & np.isfinite(elev_raw)
+            if int(np.count_nonzero(finite)) < 2:
+                return []
+            smin = float(np.nanmin(chain[finite]))
+            smax = float(np.nanmax(chain[finite]))
+    elif "slip_span" in prof and prof["slip_span"]:
         smin, smax = map(float, prof["slip_span"])
     else:
-        chain = np.asarray(prof.get("chain", []), dtype=float)
         elev_raw = np.asarray(prof.get("elev_orig", []), dtype=float)
         elev_fallback = np.asarray(prof.get("elev_s", []), dtype=float)
         if elev_raw.ndim != 1 or elev_raw.size != chain.size:
@@ -370,7 +388,21 @@ def auto_group_profile_by_criteria(
 def clamp_groups_to_slip(prof: Dict[str, Any], groups: List[Dict[str, Any]], min_len: float = WORKFLOW_GROUP_MIN_LEN_M) -> List[Dict[str, Any]]:
     chain = np.asarray(prof.get("chain", []), dtype=float)
     elevs = np.asarray(prof.get("elev_s", []), dtype=float)
-    if "slip_span" in prof and prof["slip_span"]:
+    slip_mask = np.asarray(prof.get("slip_mask", [])) if prof.get("slip_mask", None) is not None else None
+    if slip_mask is not None and slip_mask.shape == chain.shape:
+        keep = np.isfinite(chain) & (slip_mask == True)
+        if int(np.count_nonzero(keep)) > 0:
+            smin = float(np.nanmin(chain[keep]))
+            smax = float(np.nanmax(chain[keep]))
+        elif "slip_span" in prof and prof["slip_span"]:
+            smin, smax = map(float, prof["slip_span"])
+        else:
+            keep = np.isfinite(chain) & np.isfinite(elevs)
+            if int(np.count_nonzero(keep)) <= 0:
+                return []
+            smin = float(np.nanmin(chain[keep]))
+            smax = float(np.nanmax(chain[keep]))
+    elif "slip_span" in prof and prof["slip_span"]:
         smin, smax = map(float, prof["slip_span"])
     else:
         keep = np.isfinite(chain) & np.isfinite(elevs)
@@ -1768,7 +1800,6 @@ class CurveAnalyzeTab(QWidget):
             self._warn("[UI3] Cannot evaluate NURBS curve.")
             return
         out_png = self._nurbs_png_path_for(line_id)
-        curv_series = self._saved_curvature_series_for_line(line_id, self._active_groups if self._active_groups else None, self._active_prof)
         msg, path = render_profile_png(
             self._active_prof, out_png,
             y_min=None, y_max=None,
@@ -1779,7 +1810,6 @@ class CurveAnalyzeTab(QWidget):
             highlight_theta=None,
             group_ranges=self._active_groups if self._active_groups else None,
             ungrouped_color=self._get_ungrouped_color(),
-            curvature_series=curv_series,
             overlay_curves=[(curve["chain"], curve["elev"], "#bf00ff", "Slip curve")]
         )
         self._log(msg)
@@ -1947,8 +1977,9 @@ class CurveAnalyzeTab(QWidget):
                 return
             geom = self._gdf.geometry.iloc[row]
 
-            # 2) Profile chỉ trong slip-zone
-            prof = self._compute_profile_for_geom(geom, slip_only=True)
+            # 2) Profile full line; curvature boundaries will be computed on the
+            # full section and filtered back to the mask span.
+            prof = self._compute_profile_for_geom(geom, slip_only=False)
             if not prof:
                 self._err("[UI3] Empty profile.")
                 return
@@ -2148,7 +2179,6 @@ class CurveAnalyzeTab(QWidget):
 
             # 5) Re-render base PNG (no curve baked-in), then draw overlay in scene
             out_png = self._profile_png_path_for(line_id)
-            curv_series = self._saved_curvature_series_for_line(line_id, groups if groups else None, prof)
 
             msg, path = render_profile_png(
                 prof, out_png,
@@ -2160,7 +2190,6 @@ class CurveAnalyzeTab(QWidget):
                 highlight_theta=None,
                 group_ranges=groups,
                 ungrouped_color=self._get_ungrouped_color(),
-                curvature_series=curv_series,
             )
             self._log(msg)
             if not path or not os.path.exists(path):
@@ -3833,11 +3862,18 @@ class CurveAnalyzeTab(QWidget):
                 prof,
                 rdp_eps_m=float(params.get("rdp_eps_m", 0.5)),
                 smooth_radius_m=float(params.get("smooth_radius_m", 0.0)),
-                restrict_to_slip_span=True,
+                restrict_to_slip_span=False,
             )
             chain = np.asarray(nodes.get("chain", []), dtype=float)
             elev = np.asarray(nodes.get("elev", []), dtype=float)
             curv = np.asarray(nodes.get("curvature", []), dtype=float)
+            slip_span = self._profile_slip_span_range(prof)
+            if slip_span:
+                smin, smax = slip_span
+                keep = np.isfinite(chain) & np.isfinite(elev) & np.isfinite(curv) & (chain >= float(smin)) & (chain <= float(smax))
+                chain = chain[keep]
+                elev = elev[keep]
+                curv = curv[keep]
             n = int(min(chain.size, elev.size, curv.size))
             curvature_thr_abs = float(params.get("curvature_thr_abs", 0.02))
             include_curvature = bool(params.get("include_curvature_threshold", True))
@@ -3960,7 +3996,7 @@ class CurveAnalyzeTab(QWidget):
         return out_json
 
     def _save_ground_json_for_line(self, line_id: str, geom, step_m: float) -> Optional[str]:
-        dem_path = str(getattr(self, "ground_export_dem_path", "") or "").strip()
+        dem_path = str(getattr(self, "dem_path_raw", "") or "").strip()
         if not dem_path or not os.path.exists(dem_path):
             return None
 
@@ -3983,13 +4019,22 @@ class CurveAnalyzeTab(QWidget):
         x = np.asarray(prof.get("x", []), dtype=float) if prof.get("x", None) is not None else None
         y = np.asarray(prof.get("y", []), dtype=float) if prof.get("y", None) is not None else None
         elev = np.asarray(prof.get("elev_s", []), dtype=float) if prof.get("elev_s", None) is not None else None
+        slip_mask = np.asarray(prof.get("slip_mask", [])) if prof.get("slip_mask", None) is not None else None
         if chain.size == 0 or elev is None:
             return None
-        slip_span = self._profile_slip_span_range(prof)
-        if slip_span:
-            span_min, span_max = slip_span
-        else:
-            span_min = span_max = None
+
+        slip_start_idx = None
+        slip_end_idx = None
+        if slip_mask is not None and slip_mask.shape == chain.shape:
+            try:
+                slip_keep = np.isfinite(chain) & (slip_mask == True)
+                slip_idx = np.flatnonzero(slip_keep)
+                if slip_idx.size > 0:
+                    slip_start_idx = int(slip_idx[0])
+                    slip_end_idx = int(slip_idx[-1])
+            except Exception:
+                slip_start_idx = None
+                slip_end_idx = None
 
         rows: List[dict] = []
         for i in range(int(chain.size)):
@@ -3997,24 +4042,42 @@ class CurveAnalyzeTab(QWidget):
             zz = float(elev[i]) if i < elev.size and np.isfinite(elev[i]) else None
             if ch is None or zz is None:
                 continue
-            if (span_min is not None) and (span_max is not None) and not (float(span_min) <= float(ch) <= float(span_max)):
-                continue
             xx = float(x[i]) if x is not None and i < x.size and np.isfinite(x[i]) else None
             yy = float(y[i]) if y is not None and i < y.size and np.isfinite(y[i]) else None
+            in_mask = None
+            if slip_mask is not None and i < slip_mask.size:
+                try:
+                    in_mask = bool(slip_mask[i])
+                except Exception:
+                    in_mask = None
             rows.append({
                 "index": i,
                 "chain_m": ch,
                 "x": xx,
                 "y": yy,
                 "ground_m": zz,
+                "in_mask": in_mask,
+                "is_mask_start": bool(slip_start_idx is not None and i == slip_start_idx),
+                "is_mask_end": bool(slip_end_idx is not None and i == slip_end_idx),
             })
 
         payload = {
             "line_id": line_id,
             "source_dem_path": dem_path.replace("\\", "/"),
             "count": len(rows),
-            "profile_dem_source": self._current_profile_source_key(),
-            "slip_span": ([float(span_min), float(span_max)] if (span_min is not None and span_max is not None) else None),
+            "profile_dem_source": "raw",
+            "mask_start_index": slip_start_idx,
+            "mask_end_index": slip_end_idx,
+            "mask_start_chain_m": (
+                float(chain[slip_start_idx])
+                if slip_start_idx is not None and 0 <= slip_start_idx < chain.size and np.isfinite(chain[slip_start_idx])
+                else None
+            ),
+            "mask_end_chain_m": (
+                float(chain[slip_end_idx])
+                if slip_end_idx is not None and 0 <= slip_end_idx < chain.size and np.isfinite(chain[slip_end_idx])
+                else None
+            ),
             "ground": rows,
         }
         out_json = self._ground_json_path_for(line_id)
@@ -4064,7 +4127,6 @@ class CurveAnalyzeTab(QWidget):
         # 4) Gọi backend vẽ PNG (tô màu theo group nếu có)
         line_id = self._line_id_current()
         out_png = self._profile_png_path_for(line_id)
-        curv_series = self._saved_curvature_series_for_line(line_id, groups if groups else None, prof)
 
         msg, path = render_profile_png(
             prof, out_png,
@@ -4076,7 +4138,6 @@ class CurveAnalyzeTab(QWidget):
             highlight_theta=None,
             group_ranges=groups if groups else None,
             ungrouped_color=self._get_ungrouped_color(),
-            curvature_series=curv_series,
         )
         self._log(msg)
         if not path or not os.path.exists(path):
@@ -4492,7 +4553,7 @@ class CurveAnalyzeTab(QWidget):
             # cần profile để auto
             row = self.line_combo.currentIndex()
             geom = self._gdf.geometry.iloc[row]
-            prof = self._compute_profile_for_geom(geom, slip_only=True)
+            prof = self._compute_profile_for_geom(geom, slip_only=False)
             if prof:
                 groups = auto_group_profile_by_criteria(prof, **self._grouping_params_current())
 
@@ -4500,7 +4561,7 @@ class CurveAnalyzeTab(QWidget):
         try:
             row = self.line_combo.currentIndex()
             geom = self._gdf.geometry.iloc[row]
-            prof = self._compute_profile_for_geom(geom, slip_only=True)
+            prof = self._compute_profile_for_geom(geom, slip_only=False)
             if prof:
                 prof_for_stats = prof
                 groups = clamp_groups_to_slip(prof, groups, min_len=WORKFLOW_GROUP_MIN_LEN_M)

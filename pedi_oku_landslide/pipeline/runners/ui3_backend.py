@@ -834,6 +834,8 @@ def render_profile_png(
                             return kx, kv
                 except Exception:
                     pass
+            # The profile source already selects raw-vs-smoothed DEM input,
+            # so avoid applying an extra smoothing pass here.
             return _curvature_plot_series(prof_curv, rdp_eps_m=0.5, smooth_radius_m=0.0)
         if group_ranges:
             if "slip_span" in prof and prof["slip_span"]:
