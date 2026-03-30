@@ -275,6 +275,51 @@ def _mean_filter_profile_by_chain(chain: np.ndarray, elev: np.ndarray, radius_m:
     return out
 
 
+def _interp_series_at_x(xs: np.ndarray, ys: np.ndarray, xq: np.ndarray) -> np.ndarray:
+    xs = np.asarray(xs, dtype=float)
+    ys = np.asarray(ys, dtype=float)
+    xq = np.asarray(xq, dtype=float)
+    out = np.full(xq.shape, np.nan, dtype=float)
+    if xs.ndim != 1 or ys.ndim != 1 or xs.size != ys.size or xs.size < 2:
+        return out
+    keep = np.isfinite(xs) & np.isfinite(ys)
+    if int(np.count_nonzero(keep)) < 2:
+        return out
+    xs_u, idx = np.unique(xs[keep], return_index=True)
+    ys_u = ys[keep][idx]
+    if xs_u.size < 2:
+        return out
+    finite_q = np.isfinite(xq)
+    if int(np.count_nonzero(finite_q)) > 0:
+        out[finite_q] = np.interp(xq[finite_q], xs_u, ys_u)
+    return out
+
+
+def _curvature_from_theta_series(chain: np.ndarray, theta_deg: np.ndarray, smooth_radius_m: float = 0.0) -> np.ndarray:
+    chain = np.asarray(chain, dtype=float)
+    theta_deg = np.asarray(theta_deg, dtype=float)
+    out = np.full(theta_deg.shape, np.nan, dtype=float)
+    if chain.ndim != 1 or theta_deg.ndim != 1 or chain.size != theta_deg.size:
+        return out
+    finite = np.isfinite(chain) & np.isfinite(theta_deg)
+    if int(np.count_nonzero(finite)) < 3:
+        return out
+    c = np.asarray(chain[finite], dtype=float)
+    theta_rad = np.radians(np.asarray(theta_deg[finite], dtype=float))
+    if float(smooth_radius_m) > 0.0:
+        theta_rad = _mean_filter_profile_by_chain(c, theta_rad, float(smooth_radius_m))
+    finite_theta = np.isfinite(c) & np.isfinite(theta_rad)
+    if int(np.count_nonzero(finite_theta)) < 3:
+        return out
+    c = c[finite_theta]
+    theta_rad = theta_rad[finite_theta]
+    k = np.gradient(theta_rad, c)
+    vals = np.full(chain[finite].shape, np.nan, dtype=float)
+    vals[finite_theta] = np.asarray(k, dtype=float)
+    out[finite] = vals
+    return out
+
+
 def _profile_elevation_for_curvature(prof: Dict[str, np.ndarray]) -> np.ndarray:
     chain = np.asarray(prof.get("chain", []), dtype=float)
     elev = np.asarray(prof.get("elev", []), dtype=float)
@@ -352,6 +397,7 @@ def extract_curvature_rdp_nodes(
 ) -> Dict[str, np.ndarray]:
     chain = np.asarray(prof.get("chain", []), dtype=float)
     elev_curve = _profile_elevation_for_curvature(prof)
+    theta = np.asarray(prof.get("theta", []), dtype=float)
     empty = {
         "chain": np.array([], dtype=float),
         "elev": np.array([], dtype=float),
@@ -361,10 +407,10 @@ def extract_curvature_rdp_nodes(
     }
     if chain.ndim != 1 or chain.size < 3:
         return empty
-    if elev_curve.ndim != 1 or elev_curve.size != chain.size:
+    if elev_curve.ndim != 1 or elev_curve.size != chain.size or theta.ndim != 1 or theta.size != chain.size:
         return empty
 
-    finite = np.isfinite(chain) & np.isfinite(elev_curve)
+    finite = np.isfinite(chain) & np.isfinite(elev_curve) & np.isfinite(theta)
     finite0 = finite
     if int(np.count_nonzero(finite0)) < 2:
         return empty
@@ -385,14 +431,17 @@ def extract_curvature_rdp_nodes(
 
     chain_w = np.asarray(chain[finite], dtype=float)
     elev_w = np.asarray(elev_curve[finite], dtype=float)
+    theta_w = np.asarray(theta[finite], dtype=float)
     if restrict_to_slip_span:
         # Clip the profile first so smoothing + RDP are evaluated on the
         # visible/slip span itself instead of on the full line and cropped later.
         chain_w, elev_w = _clip_polyline_to_span(chain_w, elev_w, float(smin), float(smax))
-        if chain_w.size < 3 or elev_w.size != chain_w.size:
+        theta_w = _interp_series_at_x(np.asarray(chain[finite], dtype=float), np.asarray(theta[finite], dtype=float), chain_w)
+        if chain_w.size < 3 or elev_w.size != chain_w.size or theta_w.size != chain_w.size:
             return empty
     elev_sm = _mean_filter_profile_by_chain(chain_w, elev_w, float(smooth_radius_m))
-    finite_sm = np.isfinite(chain_w) & np.isfinite(elev_sm)
+    k_dense = _curvature_from_theta_series(chain_w, theta_w, smooth_radius_m=float(smooth_radius_m))
+    finite_sm = np.isfinite(chain_w) & np.isfinite(elev_sm) & np.isfinite(k_dense)
     if int(np.count_nonzero(finite_sm)) < 3:
         return empty
 
@@ -401,9 +450,9 @@ def extract_curvature_rdp_nodes(
     if len(rdp_pts) < 3:
         return empty
 
-    k_vals = np.asarray(_curvature_points_from_rdp(rdp_pts), dtype=float)
     k_x = np.asarray([p[0] for p in rdp_pts], dtype=float)
     k_z = np.asarray([p[1] for p in rdp_pts], dtype=float)
+    k_vals = _interp_series_at_x(chain_w[finite_sm], k_dense[finite_sm], k_x)
     if restrict_to_slip_span:
         keep = np.isfinite(k_x) & (k_x >= float(smin)) & (k_x <= float(smax))
         k_x = k_x[keep]
@@ -775,7 +824,7 @@ def render_profile_png(
         ax.plot(chain, elev_s, "k-", lw=ground_lw, label=ground_label)
 
 
-        finite = np.isfinite(chain) & np.isfinite(elev_s) & np.isfinite(d_para) & np.isfinite(dz)
+        finite_prof = np.isfinite(chain) & np.isfinite(elev_s) & np.isfinite(d_para) & np.isfinite(dz)
         slip_mask_arr = None
         try:
             sm = prof.get("slip_mask", None)
@@ -841,9 +890,8 @@ def render_profile_png(
             if "slip_span" in prof and prof["slip_span"]:
                 smin, smax = prof["slip_span"]
             else:
-                finite = np.isfinite(prof["chain"]) & np.isfinite(prof["elev_s"])
-                smin = float(np.nanmin(prof["chain"][finite]))
-                smax = float(np.nanmax(prof["chain"][finite]))
+                smin = float(np.nanmin(prof["chain"][finite_prof]))
+                smax = float(np.nanmax(prof["chain"][finite_prof]))
 
             cmap = plt.get_cmap("tab10")
             prepared = []
@@ -867,7 +915,7 @@ def render_profile_png(
                 gidx[m] = gi
 
             for gi, gid, s, e, color in prepared:
-                m = finite & (gidx == gi)
+                m = finite_prof & (gidx == gi)
                 if np.any(m):
                     ax.quiver(chain[m], elev_s[m], d_para[m], dz[m],
                               angles="xy", scale_units="xy", scale=vec_scale,
@@ -880,13 +928,13 @@ def render_profile_png(
             d_para_s = d_para[order]
             dz_s = dz[order]
 
-            finite = np.isfinite(chain_s) & np.isfinite(d_para_s) & np.isfinite(dz_s)
+            finite_s = np.isfinite(chain_s) & np.isfinite(d_para_s) & np.isfinite(dz_s)
             if (plot_span_min is not None) and (plot_span_max is not None):
-                finite = finite & (chain_s >= float(plot_span_min)) & (chain_s <= float(plot_span_max))
-            if finite.sum() >= 2:
-                ch = chain_s[finite]
+                finite_s = finite_s & (chain_s >= float(plot_span_min)) & (chain_s <= float(plot_span_max))
+            if finite_s.sum() >= 2:
+                ch = chain_s[finite_s]
                 # Vector slope angle (deg), normalized to [-90, 90].
-                gradient_deg = np.degrees(np.arctan2(dz_s[finite], d_para_s[finite]))
+                gradient_deg = np.degrees(np.arctan2(dz_s[finite_s], d_para_s[finite_s]))
                 gradient_deg = ((gradient_deg + 90.0) % 180.0) - 90.0
 
                 # savgol_filter disabled
@@ -898,13 +946,13 @@ def render_profile_png(
             ax2r = ax2.twinx()
             ax2r.set_ylabel("Curvature (1/m)", fontsize=axis_label_font)
 
-            # Curvature from raw DEM profile -> RDP (signed k = 1/R).
+            # Curvature from slope-angle change along chainage, sampled on simplified nodes.
             k_curve = None
             try:
                 k_x, k_vals = _resolve_curvature_series()
                 if k_x.size >= 3 and k_vals.size == k_x.size:
                     k_curve = np.asarray(k_vals, dtype=float)
-                    ax2r.plot(k_x, k_vals, lw=1.8, color="#1f77b4",
+                    ax2r.plot(k_x, k_vals, lw=1.8, color="#222222",
                               marker="o", markersize=4, zorder=6, label="Curvature")
             except Exception:
                 pass
@@ -924,7 +972,7 @@ def render_profile_png(
             ax2.grid(ls="--", lw=0.8, alpha=0.35)
 
             try:
-                if finite.sum() >= 2:
+                if finite_s.sum() >= 2:
                     q = np.nanpercentile(np.abs(gradient_deg), 98)
                     if np.isfinite(q) and q > 0:
                         ax2.set_ylim(-1.2 * q, 1.2 * q)
@@ -939,7 +987,7 @@ def render_profile_png(
                                bbox_to_anchor=(0.0, -0.18),
                                fontsize=legend_font, frameon=False, ncol=2)
 
-            m = finite & (gidx == -1)
+            m = finite_prof & (gidx == -1)
             if np.any(m):
                 ug_color = ungrouped_color or "#bbbbbb"
                 ax.quiver(chain[m], elev_s[m], d_para[m], dz[m],
@@ -971,13 +1019,13 @@ def render_profile_png(
             ax2r = ax2.twinx()
             ax2r.set_ylabel("Curvature (1/m)")
 
-            # Curvature from raw DEM profile -> RDP (signed k = 1/R).
+            # Curvature from slope-angle change along chainage, sampled on simplified nodes.
             k_curve = None
             try:
                 k_x, k_vals = _resolve_curvature_series()
                 if k_x.size >= 3 and k_vals.size == k_x.size:
                     k_curve = np.asarray(k_vals, dtype=float)
-                    ax2r.plot(k_x, k_vals, color="#1f77b4", lw=2.0,
+                    ax2r.plot(k_x, k_vals, color="#222222", lw=2.0,
                               marker="o", markersize=4, zorder=6, label="Curvature")
             except Exception:
                 pass
@@ -1400,15 +1448,18 @@ def auto_group_profile_by_criteria(
 
     boundaries = [smin, smax]
 
-    finite_curve = np.isfinite(chain) & np.isfinite(elev_s) & (chain >= smin) & (chain <= smax)
-    if finite_curve.sum() >= 3:
-        pts = list(zip(chain[finite_curve].tolist(), elev_s[finite_curve].tolist()))
-        rdp_pts = _rdp_polyline(pts, rdp_eps_m)
-        if len(rdp_pts) >= 3:
-            k_vals = _curvature_points_from_rdp(rdp_pts)
-            for (xv, _), kv in zip(rdp_pts, k_vals):
-                if np.isfinite(kv) and abs(float(kv)) > float(curvature_thr_abs):
-                    boundaries.append(float(xv))
+    nodes = extract_curvature_rdp_nodes(
+        prof,
+        rdp_eps_m=float(rdp_eps_m),
+        smooth_radius_m=0.0,
+        restrict_to_slip_span=True,
+    )
+    k_x = np.asarray(nodes.get("chain", []), dtype=float)
+    k_vals = np.asarray(nodes.get("curvature", []), dtype=float)
+    if k_x.size >= 3 and k_vals.size == k_x.size:
+        for xv, kv in zip(k_x, k_vals):
+            if np.isfinite(kv) and abs(float(kv)) > float(curvature_thr_abs):
+                boundaries.append(float(xv))
 
     finite_vec = np.isfinite(chain) & np.isfinite(dpa) & np.isfinite(dzz) & (chain >= smin) & (chain <= smax)
     if finite_vec.any():
