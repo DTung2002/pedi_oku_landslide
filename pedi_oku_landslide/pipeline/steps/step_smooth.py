@@ -8,7 +8,7 @@ from matplotlib.colors import LightSource
 import matplotlib.pyplot as plt
 
 from pedi_oku_landslide.services.session_store import AnalysisContext
-from pedi_oku_landslide.core.analysis import smooth_mean
+from pedi_oku_landslide.core.analysis import smooth_gaussian_qgis, smooth_mean
 from pedi_oku_landslide.pipeline.ingest import resolve_run_input_path
 
 def _radius_m_to_px(transform: Affine, radius_m: float) -> tuple[float, float]:
@@ -43,15 +43,21 @@ def _save_preview_png(arr: np.ndarray, transform: Affine, out_png: str, title: s
     plt.savefig(out_png, dpi=220)
     plt.close()
 
-def run_smooth(ctx: AnalysisContext, param_m: float = 2.0) -> dict:
+def run_smooth(
+    ctx: AnalysisContext,
+    param_m: float = 2.0,
+    *,
+    method: str = "Mean",
+    gaussian_sigma_percent: float = 50.0,
+) -> dict:
     """
-    Smooth BEFORE.asc, AFTER.asc, and AFTER DEM using Mean filter.
+    Smooth BEFORE.asc, AFTER.asc, and AFTER DEM.
     Outputs:
       - GeoTIFFs: ui1/before_asc_smooth.tif, ui1/after_asc_smooth.tif
                   ui1/after_dem_smooth.tif
       - PNG previews: ui1/before_asc_smooth.png, ui1/after_asc_smooth.png,
                       ui1/after_dem_smooth.png
-      - JSON: ui1/smooth_meta.json (method, param_m, radius_px)
+      - JSON: ui1/smooth_meta.json (method, param_m, radius_px, gaussian sigma)
     Returns dict with output paths.
     """
     # ---- read BEFORE/AFTER ASC + AFTER DEM
@@ -85,14 +91,22 @@ def run_smooth(ctx: AnalysisContext, param_m: float = 2.0) -> dict:
     if (a_crs is not None) and (d_crs is not None) and (a_crs != d_crs):
         raise ValueError("AFTER.asc and AFTER DEM.tif have different CRS. Please reproject first.")
 
-    # ---- smooth (Mean-only)
-    method = "Mean"
+    # ---- smooth
+    method_norm = str(method or "Mean").strip().lower()
+    if method_norm not in ("mean", "gaussian"):
+        raise ValueError(f"Unsupported smooth method: {method}")
+    method_label = "Gaussian" if method_norm == "gaussian" else "Mean"
     b_radius_px = _radius_m_to_px(b_transform, param_m)
     a_radius_px = _radius_m_to_px(a_transform, param_m)
     d_radius_px = _radius_m_to_px(d_transform, param_m)
-    b_sm = smooth_mean(b_arr, radius_px=b_radius_px)
-    a_sm = smooth_mean(a_arr, radius_px=a_radius_px)
-    d_sm = smooth_mean(d_arr, radius_px=d_radius_px)
+    if method_norm == "gaussian":
+        b_sm = smooth_gaussian_qgis(b_arr, radius_px=b_radius_px, sigma_percent=float(gaussian_sigma_percent))
+        a_sm = smooth_gaussian_qgis(a_arr, radius_px=a_radius_px, sigma_percent=float(gaussian_sigma_percent))
+        d_sm = smooth_gaussian_qgis(d_arr, radius_px=d_radius_px, sigma_percent=float(gaussian_sigma_percent))
+    else:
+        b_sm = smooth_mean(b_arr, radius_px=b_radius_px)
+        a_sm = smooth_mean(a_arr, radius_px=a_radius_px)
+        d_sm = smooth_mean(d_arr, radius_px=d_radius_px)
 
     # ---- write GeoTIFFs
     out_b_tif = os.path.join(ctx.out_ui1, "before_asc_smooth.tif")
@@ -118,19 +132,19 @@ def run_smooth(ctx: AnalysisContext, param_m: float = 2.0) -> dict:
         b_sm,
         b_transform,
         out_b_png,
-        f"before.asc (smooth {method} radius={param_m}m, px={b_radius_px[1]:.2f}x{b_radius_px[0]:.2f})",
+        f"before.asc (smooth {method_label} radius={param_m}m, px={b_radius_px[1]:.2f}x{b_radius_px[0]:.2f})",
     )
     _save_preview_png(
         a_sm,
         a_transform,
         out_a_png,
-        f"after.asc (smooth {method} radius={param_m}m, px={a_radius_px[1]:.2f}x{a_radius_px[0]:.2f})",
+        f"after.asc (smooth {method_label} radius={param_m}m, px={a_radius_px[1]:.2f}x{a_radius_px[0]:.2f})",
     )
     _save_preview_png(
         d_sm,
         d_transform,
         out_d_png,
-        f"after_dem.tif (smooth {method} radius={param_m}m, px={d_radius_px[1]:.2f}x{d_radius_px[0]:.2f})",
+        f"after_dem.tif (smooth {method_label} radius={param_m}m, px={d_radius_px[1]:.2f}x{d_radius_px[0]:.2f})",
     )
 
     # ---- meta
@@ -139,7 +153,10 @@ def run_smooth(ctx: AnalysisContext, param_m: float = 2.0) -> dict:
         json.dump(
             {
                 "method": method,
+                "method_label": method_label,
                 "param_m": float(param_m),
+                "gaussian_sigma_percent": float(gaussian_sigma_percent),
+                "gaussian_kernel_type": "circle" if method_norm == "gaussian" else None,
                 "before_radius_px_rc": [float(b_radius_px[0]), float(b_radius_px[1])],
                 "after_radius_px_rc": [float(a_radius_px[0]), float(a_radius_px[1])],
                 "after_dem_radius_px_rc": [float(d_radius_px[0]), float(d_radius_px[1])],

@@ -141,10 +141,11 @@ class AnalyzeTab(QWidget):
         # ---- Smooth ----
         self.lab_smooth_method = QLabel("Smooth Filter:")
         self.cmb_smooth_method = QComboBox()
-        self.cmb_smooth_method.addItems(["Mean"])
+        self.cmb_smooth_method.addItems(["Mean", "Gaussian"])
         self.cmb_smooth_method.setCurrentText("Mean")
         self.cmb_smooth_method.setEnabled(False)
         self.cmb_smooth_method.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.cmb_smooth_method.currentTextChanged.connect(self._on_smooth_method_changed)
 
         self.lab_smooth_param = QLabel("Mean Radius (m):")
         self.spin_smooth_param = QDoubleSpinBox()
@@ -198,6 +199,7 @@ class AnalyzeTab(QWidget):
         grid_detect.addWidget(self.spin_detect_thr, 3, 1)
         grid_detect.addWidget(self.btn_detect, 3, 2)
         lay_detect.addLayout(grid_detect)
+        self._on_smooth_method_changed(self.cmb_smooth_method.currentText())
 
         # ---- Manual mask from DXF (optional) ----
         sep = QFrame()
@@ -536,6 +538,7 @@ class AnalyzeTab(QWidget):
             self._last_run_dir = info.get("run_dir")
 
             self.btn_open_run.setEnabled(True)
+            self.cmb_smooth_method.setEnabled(True)
             self.btn_smooth.setEnabled(True)  # bật smooth sau khi confirm
             self.cmb_method.setEnabled(True)
             self.btn_calc_sad.setEnabled(True)
@@ -567,7 +570,7 @@ class AnalyzeTab(QWidget):
             self._warn("Please run 'Confirm Input' first.")
             return
         try:
-            method = "Mean"
+            method = str(self.cmb_smooth_method.currentText() or "Mean").strip()
             param_m = float(self.spin_smooth_param.value())
 
             # reconstruct ctx from self._last_run_dir
@@ -589,10 +592,19 @@ class AnalyzeTab(QWidget):
                 out_ui3=os.path.join(self._last_run_dir, "ui3"),
             )
 
-            out = run_smooth(ctx, param_m=param_m)
+            out = run_smooth(
+                ctx,
+                param_m=param_m,
+                method=method,
+                gaussian_sigma_percent=50.0,
+            )
+
+            smooth_note = f"filter={method}, radius={param_m}m"
+            if method.lower() == "gaussian":
+                smooth_note += ", sigma=50% radius, kernel=circle"
 
             self._ok(
-                f"Smooth completed (filter={method}, radius={param_m}m).\n"
+                f"Smooth completed ({smooth_note}).\n"
                 f"Outputs:\n"
                 f" - {out['before_tif']}\n"
                 f" - {out['after_tif']}\n"
@@ -602,6 +614,13 @@ class AnalyzeTab(QWidget):
 
         except Exception as e:
             self._err(f"Smooth error: {e}")
+
+    def _on_smooth_method_changed(self, text: str) -> None:
+        method = str(text or "Mean").strip().lower()
+        if method == "gaussian":
+            self.lab_smooth_param.setText("Gaussian Radius (m):")
+        else:
+            self.lab_smooth_param.setText("Mean Radius (m):")
 
     def _on_calc_sad(self) -> None:
         if not self._last_run_dir:
@@ -1136,6 +1155,7 @@ class AnalyzeTab(QWidget):
 
         # 4) Đưa các nút về trạng thái ban đầu
         self.btn_open_run.setEnabled(False)
+        self.cmb_smooth_method.setEnabled(False)
         self.btn_smooth.setEnabled(False)
         self.cmb_method.setEnabled(False)
         self.btn_calc_sad.setEnabled(False)

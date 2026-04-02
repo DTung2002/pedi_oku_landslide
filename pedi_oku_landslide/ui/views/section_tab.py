@@ -1,5 +1,5 @@
 # pedi_oku_landslide/ui/views/section_tab.py
-import os, math, json
+import os, math, json, csv
 from typing import Optional, Tuple, List, Dict, Any
 
 import numpy as np
@@ -20,6 +20,20 @@ from PyQt5.QtWidgets import (
 
 from pedi_oku_landslide.ui.components.image_pair_viewer import UI1Viewer
 from pedi_oku_landslide.pipeline.ingest import resolve_run_input_path
+
+SECTION_DIRECTION_VERSION = 2
+SECTION_CHAINAGE_ORIGIN = "right"
+SECTION_CSV_FIELDNAMES = [
+    "idx",
+    "x1",
+    "y1",
+    "x2",
+    "y2",
+    "line_id",
+    "line_role",
+    "direction_version",
+    "chainage_origin",
+]
 
 # --- tiny layout helpers (alias) ---
 def HBox():
@@ -845,6 +859,101 @@ class SectionSelectionTab(QWidget):
         self._load_layers_and_show()
         self._ok("[UI2] Context set OK.")
 
+    @staticmethod
+    def _canonical_section_csv_row(
+        idx: int,
+        p0: Tuple[float, float],
+        p1: Tuple[float, float],
+        *,
+        line_id: str = "",
+        line_role: str = "",
+    ) -> Dict[str, Any]:
+        return {
+            "idx": int(idx),
+            "x1": float(p0[0]),
+            "y1": float(p0[1]),
+            "x2": float(p1[0]),
+            "y2": float(p1[1]),
+            "line_id": str(line_id or "").strip(),
+            "line_role": str(line_role or "").strip(),
+            "direction_version": int(SECTION_DIRECTION_VERSION),
+            "chainage_origin": SECTION_CHAINAGE_ORIGIN,
+        }
+
+    @staticmethod
+    def _delete_legacy_ui3_outputs(run_dir: str) -> None:
+        if not run_dir:
+            return
+        for rel in (os.path.join("ui3", "curve"), os.path.join("ui3", "groups")):
+            path = os.path.join(run_dir, rel)
+            if not os.path.isdir(path):
+                continue
+            try:
+                for name in os.listdir(path):
+                    file_path = os.path.join(path, name)
+                    if os.path.isfile(file_path):
+                        os.remove(file_path)
+            except Exception:
+                continue
+
+    def _read_sections_csv_rows(self, csv_path: str) -> List[Dict[str, Any]]:
+        with open(csv_path, "r", encoding="utf-8") as f:
+            return list(csv.DictReader(f))
+
+    def _write_sections_csv_rows(self, csv_path: str, rows: List[Dict[str, Any]]) -> None:
+        os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=SECTION_CSV_FIELDNAMES)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({
+                    "idx": int(row.get("idx", 0) or 0),
+                    "x1": float(row.get("x1", 0.0) or 0.0),
+                    "y1": float(row.get("y1", 0.0) or 0.0),
+                    "x2": float(row.get("x2", 0.0) or 0.0),
+                    "y2": float(row.get("y2", 0.0) or 0.0),
+                    "line_id": str(row.get("line_id", "") or "").strip(),
+                    "line_role": str(row.get("line_role", "") or "").strip(),
+                    "direction_version": int(SECTION_DIRECTION_VERSION),
+                    "chainage_origin": SECTION_CHAINAGE_ORIGIN,
+                })
+
+    def _ensure_sections_csv_current(self, csv_path: str) -> Tuple[List[Dict[str, Any]], bool]:
+        rows = self._read_sections_csv_rows(csv_path)
+        migrated = False
+        canonical_rows: List[Dict[str, Any]] = []
+        for i, row in enumerate(rows, start=1):
+            try:
+                x1 = float(row.get("x1"))
+                y1 = float(row.get("y1"))
+                x2 = float(row.get("x2"))
+                y2 = float(row.get("y2"))
+            except Exception:
+                continue
+            try:
+                version = int(str(row.get("direction_version", "")).strip() or "0")
+            except Exception:
+                version = 0
+            origin = str(row.get("chainage_origin", "") or "").strip().lower()
+            is_current = (version >= SECTION_DIRECTION_VERSION) and (origin == SECTION_CHAINAGE_ORIGIN)
+            if is_current:
+                p0 = (x1, y1)
+                p1 = (x2, y2)
+            else:
+                migrated = True
+                p0, p1 = self._reverse_section_points((x1, y1), (x2, y2))
+            canonical_rows.append(self._canonical_section_csv_row(
+                int(row.get("idx") or i),
+                p0,
+                p1,
+                line_id=str(row.get("line_id", row.get("name", "")) or "").strip(),
+                line_role=str(row.get("line_role", row.get("role", "")) or "").strip(),
+            ))
+        if migrated:
+            self._write_sections_csv_rows(csv_path, canonical_rows)
+            self._delete_legacy_ui3_outputs(self.run_dir)
+        return canonical_rows, migrated
+
 
     # ---- UI ----
     def _build_ui(self) -> None:
@@ -1302,10 +1411,7 @@ class SectionSelectionTab(QWidget):
             return
 
         try:
-            import csv
-            with open(csv_path, "r", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                rows = list(reader)
+            rows, migrated = self._ensure_sections_csv_current(csv_path)
         except Exception as e:
             self._info(f"[UI2] Cannot read sections.csv: {e}")
             return
@@ -1345,6 +1451,8 @@ class SectionSelectionTab(QWidget):
             self._append_section((x1, y1), (x2, y2), meta=meta)
             count += 1
 
+        if migrated:
+            self._ok("[UI2] Migrated legacy sections.csv to direction_version=2 and cleared old UI3 outputs.")
         self._ok(f"[UI2] Loaded {count} sections from sections.csv")
 
     def _load_dx_dy_and_draw(self, ui1_dir: str, step: int = 25, scale: float = 1.0) -> None:
@@ -1447,8 +1555,16 @@ class SectionSelectionTab(QWidget):
 
     # ---- section picking ----
     def _on_section_picked(self, x1: float, y1: float, x2: float, y2: float) -> None:
-        self._append_section((x1, y1), (x2, y2))
+        p0, p1 = self._reverse_section_points((x1, y1), (x2, y2))
+        self._append_section(p0, p1)
         self._ok(f"Section added: ({x1:.2f},{y1:.2f}) → ({x2:.2f},{y2:.2f})")
+
+    @staticmethod
+    def _reverse_section_points(
+        p0: Tuple[float, float],
+        p1: Tuple[float, float],
+    ) -> Tuple[Tuple[float, float], Tuple[float, float]]:
+        return (float(p1[0]), float(p1[1])), (float(p0[0]), float(p0[1]))
 
     def _append_section(
             self,
@@ -1816,8 +1932,9 @@ class SectionSelectionTab(QWidget):
                 return
             x1, y1 = geom.coords[0]
             x2, y2 = geom.coords[-1]
+            p0, p1 = self._reverse_section_points((x1, y1), (x2, y2))
             self._append_section(
-                (x1, y1), (x2, y2),
+                p0, p1,
                 meta={
                     "line_id": str(feat.get("name", "")).strip(),
                     "line_role": str(feat.get("type", "")).strip(),
@@ -2153,24 +2270,28 @@ class SectionSelectionTab(QWidget):
         csv_path = os.path.join(ui2_dir, "sections.csv")
 
         try:
-            import csv
-            with open(csv_path, "w", newline="", encoding="utf-8") as f:
-                w = csv.writer(f)
-                w.writerow(["idx", "x1", "y1", "x2", "y2", "line_id", "line_role"])
-                for r in range(self.tbl.rowCount()):
-                    p0 = tuple(map(float, self.tbl.item(r, 1).text().split(",")))
-                    p1 = tuple(map(float, self.tbl.item(r, 2).text().split(",")))
-                    meta = self._section_meta[r] if 0 <= r < len(self._section_meta) else {}
-                    line_id = str((meta or {}).get("line_id", "")).strip()
-                    if not line_id:
-                        label = (self.tbl.item(r, 0).text().strip() if self.tbl.item(r, 0) else f"{r + 1}")
-                        line_id = label
-                        if 0 <= r < len(self._section_meta) and isinstance(self._section_meta[r], dict):
-                            self._section_meta[r]["line_id"] = line_id
-                    line_role = self._normalize_line_role(self._get_row_line_role(r), line_id)
+            rows_to_save: List[Dict[str, Any]] = []
+            for r in range(self.tbl.rowCount()):
+                p0 = tuple(map(float, self.tbl.item(r, 1).text().split(",")))
+                p1 = tuple(map(float, self.tbl.item(r, 2).text().split(",")))
+                meta = self._section_meta[r] if 0 <= r < len(self._section_meta) else {}
+                line_id = str((meta or {}).get("line_id", "")).strip()
+                if not line_id:
+                    label = (self.tbl.item(r, 0).text().strip() if self.tbl.item(r, 0) else f"{r + 1}")
+                    line_id = label
                     if 0 <= r < len(self._section_meta) and isinstance(self._section_meta[r], dict):
-                        self._section_meta[r]["line_role"] = line_role
-                    w.writerow([r + 1, p0[0], p0[1], p1[0], p1[1], line_id, line_role])
+                        self._section_meta[r]["line_id"] = line_id
+                line_role = self._normalize_line_role(self._get_row_line_role(r), line_id)
+                if 0 <= r < len(self._section_meta) and isinstance(self._section_meta[r], dict):
+                    self._section_meta[r]["line_role"] = line_role
+                rows_to_save.append(self._canonical_section_csv_row(
+                    r + 1,
+                    p0,
+                    p1,
+                    line_id=line_id,
+                    line_role=line_role,
+                ))
+            self._write_sections_csv_rows(csv_path, rows_to_save)
 
             self._ok(f"Sections saved: {csv_path}")
             try:

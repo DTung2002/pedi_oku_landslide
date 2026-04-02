@@ -4,11 +4,9 @@ import math
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
-import geopandas as gpd
 import matplotlib
 import matplotlib.colors as mcolors
 import numpy as np
-import pandas as pd
 import rasterio
 from shapely.geometry import LineString
 
@@ -93,87 +91,6 @@ def _open_raster(path: str):
     ds = rasterio.open(path)
     arr = ds.read(1).astype("float32")
     return ds, arr
-
-def _ensure_lines_crs(lines_path: str, dst_crs) -> gpd.GeoDataFrame:
-    gdf = gpd.read_file(lines_path)
-
-    if gdf.crs is None:
-        try:
-            gdf = gdf.set_crs(dst_crs)
-        except Exception:
-            pass
-    elif str(gdf.crs) != str(dst_crs):
-        try:
-            gdf = gdf.to_crs(dst_crs)
-        except Exception:
-            pass
-
-    return gdf
-
-
-def list_lines(lines_path: str, dem_path: str) -> Tuple[List[str], gpd.GeoDataFrame, Dict[str, Any]]:
-    dem_ds, _ = _open_raster(dem_path)
-    dem_crs = dem_ds.crs
-    dem_ds.close()
-
-    if dem_crs is None:
-        from rasterio.crs import CRS
-        dem_crs = CRS.from_epsg(6677)
-
-    gdf = _ensure_lines_crs(lines_path, dem_crs)
-
-    labels: List[str] = []
-    clean_geoms: List[LineString] = []
-    keep_idx: List[int] = []
-
-    for i, geom in enumerate(gdf.geometry):
-        base = None
-        if "name" in gdf.columns and isinstance(gdf.at[i, "name"], str):
-            base = gdf.at[i, "name"]
-        if not base:
-            base = f"Line {i+1}"
-
-        if geom is None or getattr(geom, "is_empty", False):
-            labels.append(base)
-            clean_geoms.append(geom)
-            keep_idx.append(i)
-            continue
-
-        try:
-            coords = np.asarray(geom.coords, dtype="float64")
-            if not np.all(np.isfinite(coords)):
-                labels.append(base)
-                clean_geoms.append(geom)
-                keep_idx.append(i)
-                continue
-        except Exception:
-            labels.append(base)
-            clean_geoms.append(geom)
-            keep_idx.append(i)
-            continue
-        try:
-            L = float(geom.length)
-        except Exception:
-            L = float("nan")
-
-        if not np.isfinite(L) or L <= 0:
-            labels.append(base)
-        else:
-            labels.append(f"{base}  ({L:.1f} m)")
-
-        clean_geoms.append(geom)
-        keep_idx.append(i)
-
-    if keep_idx:
-        gdf = gdf.iloc[keep_idx].copy()
-        gdf.reset_index(drop=True, inplace=True)
-        gdf = gdf.set_geometry(clean_geoms)
-    else:
-        gdf = gdf.iloc[0:0].copy()
-
-    gdf["__label__"] = labels
-    return labels, gdf, {"crs": dem_crs}
-
 
 def _rdp_polyline(points, eps):
     if len(points) <= 2:
@@ -397,7 +314,6 @@ def extract_curvature_rdp_nodes(
 ) -> Dict[str, np.ndarray]:
     chain = np.asarray(prof.get("chain", []), dtype=float)
     elev_curve = _profile_elevation_for_curvature(prof)
-    theta = np.asarray(prof.get("theta", []), dtype=float)
     empty = {
         "chain": np.array([], dtype=float),
         "elev": np.array([], dtype=float),
@@ -407,10 +323,10 @@ def extract_curvature_rdp_nodes(
     }
     if chain.ndim != 1 or chain.size < 3:
         return empty
-    if elev_curve.ndim != 1 or elev_curve.size != chain.size or theta.ndim != 1 or theta.size != chain.size:
+    if elev_curve.ndim != 1 or elev_curve.size != chain.size:
         return empty
 
-    finite = np.isfinite(chain) & np.isfinite(elev_curve) & np.isfinite(theta)
+    finite = np.isfinite(chain) & np.isfinite(elev_curve)
     finite0 = finite
     if int(np.count_nonzero(finite0)) < 2:
         return empty
@@ -431,28 +347,22 @@ def extract_curvature_rdp_nodes(
 
     chain_w = np.asarray(chain[finite], dtype=float)
     elev_w = np.asarray(elev_curve[finite], dtype=float)
-    theta_w = np.asarray(theta[finite], dtype=float)
-    if restrict_to_slip_span:
-        # Clip the profile first so smoothing + RDP are evaluated on the
-        # visible/slip span itself instead of on the full line and cropped later.
-        chain_w, elev_w = _clip_polyline_to_span(chain_w, elev_w, float(smin), float(smax))
-        theta_w = _interp_series_at_x(np.asarray(chain[finite], dtype=float), np.asarray(theta[finite], dtype=float), chain_w)
-        if chain_w.size < 3 or elev_w.size != chain_w.size or theta_w.size != chain_w.size:
-            return empty
+    order = np.argsort(chain_w)
+    chain_w = chain_w[order]
+    elev_w = elev_w[order]
     elev_sm = _mean_filter_profile_by_chain(chain_w, elev_w, float(smooth_radius_m))
-    k_dense = _curvature_from_theta_series(chain_w, theta_w, smooth_radius_m=float(smooth_radius_m))
-    finite_sm = np.isfinite(chain_w) & np.isfinite(elev_sm) & np.isfinite(k_dense)
+    finite_sm = np.isfinite(chain_w) & np.isfinite(elev_sm)
     if int(np.count_nonzero(finite_sm)) < 3:
         return empty
 
     pts = list(zip(chain_w[finite_sm].tolist(), elev_sm[finite_sm].tolist()))
     rdp_pts = _rdp_polyline(pts, float(rdp_eps_m))
-    if len(rdp_pts) < 3:
+    if len(rdp_pts) < 2:
         return empty
 
     k_x = np.asarray([p[0] for p in rdp_pts], dtype=float)
     k_z = np.asarray([p[1] for p in rdp_pts], dtype=float)
-    k_vals = _interp_series_at_x(chain_w[finite_sm], k_dense[finite_sm], k_x)
+    k_vals = np.asarray(_curvature_points_from_rdp(rdp_pts), dtype=float)
     if restrict_to_slip_span:
         keep = np.isfinite(k_x) & (k_x >= float(smin)) & (k_x <= float(smax))
         k_x = k_x[keep]
@@ -477,9 +387,8 @@ def _curvature_plot_series(
         prof,
         rdp_eps_m=float(rdp_eps_m),
         smooth_radius_m=float(smooth_radius_m),
-        # Plot curvature like the source document: compute on the full profile,
-        # then crop only for display. This avoids forcing the visible endpoints
-        # to become local-RDP endpoints with curvature fixed at 0.
+        # Always compute on the full smoothed ground profile first, then crop
+        # only for display so the visible endpoints are not re-derived locally.
         restrict_to_slip_span=False,
     )
     xs = np.asarray(nodes.get("chain", []), dtype=float)
@@ -700,34 +609,6 @@ def compute_profile(
         "elev_orig": elev_orig,
     }
 
-def clamp_groups_to_slip(prof: dict, groups: list, min_len: float = 20.0) -> list:
-    chain = np.asarray(prof.get("chain"), float)
-    elevs = np.asarray(prof.get("elev_s"), float)
-
-    if "slip_span" in prof and prof["slip_span"]:
-        smin, smax = prof["slip_span"]
-    else:
-        keep = np.isfinite(chain) & np.isfinite(elevs)
-        if not np.any(keep):
-            return []
-        smin, smax = float(np.nanmin(chain[keep])), float(np.nanmax(chain[keep]))
-
-    out = []
-    for g in (groups or []):
-        s = float(g.get("start", g.get("start_chainage", 0.0)))
-        e = float(g.get("end",   g.get("end_chainage",   0.0)))
-        if e < s: s, e = e, s
-        # clamp
-        s = max(s, smin)
-        e = min(e, smax)
-        if (e - s) >= min_len:
-            out.append({
-                "id": str(g.get("id", f"G{len(out)+1}")),
-                "start": s, "end": e,
-                "color": g.get("color", None)
-            })
-    return out
-
 # RENDER / EXPORT
 def render_profile_png(
     prof: Dict[str, np.ndarray],
@@ -754,6 +635,8 @@ def render_profile_png(
     ground_lw: float = 2.2,
     ungrouped_color: str = "#bbbbbb",
     curvature_series: Optional[Tuple[np.ndarray, np.ndarray]] = None,
+    curvature_rdp_eps_m: float = 0.5,
+    curvature_smooth_radius_m: float = 0.0,
 ) -> Tuple[str, Optional[str]]:
 
     if not prof:
@@ -773,6 +656,9 @@ def render_profile_png(
 
     x_user_min, x_user_max = x_min, x_max
     y_user_min, y_user_max = y_min, y_max
+    curvature_plot_scale = -50.0
+    curvature_plot_label = "Curvature plot (-50×k)"
+    curvature_threshold_plot = abs(float(curvature_plot_scale)) * float(CURVATURE_THRESHOLD_PLOT_ABS)
 
     chain = prof["chain"]; elev_s = prof["elev_s"]
     d_para = prof["d_para"]; dz = prof["dz"]; theta = prof["theta"]
@@ -812,6 +698,11 @@ def render_profile_png(
                 y_min = z_min - pad
             if y_max is None:
                 y_max = z_max + pad
+
+    def _set_reversed_xlim(ax_obj, left_val: float, right_val: float) -> None:
+        lo = float(min(left_val, right_val))
+        hi = float(max(left_val, right_val))
+        ax_obj.set_xlim(hi, lo)
 
     import matplotlib.pyplot as plt
     with plt.rc_context({'font.size': base_font}):
@@ -883,9 +774,11 @@ def render_profile_png(
                             return kx, kv
                 except Exception:
                     pass
-            # The profile source already selects raw-vs-smoothed DEM input,
-            # so avoid applying an extra smoothing pass here.
-            return _curvature_plot_series(prof_curv, rdp_eps_m=0.5, smooth_radius_m=0.0)
+            return _curvature_plot_series(
+                prof_curv,
+                rdp_eps_m=float(curvature_rdp_eps_m),
+                smooth_radius_m=float(curvature_smooth_radius_m),
+            )
         if group_ranges:
             if "slip_span" in prof and prof["slip_span"]:
                 smin, smax = prof["slip_span"]
@@ -936,7 +829,9 @@ def render_profile_png(
                 # Vector slope angle (deg), normalized to [-90, 90].
                 gradient_deg = np.degrees(np.arctan2(dz_s[finite_s], d_para_s[finite_s]))
                 gradient_deg = ((gradient_deg + 90.0) % 180.0) - 90.0
-
+                # UI3 displays chainage with reversed X direction, so the
+                # plotted gradient must be mirrored to match the visible vector logic.
+                gradient_deg = -gradient_deg
                 # savgol_filter disabled
 
                 ax2.plot(ch, gradient_deg, lw=2.2, color="#2ca02c", zorder=5, label="Gradient")
@@ -944,29 +839,30 @@ def render_profile_png(
             ax2.axhline(0.0, color="0.5", lw=1.0, zorder=1)
             ax2.set_ylabel("Gradient (deg)", fontsize=axis_label_font)
             ax2r = ax2.twinx()
-            ax2r.set_ylabel("Curvature (1/m)", fontsize=axis_label_font)
+            ax2r.set_ylabel(curvature_plot_label, fontsize=axis_label_font)
 
-            # Curvature from slope-angle change along chainage, sampled on simplified nodes.
+            # Curvature from the smoothed ground profile, sampled on RDP nodes.
             k_curve = None
             try:
                 k_x, k_vals = _resolve_curvature_series()
                 if k_x.size >= 3 and k_vals.size == k_x.size:
                     k_curve = np.asarray(k_vals, dtype=float)
-                    ax2r.plot(k_x, k_vals, lw=1.8, color="#222222",
+                    k_curve_plot = float(curvature_plot_scale) * k_curve
+                    ax2r.plot(k_x, k_curve_plot, lw=1.8, color="#222222",
                               marker="o", markersize=4, zorder=6, label="Curvature")
             except Exception:
                 pass
-            ax2r.axhline(float(CURVATURE_THRESHOLD_PLOT_ABS), color="#cc3333", lw=1.1,
+            ax2r.axhline(float(curvature_threshold_plot), color="#cc3333", lw=1.1,
                          linestyle=(0, (4, 3)), zorder=4, label="_nolegend_")
-            ax2r.axhline(-float(CURVATURE_THRESHOLD_PLOT_ABS), color="#cc3333", lw=1.1,
+            ax2r.axhline(-float(curvature_threshold_plot), color="#cc3333", lw=1.1,
                          linestyle=(0, (4, 3)), zorder=4, label="_nolegend_")
             if k_curve is not None and np.any(np.isfinite(k_curve)):
-                qk = np.nanpercentile(np.abs(k_curve), 98)
-                qk = max(float(qk), float(CURVATURE_THRESHOLD_PLOT_ABS))
+                qk = np.nanpercentile(np.abs(float(curvature_plot_scale) * k_curve), 98)
+                qk = max(float(qk), float(curvature_threshold_plot))
                 if np.isfinite(qk) and qk > 0:
                     ax2r.set_ylim(-1.2 * qk, 1.2 * qk)
             else:
-                ax2r.set_ylim(-1.2 * float(CURVATURE_THRESHOLD_PLOT_ABS), 1.2 * float(CURVATURE_THRESHOLD_PLOT_ABS))
+                ax2r.set_ylim(-1.2 * float(curvature_threshold_plot), 1.2 * float(curvature_threshold_plot))
 
             ax2r.grid(False)
             ax2.grid(ls="--", lw=0.8, alpha=0.35)
@@ -1010,6 +906,9 @@ def render_profile_png(
                 # Vector slope angle (deg), normalized to [-90, 90].
                 gradient_deg = np.degrees(np.arctan2(dz[finite_th], d_para[finite_th]))
                 gradient_deg = ((gradient_deg + 90.0) % 180.0) - 90.0
+                # UI3 displays chainage with reversed X direction, so the
+                # plotted gradient must be mirrored to match the visible vector logic.
+                gradient_deg = -gradient_deg
                 # savgol_filter disabled
                 ax2.plot(chain_f, gradient_deg, color="#2ca02c", lw=2.4, zorder=5, label="Gradient")
 
@@ -1017,29 +916,30 @@ def render_profile_png(
             ax2.set_xlabel("Chainage (m)")
             ax2.set_ylabel("Gradient (deg)")
             ax2r = ax2.twinx()
-            ax2r.set_ylabel("Curvature (1/m)")
+            ax2r.set_ylabel(curvature_plot_label)
 
-            # Curvature from slope-angle change along chainage, sampled on simplified nodes.
+            # Curvature from the smoothed ground profile, sampled on RDP nodes.
             k_curve = None
             try:
                 k_x, k_vals = _resolve_curvature_series()
                 if k_x.size >= 3 and k_vals.size == k_x.size:
                     k_curve = np.asarray(k_vals, dtype=float)
-                    ax2r.plot(k_x, k_vals, color="#222222", lw=2.0,
+                    k_curve_plot = float(curvature_plot_scale) * k_curve
+                    ax2r.plot(k_x, k_curve_plot, color="#222222", lw=2.0,
                               marker="o", markersize=4, zorder=6, label="Curvature")
             except Exception:
                 pass
-            ax2r.axhline(float(CURVATURE_THRESHOLD_PLOT_ABS), color="#cc3333", lw=1.1,
+            ax2r.axhline(float(curvature_threshold_plot), color="#cc3333", lw=1.1,
                          linestyle=(0, (4, 3)), zorder=4, label="_nolegend_")
-            ax2r.axhline(-float(CURVATURE_THRESHOLD_PLOT_ABS), color="#cc3333", lw=1.1,
+            ax2r.axhline(-float(curvature_threshold_plot), color="#cc3333", lw=1.1,
                          linestyle=(0, (4, 3)), zorder=4, label="_nolegend_")
             if k_curve is not None and np.any(np.isfinite(k_curve)):
-                qk = np.nanpercentile(np.abs(k_curve), 98)
-                qk = max(float(qk), float(CURVATURE_THRESHOLD_PLOT_ABS))
+                qk = np.nanpercentile(np.abs(float(curvature_plot_scale) * k_curve), 98)
+                qk = max(float(qk), float(curvature_threshold_plot))
                 if np.isfinite(qk) and qk > 0:
                     ax2r.set_ylim(-1.2 * qk, 1.2 * qk)
             else:
-                ax2r.set_ylim(-1.2 * float(CURVATURE_THRESHOLD_PLOT_ABS), 1.2 * float(CURVATURE_THRESHOLD_PLOT_ABS))
+                ax2r.set_ylim(-1.2 * float(curvature_threshold_plot), 1.2 * float(curvature_threshold_plot))
 
             ax2r.grid(False)
             ax2.grid(True, linestyle="--", alpha=0.4)
@@ -1061,8 +961,8 @@ def render_profile_png(
                                bbox_to_anchor=(0.0, -0.18),
                                fontsize=legend_font, frameon=False, ncol=2)
 
-            if x_min is not None and x_max is not None and (x_max > x_min):
-                ax2.set_xlim(x_min, x_max)
+            if x_min is not None and x_max is not None and (abs(float(x_max) - float(x_min)) > 1e-12):
+                _set_reversed_xlim(ax2, x_min, x_max)
 
             if group_ranges:
                 for gi, gr in enumerate(group_ranges):
@@ -1077,6 +977,10 @@ def render_profile_png(
                 xmin, xmax = ax.get_xlim()
             except Exception:
                 xmin, xmax = None, None
+            clip_lo = clip_hi = None
+            if xmin is not None and xmax is not None:
+                clip_lo = float(min(xmin, xmax))
+                clip_hi = float(max(xmin, xmax))
 
             bounds_meta: Dict[float, Dict[str, Any]] = {}
             for g in group_ranges:
@@ -1087,9 +991,9 @@ def render_profile_png(
                     continue
                 if e < s:
                     s, e = e, s
-                if (xmin is not None) and (xmax is not None):
-                    s = max(xmin, min(xmax, s))
-                    e = max(xmin, min(xmax, e))
+                if (clip_lo is not None) and (clip_hi is not None):
+                    s = max(clip_lo, min(clip_hi, s))
+                    e = max(clip_lo, min(clip_hi, e))
                 for x, reason in (
                     (s, str(g.get("start_reason", "") or "").strip()),
                     (e, str(g.get("end_reason", "") or "").strip()),
@@ -1112,13 +1016,28 @@ def render_profile_png(
                     import matplotlib.transforms as mtransforms
                     trans = mtransforms.blended_transform_factory(ax.transData, ax.transAxes)
                     label_fs = max(8, int(round(tick_font * 0.9)))
-                    idx = 1
-                    for x0, x1 in zip(bounds[:-1], bounds[1:]):
-                        if not (np.isfinite(x0) and np.isfinite(x1)):
+                    label_items = []
+                    for gi, gr in enumerate(group_ranges):
+                        try:
+                            s = float(gr.get("start", gr.get("start_chainage", np.nan)))
+                            e = float(gr.get("end", gr.get("end_chainage", np.nan)))
+                        except Exception:
                             continue
-                        if x1 <= x0:
+                        if not (np.isfinite(s) and np.isfinite(e)):
                             continue
-                        xm = 0.5 * (x0 + x1)
+                        if e < s:
+                            s, e = e, s
+                        if (clip_lo is not None) and (clip_hi is not None):
+                            s = max(clip_lo, min(clip_hi, s))
+                            e = max(clip_lo, min(clip_hi, e))
+                        if not (np.isfinite(s) and np.isfinite(e)):
+                            continue
+                        if e <= s:
+                            continue
+                        xm = 0.5 * (s + e)
+                        label_items.append((float(xm), float(s), float(e), int(gi)))
+                    label_items.sort(key=lambda t: t[0], reverse=True)
+                    for idx, (xm, _s, _e, _gi) in enumerate(label_items, start=1):
                         ax.text(
                             float(xm), 0.995, str(idx),
                             transform=trans,
@@ -1127,7 +1046,6 @@ def render_profile_png(
                             color="#333333",
                             zorder=60,
                         )
-                        idx += 1
                 except Exception:
                     pass
         # --- draw slip curve if requested ---
@@ -1264,26 +1182,30 @@ def render_profile_png(
                     ypad = 0.05 * dy
 
                     if not user_x_fixed:
-                        ax.set_xlim(x0 - xpad, x1 + xpad)
-                        ax2.set_xlim(x0 - xpad, x1 + xpad)
+                        _set_reversed_xlim(ax, x0 - xpad, x1 + xpad)
+                        _set_reversed_xlim(ax2, x0 - xpad, x1 + xpad)
                     if not user_y_fixed:
                         ax.set_ylim(y0 - ypad, y1 + ypad)
             except Exception:
                 pass
 
         user_y_fixed = (y_user_min is not None) and (y_user_max is not None) and (y_user_max > y_user_min)
-        user_x_fixed = (x_user_min is not None) and (x_user_max is not None) and (x_user_max > x_user_min)
+        user_x_fixed = (
+            (x_user_min is not None)
+            and (x_user_max is not None)
+            and (abs(float(x_user_max) - float(x_user_min)) > 1e-12)
+        )
         if user_y_fixed:
             ax.set_ylim(float(y_user_min), float(y_user_max))
 
         if user_x_fixed:
-            ax.set_xlim(float(x_user_min), float(x_user_max))
-            ax2.set_xlim(float(x_user_min), float(x_user_max))
+            _set_reversed_xlim(ax, float(x_user_min), float(x_user_max))
+            _set_reversed_xlim(ax2, float(x_user_min), float(x_user_max))
         # Force chainage major ticks every 10 m on both panels.
         try:
             from matplotlib.ticker import MultipleLocator
-            ax.xaxis.set_major_locator(MultipleLocator(10.0))
-            ax2.xaxis.set_major_locator(MultipleLocator(10.0))
+            ax.xaxis.set_major_locator(MultipleLocator(20.0))
+            ax2.xaxis.set_major_locator(MultipleLocator(20.0))
         except Exception:
             pass
         # --- OVERLAY SLIP CURVES
@@ -1370,145 +1292,6 @@ def render_profile_png(
 
         plt.close(fig)
         return f"Saved {out_png}", out_png
-
-
-def export_csv(prof: Dict[str, np.ndarray], out_csv: Optional[str]) -> Tuple[str, Optional[str]]:
-    if not prof:
-        return "Empty profile", None
-
-    if not out_csv:
-        from datetime import datetime
-        out_csv = os.path.join(UI3_EXPORTS, f"profile_{datetime.now():%Y%m%d_%H%M%S}.csv")
-
-    df = pd.DataFrame({
-        "chain_m":  prof["chain"],
-        "elev_s_m": prof["elev_s"],
-        "d_para_m": prof["d_para"],
-        "dz_m":     prof["dz"],
-        "theta_deg":prof["theta"],
-    })
-
-    os.makedirs(os.path.dirname(out_csv), exist_ok=True)
-    df.to_csv(out_csv, index=False, float_format="%.6f")
-    return f"[Γ£ô] Saved {out_csv}", out_csv
-
-
-# === [UI3] Auto-group helpers (RDP + Curvature + θ-rate) ===
-def _cluster_chain_marks(chain_marks: np.ndarray, gap_m: float = 0.5) -> List[float]:
-    vals = np.asarray(chain_marks, dtype=float)
-    vals = vals[np.isfinite(vals)]
-    if vals.size == 0:
-        return []
-    vals.sort()
-    clusters: List[List[float]] = [[float(vals[0])]]
-    for v in vals[1:]:
-        if (float(v) - clusters[-1][-1]) <= gap_m:
-            clusters[-1].append(float(v))
-        else:
-            clusters.append([float(v)])
-    return [float(np.mean(c)) for c in clusters if c]
-
-
-
-def auto_group_profile_by_criteria(
-    prof: dict,
-    rdp_eps_m: float = 0.5,
-    curvature_thr_abs: float = 0.02,
-    min_len_m: float = 20.0,
-    horizontal_angle_tol_deg: float = 5.0,
-    horizontal_cluster_gap_m: float = 0.5,
-) -> list:
-    """
-    New standalone grouping rule:
-    1) Start/end of slip block.
-    2) Points where |curvature| > curvature_thr_abs on RDP-simplified smoothed profile.
-    3) Points where vector is horizontal within +/- horizontal_angle_tol_deg.
-    """
-    chain = np.asarray(prof.get("chain"), dtype=float)
-    elev_s = np.asarray(prof.get("elev_s"), dtype=float)
-    dpa = np.asarray(prof.get("d_para"), dtype=float)
-    dzz = np.asarray(prof.get("dz"), dtype=float)
-    if chain.ndim != 1 or elev_s.ndim != 1 or dpa.ndim != 1 or dzz.ndim != 1:
-        return []
-    if chain.size < 2:
-        return []
-
-    if "slip_span" in prof and prof["slip_span"]:
-        smin, smax = map(float, prof["slip_span"])
-    else:
-        finite_all = np.isfinite(chain) & np.isfinite(elev_s)
-        if finite_all.sum() < 2:
-            return []
-        smin = float(np.nanmin(chain[finite_all]))
-        smax = float(np.nanmax(chain[finite_all]))
-    if smax < smin:
-        smin, smax = smax, smin
-    if smax <= smin:
-        return []
-
-    boundaries = [smin, smax]
-
-    nodes = extract_curvature_rdp_nodes(
-        prof,
-        rdp_eps_m=float(rdp_eps_m),
-        smooth_radius_m=0.0,
-        restrict_to_slip_span=True,
-    )
-    k_x = np.asarray(nodes.get("chain", []), dtype=float)
-    k_vals = np.asarray(nodes.get("curvature", []), dtype=float)
-    if k_x.size >= 3 and k_vals.size == k_x.size:
-        for xv, kv in zip(k_x, k_vals):
-            if np.isfinite(kv) and abs(float(kv)) > float(curvature_thr_abs):
-                boundaries.append(float(xv))
-
-    finite_vec = np.isfinite(chain) & np.isfinite(dpa) & np.isfinite(dzz) & (chain >= smin) & (chain <= smax)
-    if finite_vec.any():
-        chain_v = chain[finite_vec]
-        dpa_v = dpa[finite_vec]
-        dzz_v = dzz[finite_vec]
-        ang = np.degrees(np.arctan2(dzz_v, dpa_v))  # [-180, 180]
-        ang_abs = np.abs(ang)
-        # Distance to nearest horizontal direction (0 deg or 180 deg).
-        dist_to_horizontal = np.minimum(ang_abs, np.abs(180.0 - ang_abs))
-        horiz = np.isfinite(dist_to_horizontal) & (dist_to_horizontal <= float(horizontal_angle_tol_deg))
-        if np.any(horiz):
-            chain_h = chain_v[horiz]
-            boundaries.extend(_cluster_chain_marks(chain_h, gap_m=horizontal_cluster_gap_m))
-
-
-    boundaries = [b for b in boundaries if np.isfinite(b) and (smin <= b <= smax)]
-    if not boundaries:
-        return []
-    boundaries = sorted(boundaries)
-    uniq = [boundaries[0]]
-    for b in boundaries[1:]:
-        if abs(b - uniq[-1]) > 1e-6:
-            uniq.append(b)
-
-    colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
-              "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"]
-    groups = []
-    for s, e in zip(uniq[:-1], uniq[1:]):
-        if (e - s) < float(min_len_m):
-            continue
-        i = len(groups) + 1
-        groups.append({
-            "id": f"G{i}",
-            "start": float(s),
-            "end": float(e),
-            "color": colors[(i - 1) % len(colors)],
-        })
-    if not groups and (smax - smin) >= float(min_len_m):
-        groups = [{
-            "id": "G1",
-            "start": float(smin),
-            "end": float(smax),
-            "color": colors[0],
-        }]
-    return groups
-
-
-
 
 
 # === SLIP CURVE FITTING & RENDER (place at END of file) ===
@@ -1735,165 +1518,3 @@ def evaluate_nurbs_curve(
     return {"chain": sx[o2], "elev": sz[o2]}
 
 
-def _median_theta_deg(chain: np.ndarray, theta: np.ndarray, s0: float, s1: float) -> Optional[float]:
-    lo, hi = (s0, s1) if s0 <= s1 else (s1, s0)
-    m = np.isfinite(chain) & np.isfinite(theta) & (chain >= lo) & (chain <= hi)
-    if int(np.count_nonzero(m)) == 0:
-        return None
-    return float(np.nanmedian(theta[m]))
-
-
-def fit_nurbs_segmented_curve(
-    prof: dict,
-    groups: list,
-    target_s,
-    target_z,
-    degree: int = 3,
-    n_ctrl: int = 4,
-    samples_per_meter: float = 6.0,
-) -> dict:
-    """
-    Piecewise NURBS (C0-continuous) from slip crest -> toe by group boundaries.
-    For each segment, use median vector angle of the corresponding group.
-    """
-    chain = np.asarray(prof.get("chain", []), dtype=float)
-    elevg = np.asarray(prof.get("elev_s", []), dtype=float)
-    theta = np.asarray(prof.get("theta", []), dtype=float)
-    if chain.ndim != 1 or elevg.ndim != 1 or theta.ndim != 1:
-        return {"chain": [], "elev": []}
-    if chain.size < 3:
-        return {"chain": [], "elev": []}
-
-    ok = np.isfinite(chain) & np.isfinite(elevg)
-    if int(np.count_nonzero(ok)) < 3:
-        return {"chain": [], "elev": []}
-    chain = chain[ok]
-    elevg = elevg[ok]
-    theta = theta[ok]
-
-    if "slip_span" in prof and prof["slip_span"]:
-        smin, smax = map(float, prof["slip_span"])
-    else:
-        smin = float(np.nanmin(chain))
-        smax = float(np.nanmax(chain))
-    if smax <= smin:
-        return {"chain": [], "elev": []}
-
-    # Normalize and sort groups; keep only segments inside slip span.
-    norm_groups = []
-    for g in (groups or []):
-        try:
-            gs = float(g.get("start", g.get("start_chainage", np.nan)))
-            ge = float(g.get("end", g.get("end_chainage", np.nan)))
-        except Exception:
-            continue
-        if not np.isfinite(gs) or not np.isfinite(ge):
-            continue
-        if ge < gs:
-            gs, ge = ge, gs
-        gs = max(gs, smin)
-        ge = min(ge, smax)
-        if ge > gs:
-            norm_groups.append((gs, ge))
-    if not norm_groups:
-        return {"chain": [], "elev": []}
-    norm_groups.sort(key=lambda x: (x[0], x[1]))
-
-    target_s = np.asarray(target_s, dtype=float)
-    target_z = np.asarray(target_z, dtype=float)
-    target_ok = np.isfinite(target_s) & np.isfinite(target_z)
-    target_s = target_s[target_ok]
-    target_z = target_z[target_ok]
-    has_target = target_s.size >= 2
-
-    degree = int(max(1, degree))
-    n_ctrl = int(max(4, n_ctrl))
-    if n_ctrl != 4:
-        n_ctrl = 4  # current implementation uses fixed 4 control points per group segment
-    degree = min(degree, n_ctrl - 1)
-
-    # Lock start/end of segmented control points to first/last group boundaries.
-    global_start = float(norm_groups[0][0])
-    global_end = float(norm_groups[-1][1])
-
-    # Start point at Group 1 start (instead of slip crest).
-    cur_s = float(global_start)
-    cur_z = float(np.interp(cur_s, target_s, target_z)) if has_target else float(np.interp(cur_s, chain, elevg))
-
-    out_s = []
-    out_z = []
-    last_theta = _median_theta_deg(chain, theta, smin, smax)
-    if last_theta is None:
-        last_theta = 0.0
-
-    for idx, (gs, ge) in enumerate(norm_groups):
-        seg_s = float(max(cur_s, gs))
-        seg_e = float(max(seg_s, ge))
-        if idx == (len(norm_groups) - 1):
-            seg_e = float(max(seg_s, global_end))
-        if seg_e <= seg_s:
-            continue
-
-        theta_med = _median_theta_deg(chain, theta, gs, ge)
-        if theta_med is None:
-            theta_med = last_theta
-        last_theta = theta_med
-
-        theta_clip = float(np.clip(theta_med, -85.0, 85.0))
-        slope = float(np.tan(np.radians(theta_clip)))
-        L = float(seg_e - seg_s)
-
-        # Segment anchor at right boundary; if target is available, anchor to it.
-        z_end_anchor = (
-            float(np.interp(seg_e, target_s, target_z))
-            if has_target
-            else float(cur_z + slope * L)
-        )
-
-        cp_x = np.array([seg_s, seg_s + (L / 3.0), seg_s + (2.0 * L / 3.0), seg_e], dtype=float)
-        cp_z = np.array(
-            [
-                cur_z,
-                cur_z + slope * (L / 3.0),
-                z_end_anchor - slope * (L / 3.0),
-                z_end_anchor,
-            ],
-            dtype=float,
-        )
-        ctrl = np.vstack([cp_x, cp_z]).T
-        weights = np.ones(ctrl.shape[0], dtype=float)
-        n_samples = int(max(24, math.ceil(L * float(max(samples_per_meter, 2.0)))))
-
-        try:
-            seg_curve = _eval_nurbs_curve(ctrl, weights, degree=degree, n_samples=n_samples)
-            sx = seg_curve[:, 0]
-            sz = seg_curve[:, 1]
-            fin = np.isfinite(sx) & np.isfinite(sz)
-            sx = sx[fin]
-            sz = sz[fin]
-            if sx.size < 2:
-                raise ValueError("invalid NURBS segment")
-        except Exception:
-            sx = np.linspace(seg_s, seg_e, n_samples)
-            sz = np.linspace(cur_z, z_end_anchor, n_samples)
-
-        # Keep direction along chainage.
-        order = np.argsort(sx)
-        sx = sx[order]
-        sz = sz[order]
-
-        if not out_s:
-            out_s.extend(sx.tolist())
-            out_z.extend(sz.tolist())
-        else:
-            out_s.extend(sx[1:].tolist())
-            out_z.extend(sz[1:].tolist())
-
-        # Group boundary intersection for next segment (progressive chainage).
-        cur_s = float(seg_e)
-        cur_z = float(np.interp(cur_s, sx, sz))
-
-    if len(out_s) < 2:
-        return {"chain": [], "elev": []}
-
-    return {"chain": np.asarray(out_s, dtype=float), "elev": np.asarray(out_z, dtype=float)}
