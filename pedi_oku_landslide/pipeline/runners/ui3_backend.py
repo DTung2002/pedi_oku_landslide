@@ -1518,3 +1518,409 @@ def evaluate_nurbs_curve(
     return {"chain": sx[o2], "elev": sz[o2]}
 
 
+from pedi_oku_landslide.pipeline.runners.ui3.ui3_curve_fit import (
+    estimate_slip_curve as _estimate_slip_curve_impl,
+    evaluate_nurbs_curve as _evaluate_nurbs_curve_impl,
+    fit_bezier_smooth_curve as _fit_bezier_smooth_curve_impl,
+)
+from pedi_oku_landslide.pipeline.runners.ui3.ui3_grouping import (
+    WORKFLOW_GROUP_MIN_LEN_M,
+    _renumber_groups_visual_order as _normalize_groups_impl,
+    auto_group_profile_by_criteria as _auto_group_profile_by_criteria_impl,
+    clamp_groups_to_slip as _clamp_groups_to_slip_impl,
+)
+from pedi_oku_landslide.pipeline.runners.ui3.ui3_paths import auto_paths as _auto_paths_impl
+from pedi_oku_landslide.pipeline.runners.ui3.ui3_profile_math import compute_profile as _compute_profile_impl
+from pedi_oku_landslide.pipeline.runners.ui3.ui3_storage import (
+    build_gdf_from_sections_csv,
+    ensure_sections_csv_current,
+    load_json,
+    save_json,
+)
+
+
+def auto_paths() -> dict:
+    return _auto_paths_impl()
+
+
+def compute_profile(
+    dem_path: str,
+    dx_path: str,
+    dy_path: str,
+    dz_path: str,
+    line_geom: LineString,
+    step_m: float = 0.2,
+    smooth_win: int = 11,
+    smooth_poly: int = 2,
+    slip_mask_path: Optional[str] = None,
+    slip_only: bool = True,
+    dem_orig_path: Optional[str] = None,
+) -> Dict[str, np.ndarray]:
+    return _compute_profile_impl(
+        dem_path,
+        dx_path,
+        dy_path,
+        dz_path,
+        line_geom,
+        step_m=step_m,
+        smooth_win=smooth_win,
+        smooth_poly=smooth_poly,
+        slip_mask_path=slip_mask_path,
+        slip_only=slip_only,
+        dem_orig_path=dem_orig_path,
+    )
+
+
+def estimate_slip_curve(
+    prof: dict,
+    groups: list,
+    ds: float = 0.2,
+    smooth_factor: float = 0.1,
+    depth_gain: float = 3.0,
+    min_depth: float = 1.0,
+) -> dict:
+    return _estimate_slip_curve_impl(
+        prof,
+        groups,
+        ds=ds,
+        smooth_factor=smooth_factor,
+        depth_gain=depth_gain,
+        min_depth=min_depth,
+    )
+
+
+def fit_bezier_smooth_curve(chain, elevg, target_s, target_z, c0=0.30, c1=0.30, clearance=0.12):
+    return _fit_bezier_smooth_curve_impl(
+        chain,
+        elevg,
+        target_s,
+        target_z,
+        c0=c0,
+        c1=c1,
+        clearance=clearance,
+    )
+
+
+def evaluate_nurbs_curve(chain_ctrl, elev_ctrl, weights=None, degree: int = 3, n_samples: int = 300) -> dict:
+    return _evaluate_nurbs_curve_impl(
+        chain_ctrl=chain_ctrl,
+        elev_ctrl=elev_ctrl,
+        weights=weights,
+        degree=degree,
+        n_samples=n_samples,
+    )
+
+
+def auto_group_profile_by_criteria(
+    prof: Dict[str, Any],
+    rdp_eps_m: float = 0.5,
+    curvature_thr_abs: float = 0.02,
+    smooth_radius_m: float = 0.0,
+    include_curvature_threshold: bool = True,
+    include_vector_angle_zero: bool = True,
+) -> List[Dict[str, Any]]:
+    return _auto_group_profile_by_criteria_impl(
+        prof,
+        rdp_eps_m=rdp_eps_m,
+        curvature_thr_abs=curvature_thr_abs,
+        smooth_radius_m=smooth_radius_m,
+        include_curvature_threshold=include_curvature_threshold,
+        include_vector_angle_zero=include_vector_angle_zero,
+    )
+
+
+def clamp_groups_to_slip(prof: Dict[str, Any], groups: List[Dict[str, Any]], min_len: float = WORKFLOW_GROUP_MIN_LEN_M) -> List[Dict[str, Any]]:
+    return _clamp_groups_to_slip_impl(prof, groups, min_len=min_len)
+
+
+class UI3BackendService:
+    def __init__(self, *, base_dir: str = "") -> None:
+        self._ctx: Dict[str, str] = {"project": "", "run_label": "", "run_dir": "", "base_dir": base_dir}
+        self._inputs: Dict[str, Any] = {}
+
+    def set_context(self, project: str, run_label: str, run_dir: str, base_dir: str = "") -> Dict[str, Any]:
+        if base_dir:
+            self._ctx["base_dir"] = str(base_dir)
+        self._ctx.update({"project": project, "run_label": run_label, "run_dir": run_dir})
+        self._inputs = self.load_inputs()
+        return dict(self._inputs)
+
+    def load_inputs(self) -> Dict[str, Any]:
+        run_dir = str(self._ctx.get("run_dir", "") or "")
+        base_dir = str(self._ctx.get("base_dir", "") or "")
+        shared_jsons = [
+            os.path.join(run_dir, "ui_shared_data.json"),
+            os.path.join(base_dir, "output", "ui_shared_data.json"),
+            os.path.join(base_dir, "output", "UI1", "ui_shared_data.json"),
+        ]
+        js: Dict[str, Any] = {}
+        for path in shared_jsons:
+            if os.path.exists(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        js.update(json.load(f))
+                except Exception:
+                    pass
+
+        meta_inputs: Dict[str, Any] = {}
+        meta_processed: Dict[str, Any] = {}
+        meta_path = os.path.join(run_dir, "ingest_meta.json")
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f) or {}
+                meta_inputs = meta.get("inputs") or {}
+                meta_processed = meta.get("processed") or {}
+            except Exception:
+                pass
+
+        ap = auto_paths()
+
+        def _pick_first(*cands: str) -> str:
+            for path in cands:
+                if path and os.path.exists(path):
+                    return path
+            return ""
+
+        dem_path_smooth = _pick_first(
+            os.path.join(run_dir, "ui1", "after_dem_smooth.tif"),
+            meta_inputs.get("after_dem") or "",
+            meta_inputs.get("before_dem") or "",
+            js.get("dem_ground_path") or "",
+            ap.get("dem", ""),
+            meta_inputs.get("before_asc") or "",
+            os.path.join(run_dir, "input", "after_dem.tif"),
+            os.path.join(run_dir, "input", "before_dem.tif"),
+            os.path.join(run_dir, "input", "before.asc"),
+            meta_processed.get("dem_cropped") or "",
+        )
+        dem_path_raw = _pick_first(
+            meta_inputs.get("after_dem") or "",
+            meta_inputs.get("before_dem") or "",
+            os.path.join(run_dir, "input", "after_dem.tif"),
+            os.path.join(run_dir, "input", "before_dem.tif"),
+            js.get("dem_ground_path") or "",
+            ap.get("dem_orig", ""),
+            ap.get("dem", ""),
+        )
+        slip_path = js.get("slip_path") or ap.get("slip", "")
+        if meta_processed.get("slip_mask"):
+            slip_path = meta_processed.get("slip_mask")
+        if not slip_path:
+            slip_path = os.path.join(run_dir, "ui1", "landslide_mask.tif")
+        if slip_path and (not os.path.exists(slip_path)):
+            alt = slip_path.replace(".asc", ".tif")
+            if os.path.exists(alt):
+                slip_path = alt
+
+        return {
+            "shared_json": js,
+            "meta_inputs": meta_inputs,
+            "meta_processed": meta_processed,
+            "auto_paths": ap,
+            "dem_path_smooth": dem_path_smooth,
+            "dem_path_raw": dem_path_raw,
+            "dx_path": _pick_first(js.get("dx_path") or "", ap.get("dx", ""), os.path.join(run_dir, "ui1", "dx.tif")),
+            "dy_path": _pick_first(js.get("dy_path") or "", ap.get("dy", ""), os.path.join(run_dir, "ui1", "dy.tif")),
+            "dz_path": _pick_first(js.get("dz_path") or "", ap.get("dz", ""), os.path.join(run_dir, "ui1", "dz.tif")),
+            "lines_path": "",
+            "slip_path": slip_path,
+        }
+
+    def load_lines(self, csv_path: str, dem_path: str) -> Dict[str, Any]:
+        migrated = ensure_sections_csv_current(csv_path, run_dir=str(self._ctx.get("run_dir", "") or ""))
+        gdf = build_gdf_from_sections_csv(csv_path, dem_path)
+        return {"migrated": bool(migrated), "gdf": gdf}
+
+    def compute_profile_for_line(
+        self,
+        line_id: str,
+        geom: LineString,
+        profile_source: str,
+        step_m: float,
+        slip_only: bool,
+        *,
+        dem_path: str = "",
+        dem_orig_path: str = "",
+        dx_path: str = "",
+        dy_path: str = "",
+        dz_path: str = "",
+        slip_mask_path: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        inputs = self._inputs or self.load_inputs()
+        dem = dem_path or inputs.get("dem_path_smooth") or inputs.get("dem_path_raw") or ""
+        if profile_source == "raw":
+            dem = dem_path or inputs.get("dem_path_raw") or dem
+        dem_orig = dem_orig_path or inputs.get("dem_path_raw") or dem
+        if not dem:
+            return None
+        prof = compute_profile(
+            dem,
+            dx_path or inputs.get("dx_path", ""),
+            dy_path or inputs.get("dy_path", ""),
+            dz_path or inputs.get("dz_path", ""),
+            geom,
+            step_m=step_m,
+            smooth_win=11,
+            smooth_poly=2,
+            slip_mask_path=slip_mask_path or inputs.get("slip_path", ""),
+            slip_only=bool(slip_only),
+            dem_orig_path=dem_orig,
+        )
+        if not prof:
+            return None
+        prof["profile_dem_source"] = profile_source
+        prof["profile_dem_path"] = dem
+        prof["line_id"] = line_id
+        return prof
+
+    def load_groups(self, path: str) -> Any:
+        return load_json(path, default=None)
+
+    def save_groups(self, path: str, groups: Any) -> str:
+        return save_json(path, groups)
+
+    def auto_group(
+        self,
+        line_id: str,
+        geom: Optional[LineString],
+        grouping_settings: Dict[str, Any],
+        profile_source: str,
+        step_m: float,
+        *,
+        prof: Optional[Dict[str, Any]] = None,
+        min_len: float = WORKFLOW_GROUP_MIN_LEN_M,
+    ) -> Dict[str, Any]:
+        if prof is None and geom is not None:
+            prof = self.compute_profile_for_line(line_id, geom, profile_source, step_m, slip_only=False)
+        if not prof:
+            return {"profile": None, "groups": []}
+        groups = auto_group_profile_by_criteria(prof, **dict(grouping_settings or {}))
+        groups = clamp_groups_to_slip(prof, groups, min_len=min_len)
+        return {"profile": prof, "groups": groups}
+
+    def auto_group_profile(self, profile: Dict[str, Any], grouping_settings: Dict[str, Any], min_len: float = WORKFLOW_GROUP_MIN_LEN_M) -> List[Dict[str, Any]]:
+        groups = auto_group_profile_by_criteria(profile, **dict(grouping_settings or {}))
+        return clamp_groups_to_slip(profile, groups, min_len=min_len)
+
+    def clamp_groups(self, profile: Dict[str, Any], groups: List[Dict[str, Any]], min_len: float = WORKFLOW_GROUP_MIN_LEN_M) -> List[Dict[str, Any]]:
+        return clamp_groups_to_slip(profile, groups, min_len=min_len)
+
+    def normalize_groups(self, groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return _normalize_groups_impl(groups)
+
+    def build_curve_seed(self, profile: Dict[str, Any], groups: List[Dict[str, Any]], curve_settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        curve_settings = dict(curve_settings or {})
+        return estimate_slip_curve(
+            profile,
+            groups,
+            ds=float(curve_settings.get("ds", 0.2)),
+            smooth_factor=float(curve_settings.get("smooth_factor", 0.1)),
+            depth_gain=float(curve_settings.get("depth_gain", 3.0)),
+            min_depth=float(curve_settings.get("min_depth", 1.0)),
+        )
+
+    def fit_bezier_curve_seed(self, chain, elevg, target_s, target_z, curve_settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        curve_settings = dict(curve_settings or {})
+        return fit_bezier_smooth_curve(
+            chain,
+            elevg,
+            target_s,
+            target_z,
+            c0=float(curve_settings.get("c0", 0.30)),
+            c1=float(curve_settings.get("c1", 0.30)),
+            clearance=float(curve_settings.get("clearance", 0.12)),
+        )
+
+    def evaluate_nurbs(self, params_or_ctrl_points, elev_ctrl=None, weights=None, degree: int = 3, n_samples: int = 300) -> Dict[str, Any]:
+        if isinstance(params_or_ctrl_points, dict):
+            params = dict(params_or_ctrl_points)
+            cps = np.asarray(params.get("control_points", []), dtype=float)
+            if cps.ndim != 2 or cps.shape[0] < 2:
+                return {"chain": np.array([], dtype=float), "elev": np.array([], dtype=float)}
+            return evaluate_nurbs_curve(
+                chain_ctrl=cps[:, 0],
+                elev_ctrl=cps[:, 1],
+                weights=params.get("weights", weights),
+                degree=int(params.get("degree", degree)),
+                n_samples=int(params.get("n_samples", n_samples)),
+            )
+        return evaluate_nurbs_curve(
+            chain_ctrl=params_or_ctrl_points,
+            elev_ctrl=elev_ctrl,
+            weights=weights,
+            degree=degree,
+            n_samples=n_samples,
+        )
+
+    def render_preview(self, profile: Dict[str, Any], render_settings: Dict[str, Any], groups=None, overlay_curves=None) -> Dict[str, Any]:
+        render_settings = dict(render_settings or {})
+        msg, path = render_profile_png(
+            profile,
+            render_settings["out_png"],
+            y_min=render_settings.get("y_min"),
+            y_max=render_settings.get("y_max"),
+            x_min=render_settings.get("x_min"),
+            x_max=render_settings.get("x_max"),
+            vec_scale=float(render_settings.get("vec_scale", 0.1)),
+            vec_width=float(render_settings.get("vec_width", 0.0015)),
+            head_len=float(render_settings.get("head_len", 7.0)),
+            head_w=float(render_settings.get("head_w", 5.0)),
+            highlight_theta=render_settings.get("highlight_theta"),
+            group_ranges=groups if groups else None,
+            draw_curve=bool(render_settings.get("draw_curve", False)),
+            save_curve_json=bool(render_settings.get("save_curve_json", False)),
+            overlay_curves=overlay_curves,
+            figsize=tuple(render_settings.get("figsize", (18, 10))),
+            dpi=int(render_settings.get("dpi", 220)),
+            base_font=int(render_settings.get("base_font", 20)),
+            label_font=int(render_settings.get("label_font", 20)),
+            tick_font=int(render_settings.get("tick_font", 20)),
+            legend_font=int(render_settings.get("legend_font", 20)),
+            ground_lw=float(render_settings.get("ground_lw", 2.2)),
+            ungrouped_color=str(render_settings.get("ungrouped_color", "#bbbbbb")),
+            curvature_series=render_settings.get("curvature_series"),
+            curvature_rdp_eps_m=float(render_settings.get("curvature_rdp_eps_m", 0.5)),
+            curvature_smooth_radius_m=float(render_settings.get("curvature_smooth_radius_m", 0.0)),
+        )
+        return {"message": msg, "path": path}
+
+    def extract_curvature_nodes(self, profile: Dict[str, Any], **kwargs) -> Dict[str, Any]:
+        return extract_curvature_rdp_nodes(profile, **kwargs)
+
+    def save_nurbs_outputs(self, outputs: Dict[str, Any]) -> Dict[str, Any]:
+        saved: Dict[str, Any] = {}
+        for key, spec in dict(outputs or {}).items():
+            if not isinstance(spec, dict):
+                continue
+            path = str(spec.get("path", "") or "")
+            if not path:
+                continue
+            saved[key] = save_json(path, spec.get("payload"))
+        return saved
+
+    def load_saved_ui3_state(self, paths: Dict[str, str]) -> Dict[str, Any]:
+        out: Dict[str, Any] = {}
+        for key, path in dict(paths or {}).items():
+            out[key] = load_json(path, default=None)
+        return out
+
+    def sync_anchor_updates(self, line_id: str, curve_data: Dict[str, Any]) -> Dict[str, Any]:
+        return {"line_id": line_id, "curve": curve_data, "updated": 0}
+
+    def export_vectors_and_ground(self, line_id: str, profile: Dict[str, Any]) -> Dict[str, Any]:
+        chain = np.asarray(profile.get("chain", []), dtype=float)
+        elev = np.asarray(profile.get("elev_s", []), dtype=float)
+        d_para = np.asarray(profile.get("d_para", []), dtype=float)
+        dz = np.asarray(profile.get("dz", []), dtype=float)
+        vectors = []
+        for s, z, dp, dzv in zip(chain.tolist(), elev.tolist(), d_para.tolist(), dz.tolist()):
+            if np.isfinite(s) and np.isfinite(z) and np.isfinite(dp) and np.isfinite(dzv):
+                vectors.append({"s": float(s), "z": float(z), "d_para": float(dp), "dz": float(dzv)})
+        ground = []
+        for s, z in zip(chain.tolist(), elev.tolist()):
+            if np.isfinite(s) and np.isfinite(z):
+                ground.append({"s": float(s), "z": float(z)})
+        return {"line_id": line_id, "vectors": vectors, "ground": ground}
+
+
