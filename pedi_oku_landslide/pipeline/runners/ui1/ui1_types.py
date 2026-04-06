@@ -4,7 +4,6 @@ from pedi_oku_landslide.services.session_store import AnalysisContext
 
 
 class UI1InputFiles(TypedDict):
-    before_dem: str
     after_dem: str
     before_asc: str
     after_asc: str

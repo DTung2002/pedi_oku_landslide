@@ -3,7 +3,7 @@ import os
 from typing import Any, Dict, List, Tuple
 
 SECTION_DIRECTION_VERSION = 2
-SECTION_CHAINAGE_ORIGIN = "right"
+SECTION_CHAINAGE_ORIGIN = "left"
 SECTION_CSV_FIELDNAMES = [
     "idx",
     "x1",

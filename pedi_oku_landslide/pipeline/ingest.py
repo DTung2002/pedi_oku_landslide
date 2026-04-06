@@ -239,7 +239,6 @@ def run_ingest(ctx: AnalysisContext, files: Dict[str, str]) -> Dict:
 
     Required keys in `files`:
       - after_dem  : GeoTIFF (.tif)
-      - before_dem : GeoTIFF (.tif)
       - before_asc : ASCII grid (.asc)
       - after_asc  : ASCII grid (.asc)
       - before_pz  : ASCII grid (.asc)
@@ -257,7 +256,7 @@ def run_ingest(ctx: AnalysisContext, files: Dict[str, str]) -> Dict:
         fallback_epsg = None  # if config not present, just skip fallback
 
     # 1) Validate inputs
-    required = ["before_dem", "after_dem", "before_asc", "after_asc", "before_pz", "after_pz"]
+    required = ["after_dem", "before_asc", "after_asc", "before_pz", "after_pz"]
     missing = [k for k in required if not files.get(k)]
     if missing:
         raise ValueError(f"Missing required inputs: {', '.join(missing)}")

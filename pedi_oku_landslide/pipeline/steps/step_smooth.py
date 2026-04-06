@@ -8,7 +8,7 @@ from matplotlib.colors import LightSource
 import matplotlib.pyplot as plt
 
 from pedi_oku_landslide.services.session_store import AnalysisContext
-from pedi_oku_landslide.core.analysis import smooth_gaussian_qgis, smooth_mean
+from pedi_oku_landslide.core.analysis import smooth_gaussian_qgis
 from pedi_oku_landslide.pipeline.ingest import resolve_run_input_path
 
 def _radius_m_to_px(transform: Affine, radius_m: float) -> tuple[float, float]:
@@ -47,7 +47,7 @@ def run_smooth(
     ctx: AnalysisContext,
     param_m: float = 2.0,
     *,
-    method: str = "Mean",
+    method: str = "Gaussian",
     gaussian_sigma_percent: float = 50.0,
 ) -> dict:
     """
@@ -92,21 +92,18 @@ def run_smooth(
         raise ValueError("AFTER.asc and AFTER DEM.tif have different CRS. Please reproject first.")
 
     # ---- smooth
-    method_norm = str(method or "Mean").strip().lower()
-    if method_norm not in ("mean", "gaussian"):
+    method_norm = str(method or "Gaussian").strip().lower()
+    if method_norm == "mean":
+        method_norm = "gaussian"
+    if method_norm != "gaussian":
         raise ValueError(f"Unsupported smooth method: {method}")
-    method_label = "Gaussian" if method_norm == "gaussian" else "Mean"
+    method_label = "Gaussian"
     b_radius_px = _radius_m_to_px(b_transform, param_m)
     a_radius_px = _radius_m_to_px(a_transform, param_m)
     d_radius_px = _radius_m_to_px(d_transform, param_m)
-    if method_norm == "gaussian":
-        b_sm = smooth_gaussian_qgis(b_arr, radius_px=b_radius_px, sigma_percent=float(gaussian_sigma_percent))
-        a_sm = smooth_gaussian_qgis(a_arr, radius_px=a_radius_px, sigma_percent=float(gaussian_sigma_percent))
-        d_sm = smooth_gaussian_qgis(d_arr, radius_px=d_radius_px, sigma_percent=float(gaussian_sigma_percent))
-    else:
-        b_sm = smooth_mean(b_arr, radius_px=b_radius_px)
-        a_sm = smooth_mean(a_arr, radius_px=a_radius_px)
-        d_sm = smooth_mean(d_arr, radius_px=d_radius_px)
+    b_sm = smooth_gaussian_qgis(b_arr, radius_px=b_radius_px, sigma_percent=float(gaussian_sigma_percent))
+    a_sm = smooth_gaussian_qgis(a_arr, radius_px=a_radius_px, sigma_percent=float(gaussian_sigma_percent))
+    d_sm = smooth_gaussian_qgis(d_arr, radius_px=d_radius_px, sigma_percent=float(gaussian_sigma_percent))
 
     # ---- write GeoTIFFs
     out_b_tif = os.path.join(ctx.out_ui1, "before_asc_smooth.tif")
@@ -152,7 +149,7 @@ def run_smooth(
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(
             {
-                "method": method,
+                "method": "Gaussian",
                 "method_label": method_label,
                 "param_m": float(param_m),
                 "gaussian_sigma_percent": float(gaussian_sigma_percent),

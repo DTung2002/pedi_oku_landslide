@@ -95,14 +95,13 @@ class AnalyzeTab(QWidget):
         inputs_layout.setContentsMargins(6, 8, 6, 8)
         inputs_layout.setSpacing(6)
 
-        self.fp_bdem = FilePicker("BEFORE DEM.tif", "GeoTIFF (*.tif *.tiff)")
         self.fp_adem = FilePicker("AFTER DEM.tif", "GeoTIFF (*.tif *.tiff)")
         self.fp_basc = FilePicker("BEFORE.asc", "ASC (*.asc)")
         self.fp_aasc = FilePicker("AFTER.asc", "ASC (*.asc)")
         self.fp_bpz  = FilePicker("BEFORE_PZ.asc", "ASC (*.asc)")
         self.fp_apz  = FilePicker("AFTER_PZ.asc", "ASC (*.asc)")
         
-        for w in (self.fp_bdem, self.fp_adem, self.fp_basc, self.fp_aasc, self.fp_bpz, self.fp_apz):
+        for w in (self.fp_adem, self.fp_basc, self.fp_aasc, self.fp_bpz, self.fp_apz):
             inputs_layout.addWidget(w)
             
         # Actions row (inside Inputs panel)
@@ -121,7 +120,7 @@ class AnalyzeTab(QWidget):
         inputs_layout.addLayout(actions)
 
         # Keep action buttons at their natural size; only normalize file-picker buttons.
-        file_buttons = [self.fp_bdem.btn, self.fp_adem.btn, self.fp_basc.btn, self.fp_aasc.btn, self.fp_bpz.btn, self.fp_apz.btn]
+        file_buttons = [self.fp_adem.btn, self.fp_basc.btn, self.fp_aasc.btn, self.fp_bpz.btn, self.fp_apz.btn]
         max_w = max(btn.sizeHint().width() for btn in file_buttons) + 36
         max_h = max(btn.sizeHint().height() for btn in file_buttons)
         for btn in file_buttons:
@@ -136,13 +135,13 @@ class AnalyzeTab(QWidget):
         # ---- Smooth ----
         self.lab_smooth_method = QLabel("Smooth Filter:")
         self.cmb_smooth_method = QComboBox()
-        self.cmb_smooth_method.addItems(["Mean", "Gaussian"])
-        self.cmb_smooth_method.setCurrentText("Mean")
+        self.cmb_smooth_method.addItem("Gaussian")
+        self.cmb_smooth_method.setCurrentText("Gaussian")
         self.cmb_smooth_method.setEnabled(False)
         self.cmb_smooth_method.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.cmb_smooth_method.currentTextChanged.connect(self._on_smooth_method_changed)
 
-        self.lab_smooth_param = QLabel("Mean Radius (m):")
+        self.lab_smooth_param = QLabel("Gaussian Radius (m):")
         self.spin_smooth_param = QDoubleSpinBox()
         self.spin_smooth_param.setRange(0.0, 50.0)
         self.spin_smooth_param.setSingleStep(0.5)
@@ -469,7 +468,6 @@ class AnalyzeTab(QWidget):
             return
 
         files = {
-            "before_dem": self.fp_bdem.path,
             "after_dem":  self.fp_adem.path,
             "before_asc": self.fp_basc.path,
             "after_asc":  self.fp_aasc.path,
@@ -477,7 +475,7 @@ class AnalyzeTab(QWidget):
             "after_pz":   self.fp_apz.path,
         }
         if not all(files.values()):
-            self._warn("Please select all 6 input files.")
+            self._warn("Please select all 5 input files.")
             return
 
         try:
@@ -518,7 +516,7 @@ class AnalyzeTab(QWidget):
             self._warn("Please run 'Confirm Input' first.")
             return
         try:
-            method = str(self.cmb_smooth_method.currentText() or "Mean").strip()
+            method = str(self.cmb_smooth_method.currentText() or "Gaussian").strip()
             param_m = float(self.spin_smooth_param.value())
 
             ctx = self._backend.context_from_run_dir(self._last_run_dir)
@@ -546,11 +544,8 @@ class AnalyzeTab(QWidget):
             self._err(f"Smooth error: {e}")
 
     def _on_smooth_method_changed(self, text: str) -> None:
-        method = str(text or "Mean").strip().lower()
-        if method == "gaussian":
-            self.lab_smooth_param.setText("Gaussian Radius (m):")
-        else:
-            self.lab_smooth_param.setText("Mean Radius (m):")
+        _method = str(text or "Gaussian").strip().lower()
+        self.lab_smooth_param.setText("Gaussian Radius (m):")
 
     def _on_calc_sad(self) -> None:
         if not self._last_run_dir:
@@ -925,7 +920,7 @@ class AnalyzeTab(QWidget):
         self.edit_runlabel.clear()
 
         # 3) Clear input file pickers
-        for fp in (self.fp_bdem, self.fp_adem, self.fp_basc, self.fp_aasc, self.fp_bpz, self.fp_apz):
+        for fp in (self.fp_adem, self.fp_basc, self.fp_aasc, self.fp_bpz, self.fp_apz):
             try:
                 if hasattr(fp, "clear"):
                     fp.clear()
@@ -955,7 +950,7 @@ class AnalyzeTab(QWidget):
 
         # 5) Reset các thông số xử lý
         try:
-            self.cmb_smooth_method.setCurrentText("Mean")
+            self.cmb_smooth_method.setCurrentText("Gaussian")
             self.spin_smooth_param.setValue(2.0)
         except Exception:
             pass

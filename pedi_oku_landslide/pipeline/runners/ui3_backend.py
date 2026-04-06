@@ -699,10 +699,10 @@ def render_profile_png(
             if y_max is None:
                 y_max = z_max + pad
 
-    def _set_reversed_xlim(ax_obj, left_val: float, right_val: float) -> None:
+    def _set_chainage_xlim(ax_obj, left_val: float, right_val: float) -> None:
         lo = float(min(left_val, right_val))
         hi = float(max(left_val, right_val))
-        ax_obj.set_xlim(hi, lo)
+        ax_obj.set_xlim(lo, hi)
 
     import matplotlib.pyplot as plt
     with plt.rc_context({'font.size': base_font}):
@@ -829,9 +829,6 @@ def render_profile_png(
                 # Vector slope angle (deg), normalized to [-90, 90].
                 gradient_deg = np.degrees(np.arctan2(dz_s[finite_s], d_para_s[finite_s]))
                 gradient_deg = ((gradient_deg + 90.0) % 180.0) - 90.0
-                # UI3 displays chainage with reversed X direction, so the
-                # plotted gradient must be mirrored to match the visible vector logic.
-                gradient_deg = -gradient_deg
                 # savgol_filter disabled
 
                 ax2.plot(ch, gradient_deg, lw=2.2, color="#2ca02c", zorder=5, label="Gradient")
@@ -906,9 +903,6 @@ def render_profile_png(
                 # Vector slope angle (deg), normalized to [-90, 90].
                 gradient_deg = np.degrees(np.arctan2(dz[finite_th], d_para[finite_th]))
                 gradient_deg = ((gradient_deg + 90.0) % 180.0) - 90.0
-                # UI3 displays chainage with reversed X direction, so the
-                # plotted gradient must be mirrored to match the visible vector logic.
-                gradient_deg = -gradient_deg
                 # savgol_filter disabled
                 ax2.plot(chain_f, gradient_deg, color="#2ca02c", lw=2.4, zorder=5, label="Gradient")
 
@@ -962,7 +956,7 @@ def render_profile_png(
                                fontsize=legend_font, frameon=False, ncol=2)
 
             if x_min is not None and x_max is not None and (abs(float(x_max) - float(x_min)) > 1e-12):
-                _set_reversed_xlim(ax2, x_min, x_max)
+                _set_chainage_xlim(ax2, x_min, x_max)
 
             if group_ranges:
                 for gi, gr in enumerate(group_ranges):
@@ -1036,7 +1030,7 @@ def render_profile_png(
                             continue
                         xm = 0.5 * (s + e)
                         label_items.append((float(xm), float(s), float(e), int(gi)))
-                    label_items.sort(key=lambda t: t[0], reverse=True)
+                    label_items.sort(key=lambda t: t[0])
                     for idx, (xm, _s, _e, _gi) in enumerate(label_items, start=1):
                         ax.text(
                             float(xm), 0.995, str(idx),
@@ -1182,8 +1176,8 @@ def render_profile_png(
                     ypad = 0.05 * dy
 
                     if not user_x_fixed:
-                        _set_reversed_xlim(ax, x0 - xpad, x1 + xpad)
-                        _set_reversed_xlim(ax2, x0 - xpad, x1 + xpad)
+                        _set_chainage_xlim(ax, x0 - xpad, x1 + xpad)
+                        _set_chainage_xlim(ax2, x0 - xpad, x1 + xpad)
                     if not user_y_fixed:
                         ax.set_ylim(y0 - ypad, y1 + ypad)
             except Exception:
@@ -1199,8 +1193,8 @@ def render_profile_png(
             ax.set_ylim(float(y_user_min), float(y_user_max))
 
         if user_x_fixed:
-            _set_reversed_xlim(ax, float(x_user_min), float(x_user_max))
-            _set_reversed_xlim(ax2, float(x_user_min), float(x_user_max))
+            _set_chainage_xlim(ax, float(x_user_min), float(x_user_max))
+            _set_chainage_xlim(ax2, float(x_user_min), float(x_user_max))
         # Force chainage major ticks every 10 m on both panels.
         try:
             from matplotlib.ticker import MultipleLocator

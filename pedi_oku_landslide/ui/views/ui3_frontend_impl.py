@@ -57,7 +57,7 @@ WORKFLOW_GROUPING_PARAMS = {
     "include_vector_angle_zero": True,
 }
 SECTION_DIRECTION_VERSION = 2
-SECTION_CHAINAGE_ORIGIN = "right"
+SECTION_CHAINAGE_ORIGIN = "left"
 DEFAULT_CRS = "EPSG:6678"
 SECTION_CSV_FIELDNAMES = [
     "idx",
@@ -153,7 +153,7 @@ def _prune_first_20m_descending_curvature_pair(
         right_k = float(out[right_idx].get("curvature_value", np.nan))
         if not (np.isfinite(left_k) and np.isfinite(right_k)):
             continue
-        if left_k <= right_k:
+        if left_k >= right_k:
             continue
 
         for idx in sorted((left_idx, right_idx), reverse=True):
@@ -205,21 +205,23 @@ def _prune_vector_zero_boundaries(
             continue
         break
 
-    # Rule 2: with UI3's reversed logic, keep only the first surviving vector
-    # boundary seen from the right side; drop all later vector boundaries.
+    # Rule 2: with left-to-right chainage, keep only the first surviving
+    # vector boundary seen from the left side.
     first_kept_vector_x: Optional[float] = None
-    i = len(out) - 1
-    while i >= 0:
+    i = 0
+    while i < len(out):
         if not _has_vector_reason(out[i]):
-            i -= 1
+            i += 1
             continue
-        x = float(out[i]["x"])
+        x = float(out[i].get("x", np.nan))
+        if not np.isfinite(x):
+            _drop_vector_reason(i)
+            continue
         if first_kept_vector_x is None:
             first_kept_vector_x = x
-            i -= 1
+            i += 1
             continue
         _drop_vector_reason(i)
-        i -= 1
 
     return _merge_close_boundaries(out, tol_m=1e-6)
 
@@ -457,9 +459,8 @@ def clamp_groups_to_slip(prof: Dict[str, Any], groups: List[Dict[str, Any]], min
 
 def _renumber_groups_visual_order(groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    UI3 plots chainage with reversed X direction, so canonical group order
-    follows the visible plot order from left to right. G1 therefore owns the
-    leftmost visible span (largest chainage).
+    Canonical group order follows increasing chainage from left to right.
+    G1 therefore owns the smallest-chainage span.
     """
     if not groups:
         return []
@@ -499,7 +500,7 @@ def _renumber_groups_visual_order(groups: List[Dict[str, Any]]) -> List[Dict[str
             if orig_idx is None or color != colors[(orig_idx - 1) % len(colors)].lower():
                 legacy_default_palette = False
         sortable.append((float(s), float(e), gg))
-    sortable.sort(key=lambda t: (-t[0], -t[1]))
+    sortable.sort(key=lambda t: (t[0], t[1]))
     reassign_legacy_default_palette = saw_explicit_color and legacy_default_palette
     for idx, (_, _, gg) in enumerate(sortable, start=1):
         gg["id"] = f"G{idx}"
@@ -1843,6 +1844,9 @@ class CurveAnalyzeTab(QWidget):
     def _ground_csv_path_for(self, line_id: str) -> str:
         return os.path.join(self._curve_dir(), f"ground_{line_id}_raw.csv")
 
+    def _rdp_csv_path_for(self, line_id: str) -> str:
+        return os.path.join(self._curve_dir(), f"{line_id}_RDP.csv")
+
     def _on_nurbs_save(self) -> None:
         if not self._active_prof:
             self._warn("[UI3] No active profile to save NURBS.")
@@ -2073,6 +2077,7 @@ class CurveAnalyzeTab(QWidget):
                 return
 
             line_id = self._line_id_current()
+            rdp_csv = self._save_rdp_csv_for_line(line_id, prof)
             self._save_groups_to_ui(
                 groups,
                 prof,
@@ -2081,6 +2086,8 @@ class CurveAnalyzeTab(QWidget):
                 curve_method=self._curve_method_from_group_method(group_method),
                 group_method=group_method,
             )
+            if rdp_csv:
+                self._log(f"[UI3] Saved RDP CSV: {rdp_csv}")
             # Re-render ngay để vẽ vector và tô màu theo group vừa tạo.
             self._render_current_safe()
             try:
@@ -4123,6 +4130,41 @@ class CurveAnalyzeTab(QWidget):
         out_csv = self._ground_csv_path_for(line_id)
         with open(out_csv, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
+            writer.writerows(rows)
+        return out_csv
+
+    def _save_rdp_csv_for_line(self, line_id: str, prof: dict) -> Optional[str]:
+        if not prof:
+            return None
+
+        params = self._grouping_params_current()
+        nodes = extract_curvature_rdp_nodes(
+            prof,
+            rdp_eps_m=float(params.get("rdp_eps_m", 0.5)),
+            smooth_radius_m=float(params.get("smooth_radius_m", 0.0)),
+            restrict_to_slip_span=False,
+        )
+        chain = np.asarray(nodes.get("chain", []), dtype=float)
+        elev = np.asarray(nodes.get("elev", []), dtype=float)
+        curv = np.asarray(nodes.get("curvature", []), dtype=float)
+        n = int(min(chain.size, elev.size, curv.size))
+        if n <= 0:
+            return None
+
+        rows: List[Tuple[float, float, float]] = []
+        for i in range(n):
+            ch = float(chain[i])
+            zz = float(elev[i])
+            kk = float(curv[i])
+            if np.isfinite(ch) and np.isfinite(zz) and np.isfinite(kk):
+                rows.append((ch, zz, kk))
+        if not rows:
+            return None
+
+        out_csv = self._rdp_csv_path_for(line_id)
+        with open(out_csv, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["chainage", "elevation", "curvature"])
             writer.writerows(rows)
         return out_csv
 

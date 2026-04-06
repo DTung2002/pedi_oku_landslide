@@ -86,7 +86,7 @@ def _prune_first_20m_descending_curvature_pair(
         right_k = float(out[right_idx].get("curvature_value", np.nan))
         if not (np.isfinite(left_k) and np.isfinite(right_k)):
             continue
-        if left_k <= right_k:
+        if left_k >= right_k:
             continue
         for idx in sorted((left_idx, right_idx), reverse=True):
             del out[idx]
@@ -136,25 +136,20 @@ def _prune_vector_zero_boundaries(
         break
 
     first_kept_vector_x = None
-    i = len(out) - 1
-    while i >= 0:
+    i = 0
+    while i < len(out):
         if not _has_vector_reason(out[i]):
-            i -= 1
+            i += 1
             continue
         x = float(out[i].get("x", np.nan))
         if not np.isfinite(x):
             _drop_vector_reason(i)
-            i -= 1
             continue
         if first_kept_vector_x is None:
             first_kept_vector_x = x
-            i -= 1
-            continue
-        if abs(first_kept_vector_x - x) < float(repeat_vector_gap_m):
-            i -= 1
+            i += 1
             continue
         _drop_vector_reason(i)
-        i -= 1
 
     return _merge_close_boundaries(out, tol_m=1e-6)
 
@@ -414,7 +409,7 @@ def _renumber_groups_visual_order(groups: List[Dict[str, Any]]) -> List[Dict[str
             if orig_idx is None or color != colors[(orig_idx - 1) % len(colors)].lower():
                 legacy_default_palette = False
         sortable.append((float(s), float(e), gg))
-    sortable.sort(key=lambda t: (-t[0], -t[1]))
+    sortable.sort(key=lambda t: (t[0], t[1]))
     reassign_legacy_default_palette = saw_explicit_color and legacy_default_palette
     for idx, (_, _, gg) in enumerate(sortable, start=1):
         gg["id"] = f"G{idx}"
