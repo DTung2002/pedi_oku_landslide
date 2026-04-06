@@ -382,6 +382,16 @@ def _renumber_groups_visual_order(groups: List[Dict[str, Any]]) -> List[Dict[str
     colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"]
     ordered: List[Dict[str, Any]] = []
     sortable: List[Tuple[float, float, Dict[str, Any]]] = []
+    saw_explicit_color = False
+    legacy_default_palette = True
+
+    def _group_index_from_id(gid: str) -> int | None:
+        gid = str(gid or "").strip().upper()
+        if len(gid) >= 2 and gid.startswith("G") and gid[1:].isdigit():
+            idx = int(gid[1:])
+            return idx if idx > 0 else None
+        return None
+
     for g in (groups or []):
         try:
             s = float(g.get("start", g.get("start_chainage", np.nan)))
@@ -395,13 +405,23 @@ def _renumber_groups_visual_order(groups: List[Dict[str, Any]]) -> List[Dict[str
         gg = dict(g or {})
         gg["start"] = float(s)
         gg["end"] = float(e)
+        orig_id = str(gg.get("id", gg.get("group_id", "")) or "").strip()
+        gg["_orig_group_id"] = orig_id
+        color = str(gg.get("color", "") or "").strip().lower()
+        if color:
+            saw_explicit_color = True
+            orig_idx = _group_index_from_id(orig_id)
+            if orig_idx is None or color != colors[(orig_idx - 1) % len(colors)].lower():
+                legacy_default_palette = False
         sortable.append((float(s), float(e), gg))
-    sortable.sort(key=lambda t: (t[0], t[1]))
+    sortable.sort(key=lambda t: (-t[0], -t[1]))
+    reassign_legacy_default_palette = saw_explicit_color and legacy_default_palette
     for idx, (_, _, gg) in enumerate(sortable, start=1):
         gg["id"] = f"G{idx}"
         color = str(gg.get("color", "") or "").strip()
-        if not color:
+        if reassign_legacy_default_palette or not color:
             color = colors[(idx - 1) % len(colors)]
         gg["color"] = color
+        gg.pop("_orig_group_id", None)
         ordered.append(gg)
     return ordered

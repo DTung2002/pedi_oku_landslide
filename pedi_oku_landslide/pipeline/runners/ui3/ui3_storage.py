@@ -9,6 +9,7 @@ from shapely.geometry import LineString
 
 SECTION_DIRECTION_VERSION = 2
 SECTION_CHAINAGE_ORIGIN = "right"
+DEFAULT_CRS = "EPSG:6678"
 SECTION_CSV_FIELDNAMES = [
     "idx",
     "x1",
@@ -130,12 +131,7 @@ def build_gdf_from_sections_csv(csv_path: str, dem_path: str) -> gpd.GeoDataFram
     if not rows:
         return gpd.GeoDataFrame(columns=["idx", "name", "line_id", "line_role", "length_m", "geometry"], geometry="geometry")
 
-    crs = None
-    try:
-        with rasterio.open(dem_path) as ds:
-            crs = ds.crs
-    except Exception:
-        pass
+    crs = DEFAULT_CRS
 
     idxs, xs1, ys1, xs2, ys2, line_ids, line_roles = zip(*rows)
     geoms = [LineString([(x1, y1), (x2, y2)]) for (_, x1, y1, x2, y2, _, _) in rows]

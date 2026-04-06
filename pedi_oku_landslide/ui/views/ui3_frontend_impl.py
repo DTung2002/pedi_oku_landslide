@@ -58,6 +58,7 @@ WORKFLOW_GROUPING_PARAMS = {
 }
 SECTION_DIRECTION_VERSION = 2
 SECTION_CHAINAGE_ORIGIN = "right"
+DEFAULT_CRS = "EPSG:6678"
 SECTION_CSV_FIELDNAMES = [
     "idx",
     "x1",
@@ -456,9 +457,9 @@ def clamp_groups_to_slip(prof: Dict[str, Any], groups: List[Dict[str, Any]], min
 
 def _renumber_groups_visual_order(groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    UI3 now displays chainage with origin at the right.
-    Canonical group order is ascending chainage, so G1 always owns the
-    rightmost span and the table is populated in that canonical order.
+    UI3 plots chainage with reversed X direction, so canonical group order
+    follows the visible plot order from left to right. G1 therefore owns the
+    leftmost visible span (largest chainage).
     """
     if not groups:
         return []
@@ -466,6 +467,16 @@ def _renumber_groups_visual_order(groups: List[Dict[str, Any]]) -> List[Dict[str
               "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"]
     ordered: List[Dict[str, Any]] = []
     sortable: List[Tuple[float, float, Dict[str, Any]]] = []
+    saw_explicit_color = False
+    legacy_default_palette = True
+
+    def _group_index_from_id(gid: str) -> Optional[int]:
+        gid = str(gid or "").strip().upper()
+        if len(gid) >= 2 and gid.startswith("G") and gid[1:].isdigit():
+            idx = int(gid[1:])
+            return idx if idx > 0 else None
+        return None
+
     for g in (groups or []):
         try:
             s = float(g.get("start", g.get("start_chainage", np.nan)))
@@ -479,14 +490,24 @@ def _renumber_groups_visual_order(groups: List[Dict[str, Any]]) -> List[Dict[str
         gg = dict(g or {})
         gg["start"] = float(s)
         gg["end"] = float(e)
+        orig_id = str(gg.get("id", gg.get("group_id", "")) or "").strip()
+        gg["_orig_group_id"] = orig_id
+        color = str(gg.get("color", "") or "").strip().lower()
+        if color:
+            saw_explicit_color = True
+            orig_idx = _group_index_from_id(orig_id)
+            if orig_idx is None or color != colors[(orig_idx - 1) % len(colors)].lower():
+                legacy_default_palette = False
         sortable.append((float(s), float(e), gg))
-    sortable.sort(key=lambda t: (t[0], t[1]))
+    sortable.sort(key=lambda t: (-t[0], -t[1]))
+    reassign_legacy_default_palette = saw_explicit_color and legacy_default_palette
     for idx, (_, _, gg) in enumerate(sortable, start=1):
         gg["id"] = f"G{idx}"
         color = str(gg.get("color", "") or "").strip()
-        if not color:
+        if reassign_legacy_default_palette or not color:
             color = colors[(idx - 1) % len(colors)]
         gg["color"] = color
+        gg.pop("_orig_group_id", None)
         ordered.append(gg)
     return ordered
 
@@ -577,7 +598,7 @@ def _ensure_sections_csv_current(csv_path: str, *, run_dir: str) -> bool:
 def _build_gdf_from_sections_csv(csv_path: str, dem_path: str) -> gpd.GeoDataFrame:
     """
     Đọc ui2/sections.csv (idx, x1, y1, x2, y2) và tạo GeoDataFrame lines.
-    CRS lấy từ DEM (dem_path).
+    CRS mặc định cố định EPSG:6678.
     """
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"sections.csv not found: {csv_path}")
@@ -601,13 +622,7 @@ def _build_gdf_from_sections_csv(csv_path: str, dem_path: str) -> gpd.GeoDataFra
     if not rows:
         return gpd.GeoDataFrame(columns=["idx", "name", "line_id", "line_role", "length_m", "geometry"], geometry="geometry")
 
-    # Lấy CRS từ DEM
-    crs = None
-    try:
-        with rasterio.open(dem_path) as ds:
-            crs = ds.crs
-    except Exception:
-        pass
+    crs = DEFAULT_CRS
 
     idxs, xs1, ys1, xs2, ys2, line_ids, line_roles = zip(*rows)
     geoms = [LineString([(x1, y1), (x2, y2)]) for (_, x1, y1, x2, y2, _, _) in rows]
@@ -1825,10 +1840,8 @@ class CurveAnalyzeTab(QWidget):
     def _nurbs_json_path_for(self, line_id: str) -> str:
         return os.path.join(self._preview_dir(), f"profile_{line_id}_nurbs.json")
 
-    def _ground_json_path_for(self, line_id: str) -> str:
-        src = self._current_profile_source_key()
-        suffix = "smooth" if src == "smooth" else "raw"
-        return os.path.join(self._curve_dir(), f"ground_{line_id}_{suffix}.json")
+    def _ground_csv_path_for(self, line_id: str) -> str:
+        return os.path.join(self._curve_dir(), f"ground_{line_id}_raw.csv")
 
     def _on_nurbs_save(self) -> None:
         if not self._active_prof:
@@ -2368,18 +2381,6 @@ class CurveAnalyzeTab(QWidget):
         ls.addWidget(btn_render)
         lsd.addLayout(ls)
 
-        row_src = QHBoxLayout()
-        row_src.setSpacing(6)
-        lbl_src = QLabel("Profile DEM:")
-        self.profile_source_combo = NoWheelComboBox()
-        self.profile_source_combo.addItem("Raw DEM", "raw")
-        self.profile_source_combo.addItem("Smoothed DEM", "smooth")
-        self.profile_source_combo.setCurrentIndex(0)
-        self.profile_source_combo.currentIndexChanged.connect(self._on_profile_source_changed)
-        row_src.addWidget(lbl_src)
-        row_src.addWidget(self.profile_source_combo, 1)
-        lsd.addLayout(row_src)
-
         # Advanced controls
         la = QHBoxLayout()
         la.setSpacing(6)
@@ -2644,45 +2645,26 @@ class CurveAnalyzeTab(QWidget):
         return ""
 
     def _current_profile_source_key(self) -> str:
-        try:
-            if self.profile_source_combo is not None:
-                key = str(self.profile_source_combo.currentData() or "").strip().lower()
-                if key in ("raw", "smooth"):
-                    return key
-        except Exception:
-            pass
         return "raw"
 
     def _set_profile_source_key(self, key: Optional[str], *, log_paths: bool = False) -> str:
-        src = str(key or "").strip().lower()
-        if src not in ("raw", "smooth"):
-            return self._current_profile_source_key()
-        try:
-            if self.profile_source_combo is not None:
-                idx = self.profile_source_combo.findData(src)
-                if idx >= 0:
-                    old = self.profile_source_combo.blockSignals(True)
-                    self.profile_source_combo.setCurrentIndex(idx)
-                    self.profile_source_combo.blockSignals(old)
-        except Exception:
-            pass
+        _ = key
         self._refresh_profile_source_paths(log_paths=log_paths)
         return self._current_profile_source_key()
 
     def _refresh_profile_source_paths(self, log_paths: bool = False) -> None:
-        src = self._current_profile_source_key()
-        if src == "smooth":
-            chosen = self._pick_existing_path(self.dem_path_smooth, self.dem_path_raw)
-        else:
-            chosen = self._pick_existing_path(self.dem_path_raw, self.dem_path_smooth)
+        chosen = str(getattr(self, "dem_path_raw", "") or "").strip()
+        if chosen and not os.path.exists(chosen):
+            chosen = ""
         self.dem_path = chosen
         self.ground_export_dem_path = chosen
         self._sync_step_to_raw_dem(log_paths=log_paths)
         if log_paths:
-            self._log(f"[UI3] Profile source: {src}")
             self._log(f"[UI3] Raw DEM: {self.dem_path_raw}")
             self._log(f"[UI3] Smoothed DEM: {self.dem_path_smooth}")
             self._log(f"[UI3] Active profile DEM: {self.dem_path}")
+            if not self.dem_path:
+                self._warn("[UI3] Raw DEM not found. Render/export will stop until a valid raw DEM is available.")
 
     def _raw_dem_pixel_step_m(self) -> Optional[float]:
         dem_path = str(getattr(self, "dem_path_raw", "") or "").strip()
@@ -2784,7 +2766,7 @@ class CurveAnalyzeTab(QWidget):
             pass
         try:
             if "profile_dem_source" in data:
-                self._set_profile_source_key(str(data.get("profile_dem_source")), log_paths=log_paths)
+                self._set_profile_source_key("raw", log_paths=log_paths)
         except Exception:
             pass
 
@@ -2951,11 +2933,6 @@ class CurveAnalyzeTab(QWidget):
         except Exception:
             return None
 
-        saved_src = str(data.get("profile_dem_source", "") or "").strip().lower()
-        current_src = self._current_profile_source_key()
-        if saved_src in ("raw", "smooth") and current_src in ("raw", "smooth") and saved_src != current_src:
-            return None
-
         saved_groups = self._groups_to_current_chainage(
             data.get("groups", []) or [],
             source_origin=data.get("chainage_origin"),
@@ -2994,6 +2971,7 @@ class CurveAnalyzeTab(QWidget):
         dem_path = str(getattr(self, "dem_path", "") or "").strip()
         dem_orig_path = str(getattr(self, "ground_export_dem_path", "") or "").strip()
         if not dem_path:
+            self._warn("[UI3] Raw DEM not found. Cannot render profile.")
             return None
         prof = self._backend.compute_profile_for_line(
             self._line_id_current(),
@@ -3076,7 +3054,6 @@ class CurveAnalyzeTab(QWidget):
             js.get("dem_ground_path") or "",
             backend_inputs.get("dem_path_raw", ""),
             ap.get("dem_orig", ""),
-            ap.get("dem", ""),
         )
         self._refresh_profile_source_paths(log_paths=True)
         self.dx_path = _pick_first(
@@ -3153,13 +3130,6 @@ class CurveAnalyzeTab(QWidget):
         self.dz_path = ""
         self.lines_path = ""
         self.slip_path = ""
-        try:
-            if self.profile_source_combo is not None:
-                self.profile_source_combo.blockSignals(True)
-                self.profile_source_combo.setCurrentIndex(0)
-                self.profile_source_combo.blockSignals(False)
-        except Exception:
-            pass
         try:
             if self.step_box is not None:
                 old = self.step_box.blockSignals(True)
@@ -4081,22 +4051,14 @@ class CurveAnalyzeTab(QWidget):
             json.dump(payload, f, ensure_ascii=False, indent=2)
         return out_json
 
-    def _save_ground_json_for_line(self, line_id: str, geom, step_m: float) -> Optional[str]:
+    def _save_ground_csv_for_line(self, line_id: str, geom, step_m: float) -> Optional[str]:
         _ = step_m
         profile_src = self._current_profile_source_key()
         dem_path = str(getattr(self, "ground_export_dem_path", "") or "").strip()
+        if dem_path and not os.path.exists(dem_path):
+            dem_path = ""
         if not dem_path or not os.path.exists(dem_path):
-            if profile_src == "smooth":
-                dem_path = self._pick_existing_path(
-                    str(getattr(self, "dem_path_smooth", "") or "").strip(),
-                    str(getattr(self, "dem_path_raw", "") or "").strip(),
-                )
-            else:
-                dem_path = self._pick_existing_path(
-                    str(getattr(self, "dem_path_raw", "") or "").strip(),
-                    str(getattr(self, "dem_path_smooth", "") or "").strip(),
-                )
-        if not dem_path or not os.path.exists(dem_path):
+            self._warn("[UI3] Raw DEM not found. Cannot save ground CSV.")
             return None
 
         prof = self._backend.compute_profile_for_line(
@@ -4116,76 +4078,53 @@ class CurveAnalyzeTab(QWidget):
             return None
 
         chain = np.asarray(prof.get("chain", []), dtype=float)
-        x = np.asarray(prof.get("x", []), dtype=float) if prof.get("x", None) is not None else None
-        y = np.asarray(prof.get("y", []), dtype=float) if prof.get("y", None) is not None else None
-        elev = np.asarray(prof.get("elev_s", []), dtype=float) if prof.get("elev_s", None) is not None else None
-        slip_mask = np.asarray(prof.get("slip_mask", [])) if prof.get("slip_mask", None) is not None else None
+        elev = np.asarray(prof.get("elev", []), dtype=float) if prof.get("elev", None) is not None else None
         if chain.size == 0 or elev is None:
             return None
 
-        slip_start_idx = None
-        slip_end_idx = None
-        if slip_mask is not None and slip_mask.shape == chain.shape:
-            try:
-                slip_keep = np.isfinite(chain) & (slip_mask == True)
-                slip_idx = np.flatnonzero(slip_keep)
-                if slip_idx.size > 0:
-                    slip_start_idx = int(slip_idx[0])
-                    slip_end_idx = int(slip_idx[-1])
-            except Exception:
-                slip_start_idx = None
-                slip_end_idx = None
+        keep = np.isfinite(chain) & np.isfinite(elev)
+        if not np.any(keep):
+            return None
+        chain_valid = np.asarray(chain[keep], dtype=float)
+        elev_valid = np.asarray(elev[keep], dtype=float)
+        order = np.argsort(chain_valid)
+        chain_valid = chain_valid[order]
+        elev_valid = elev_valid[order]
+        chain_valid, uniq_idx = np.unique(chain_valid, return_index=True)
+        elev_valid = elev_valid[uniq_idx]
+        if chain_valid.size == 0:
+            return None
 
-        rows: List[dict] = []
-        for i in range(int(chain.size)):
-            ch = float(chain[i]) if np.isfinite(chain[i]) else None
-            zz = float(elev[i]) if i < elev.size and np.isfinite(elev[i]) else None
-            if ch is None or zz is None:
-                continue
-            xx = float(x[i]) if x is not None and i < x.size and np.isfinite(x[i]) else None
-            yy = float(y[i]) if y is not None and i < y.size and np.isfinite(y[i]) else None
-            in_mask = None
-            if slip_mask is not None and i < slip_mask.size:
-                try:
-                    in_mask = bool(slip_mask[i])
-                except Exception:
-                    in_mask = None
-            rows.append({
-                "index": i,
-                "chain_m": ch,
-                "x": xx,
-                "y": yy,
-                "ground_m": zz,
-                "in_mask": in_mask,
-                "is_mask_start": bool(slip_start_idx is not None and i == slip_start_idx),
-                "is_mask_end": bool(slip_end_idx is not None and i == slip_end_idx),
-            })
+        step = float(self._GROUND_EXPORT_STEP_M)
+        tol = max(1e-9, step * 0.05)
+        chain_start = 0.0
+        chain_end = float(chain_valid[-1])
+        snapped_end = round(chain_end / step) * step
+        if abs(chain_end - snapped_end) <= tol:
+            chain_end = float(snapped_end)
 
-        payload = {
-            "line_id": line_id,
-            "source_dem_path": dem_path.replace("\\", "/"),
-            "count": len(rows),
-            "chainage_origin": self._ui3_chainage_origin(),
-            "profile_dem_source": profile_src,
-            "step_m": float(self._GROUND_EXPORT_STEP_M),
-            "mask_start_index": slip_start_idx,
-            "mask_end_index": slip_end_idx,
-            "mask_start_chain_m": (
-                float(chain[slip_start_idx])
-                if slip_start_idx is not None and 0 <= slip_start_idx < chain.size and np.isfinite(chain[slip_start_idx])
-                else None
-            ),
-            "mask_end_chain_m": (
-                float(chain[slip_end_idx])
-                if slip_end_idx is not None and 0 <= slip_end_idx < chain.size and np.isfinite(chain[slip_end_idx])
-                else None
-            ),
-            "ground": rows,
-        }
-        out_json = self._ground_json_path_for(line_id)
-        with open(out_json, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
-        return out_json
+        export_chain = np.arange(chain_start, chain_end + (step * 0.5), step, dtype=float)
+        if export_chain.size == 0 or not np.isclose(export_chain[0], chain_start):
+            export_chain = np.insert(export_chain, 0, chain_start)
+        if chain_end > float(export_chain[-1]) + tol:
+            export_chain = np.append(export_chain, chain_end)
+        elif abs(float(export_chain[-1]) - chain_end) <= tol:
+            export_chain[-1] = chain_end
+
+        export_elev = np.interp(export_chain, chain_valid, elev_valid)
+        rows: List[Tuple[str, str]] = [
+            (f"{float(ch):.1f}", f"{float(zz):.10f}".rstrip("0").rstrip("."))
+            for ch, zz in zip(export_chain, export_elev)
+            if np.isfinite(ch) and np.isfinite(zz)
+        ]
+        if not rows:
+            return None
+
+        out_csv = self._ground_csv_path_for(line_id)
+        with open(out_csv, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerows(rows)
+        return out_csv
 
     # tiện gọi ở mọi nơi hiện tại (giữ chữ ký cũ không tham số)
     def _profile_png_path(self) -> str:
@@ -4247,11 +4186,11 @@ class CurveAnalyzeTab(QWidget):
         except Exception as e:
             self._warn(f"[UI3] Cannot save vectors JSON: {e}")
         try:
-            ground_json = self._save_ground_json_for_line(line_id, geom, step_m=float(self.step_box.value()))
-            if ground_json:
-                self._log(f"[UI3] Saved ground JSON: {ground_json}")
+            ground_csv = self._save_ground_csv_for_line(line_id, geom, step_m=float(self.step_box.value()))
+            if ground_csv:
+                self._log(f"[UI3] Saved ground CSV: {ground_csv}")
         except Exception as e:
-            self._warn(f"[UI3] Cannot save ground JSON: {e}")
+            self._warn(f"[UI3] Cannot save ground CSV: {e}")
 
         # KHÔNG vẽ overlay guide nữa vì đã vẽ sẵn trong backend
 

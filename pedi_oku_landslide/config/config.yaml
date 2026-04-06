@@ -10,4 +10,4 @@ processing:
 
 crs:
   # dùng khi raster không có CRS & không tìm thấy .prj
-  fallback_epsg: "EPSG:32648"   # đổi theo khu vực của bạn
+  fallback_epsg: "EPSG:6678"   # đổi theo khu vực của bạn

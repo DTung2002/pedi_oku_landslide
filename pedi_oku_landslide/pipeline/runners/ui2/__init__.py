@@ -1,13 +1,11 @@
-from .ui2_frontend import (
+from .ui2_sections_storage import (
     SECTION_CHAINAGE_ORIGIN,
     SECTION_CSV_FIELDNAMES,
     SECTION_DIRECTION_VERSION,
-    SectionSelectionTab,
 )
 
 __all__ = [
     "SECTION_CHAINAGE_ORIGIN",
     "SECTION_CSV_FIELDNAMES",
     "SECTION_DIRECTION_VERSION",
-    "SectionSelectionTab",
 ]
