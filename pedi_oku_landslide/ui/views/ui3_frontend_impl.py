@@ -105,6 +105,71 @@ def _merge_close_boundaries(cands: List[Dict[str, Any]], tol_m: float = 1e-6) ->
     return out
 
 
+def _snap_slip_span_end_to_rdp_node(smin: float, smax: float, xs: np.ndarray, snap_tol_m: float) -> float:
+    xs = np.asarray(xs, dtype=float)
+    tol = max(0.0, float(snap_tol_m))
+    if tol <= 0.0 or xs.ndim != 1 or xs.size <= 0:
+        return float(smax)
+
+    keep = np.isfinite(xs) & (xs >= float(smin)) & (xs <= float(smax))
+    if int(np.count_nonzero(keep)) <= 0:
+        return float(smax)
+
+    snapped_end = float(np.nanmax(xs[keep]))
+    if (float(smax) - snapped_end) <= tol:
+        return snapped_end
+    return float(smax)
+
+
+def _raw_profile_slip_span_range(prof: Optional[dict]) -> Optional[Tuple[float, float]]:
+    chain = np.asarray((prof or {}).get("chain", []), dtype=float)
+    if chain.ndim != 1 or chain.size == 0:
+        return None
+
+    slip_mask = (prof or {}).get("slip_mask", None)
+    if slip_mask is not None:
+        try:
+            mask = np.asarray(slip_mask)
+            if mask.shape == chain.shape:
+                keep = np.isfinite(chain) & (mask == True)
+                if np.any(keep):
+                    return float(np.nanmin(chain[keep])), float(np.nanmax(chain[keep]))
+        except Exception:
+            pass
+
+    slip_span = (prof or {}).get("slip_span", None)
+    if slip_span:
+        try:
+            smin, smax = map(float, slip_span)
+            if smax < smin:
+                smin, smax = smax, smin
+            return float(smin), float(smax)
+        except Exception:
+            pass
+    return None
+
+
+def _effective_profile_slip_span_range(
+    prof: Optional[dict],
+    *,
+    rdp_eps_m: float = 0.5,
+    smooth_radius_m: float = 0.0,
+) -> Optional[Tuple[float, float]]:
+    raw_span = _raw_profile_slip_span_range(prof)
+    if raw_span is None:
+        return None
+    smin, smax = raw_span
+    nodes = extract_curvature_rdp_nodes(
+        prof or {},
+        rdp_eps_m=float(rdp_eps_m),
+        smooth_radius_m=float(smooth_radius_m),
+        restrict_to_slip_span=False,
+    )
+    xs = np.asarray(nodes.get("chain", []), dtype=float)
+    smax_effective = _snap_slip_span_end_to_rdp_node(float(smin), float(smax), xs, snap_tol_m=float(rdp_eps_m))
+    return float(smin), float(smax_effective)
+
+
 def _prune_first_20m_descending_curvature_pair(
     cands: List[Dict[str, Any]],
     *,
@@ -324,11 +389,6 @@ def auto_group_profile_by_criteria(
     if smax <= smin:
         return []
 
-    boundaries_meta: List[Dict[str, Any]] = [
-        _mk_boundary(float(smin), "slip_span_start", score=0.0, fixed=True),
-        _mk_boundary(float(smax), "slip_span_end", score=0.0, fixed=True),
-    ]
-
     nodes = extract_curvature_rdp_nodes(
         prof,
         rdp_eps_m=float(rdp_eps_m),
@@ -337,13 +397,20 @@ def auto_group_profile_by_criteria(
     )
     xs = np.asarray(nodes.get("chain", []), dtype=float)
     ks = np.asarray(nodes.get("curvature", []), dtype=float)
+    smax_effective = _snap_slip_span_end_to_rdp_node(float(smin), float(smax), xs, snap_tol_m=float(rdp_eps_m))
+
+    boundaries_meta: List[Dict[str, Any]] = [
+        _mk_boundary(float(smin), "slip_span_start", score=0.0, fixed=True),
+        _mk_boundary(float(smax_effective), "slip_span_end", score=0.0, fixed=True),
+    ]
+
     if bool(include_curvature_threshold) and xs.size >= 3 and ks.size == xs.size:
         for i in range(1, xs.size - 1):
             x = float(xs[i])
             k = float(ks[i])
             if not (np.isfinite(x) and np.isfinite(k)):
                 continue
-            if not (smin < x < smax):
+            if not (smin < x < smax_effective):
                 continue
             if abs(k) > float(curvature_thr_abs):
                 curv_boundary = _mk_boundary(
@@ -358,7 +425,7 @@ def auto_group_profile_by_criteria(
     if bool(include_vector_angle_zero):
         theta = np.asarray(prof.get("theta", []), dtype=float)
         chain = np.asarray(prof.get("chain", []), dtype=float)
-        boundaries_meta.extend(_vector_horizontal_boundaries(chain, theta, float(smin), float(smax)))
+        boundaries_meta.extend(_vector_horizontal_boundaries(chain, theta, float(smin), float(smax_effective)))
 
     boundaries_meta = _merge_close_boundaries(boundaries_meta, tol_m=1e-6)
     if bool(include_curvature_threshold):
@@ -375,7 +442,7 @@ def auto_group_profile_by_criteria(
         return [{
             "id": "G1",
             "start": float(smin),
-            "end": float(smax),
+            "end": float(smax_effective),
             "color": "#1f77b4",
             "start_reason": "slip_span_start",
             "end_reason": "slip_span_end",
@@ -409,22 +476,13 @@ def auto_group_profile_by_criteria(
 def clamp_groups_to_slip(prof: Dict[str, Any], groups: List[Dict[str, Any]], min_len: float = WORKFLOW_GROUP_MIN_LEN_M) -> List[Dict[str, Any]]:
     chain = np.asarray(prof.get("chain", []), dtype=float)
     elevs = np.asarray(prof.get("elev_s", []), dtype=float)
-    slip_mask = np.asarray(prof.get("slip_mask", [])) if prof.get("slip_mask", None) is not None else None
-    if slip_mask is not None and slip_mask.shape == chain.shape:
-        keep = np.isfinite(chain) & (slip_mask == True)
-        if int(np.count_nonzero(keep)) > 0:
-            smin = float(np.nanmin(chain[keep]))
-            smax = float(np.nanmax(chain[keep]))
-        elif "slip_span" in prof and prof["slip_span"]:
-            smin, smax = map(float, prof["slip_span"])
-        else:
-            keep = np.isfinite(chain) & np.isfinite(elevs)
-            if int(np.count_nonzero(keep)) <= 0:
-                return []
-            smin = float(np.nanmin(chain[keep]))
-            smax = float(np.nanmax(chain[keep]))
-    elif "slip_span" in prof and prof["slip_span"]:
-        smin, smax = map(float, prof["slip_span"])
+    eff_span = _effective_profile_slip_span_range(
+        prof,
+        rdp_eps_m=float(WORKFLOW_GROUPING_PARAMS.get("rdp_eps_m", 0.5)),
+        smooth_radius_m=float(WORKFLOW_GROUPING_PARAMS.get("smooth_radius_m", 0.0)),
+    )
+    if eff_span is not None:
+        smin, smax = eff_span
     else:
         keep = np.isfinite(chain) & np.isfinite(elevs)
         if int(np.count_nonzero(keep)) <= 0:
@@ -1247,6 +1305,17 @@ class CurveAnalyzeTab(QWidget):
         order = np.argsort(chain)
         chain = chain[order]
         elev = elev[order]
+        eff_span = _effective_profile_slip_span_range(
+            prof,
+            rdp_eps_m=float(WORKFLOW_GROUPING_PARAMS.get("rdp_eps_m", 0.5)),
+            smooth_radius_m=float(WORKFLOW_GROUPING_PARAMS.get("smooth_radius_m", 0.0)),
+        )
+        if eff_span is not None:
+            smin, smax = eff_span
+            keep = (chain >= float(smin)) & (chain <= float(smax))
+            if int(np.count_nonzero(keep)) >= 2:
+                chain = chain[keep]
+                elev = elev[keep]
         return float(chain[0]), float(elev[0]), float(chain[-1]), float(elev[-1])
 
     @staticmethod
@@ -1291,11 +1360,9 @@ class CurveAnalyzeTab(QWidget):
         line_id: Optional[str] = None,
     ) -> Optional[Tuple[float, float, float, float]]:
         lid = line_id or self._line_id_current()
-        curve_method = self._get_curve_method_for_line(lid)
-        if curve_method == "nurbs":
-            grouped = self._grouped_vector_endpoints(prof, groups or self._active_groups or [])
-            if grouped is not None:
-                return self._extend_endpoint_targets_with_cross_anchors(prof, grouped, line_id=lid)
+        grouped = self._grouped_vector_endpoints(prof, groups or self._active_groups or [])
+        if grouped is not None:
+            return self._extend_endpoint_targets_with_cross_anchors(prof, grouped, line_id=lid)
         base = self._profile_endpoints(prof)
         return self._extend_endpoint_targets_with_cross_anchors(prof, base, line_id=lid)
 
@@ -1544,6 +1611,70 @@ class CurveAnalyzeTab(QWidget):
         self._nurbs_params_by_line[line_id] = params
         return params
 
+    def _reconcile_nurbs_params_with_groups(
+        self,
+        line_id: str,
+        prof: dict,
+        groups: list,
+        base_curve: dict,
+        params: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        if not params:
+            return self._build_default_nurbs_params(line_id, prof, groups, base_curve)
+
+        ends = self._nurbs_endpoint_targets(prof, groups, line_id=line_id)
+        if ends is None:
+            return self._build_default_nurbs_params(line_id, prof, groups, base_curve)
+        s0, z0, s1, z1 = map(float, ends)
+        expected_chain = np.asarray(self._build_default_nurbs_chainage(float(s0), float(s1), groups), dtype=float)
+        if expected_chain.ndim != 1 or expected_chain.size < 2:
+            return self._build_default_nurbs_params(line_id, prof, groups, base_curve)
+
+        cps = np.asarray((params or {}).get("control_points", []), dtype=float)
+        ws = np.asarray((params or {}).get("weights", []), dtype=float)
+        deg = int((params or {}).get("degree", 3))
+        if cps.ndim != 2 or cps.shape[0] < 2:
+            return self._build_default_nurbs_params(line_id, prof, groups, base_curve)
+
+        if ws.ndim != 1 or ws.size != cps.shape[0]:
+            ws = np.ones(cps.shape[0], dtype=float)
+
+        order = np.argsort(cps[:, 0])
+        cps = cps[order]
+        ws = ws[order]
+        chain_now = np.asarray(cps[:, 0], dtype=float)
+        elev_now = np.asarray(cps[:, 1], dtype=float)
+        tol = 1e-6
+        needs_rebuild = False
+        if chain_now.size != expected_chain.size:
+            needs_rebuild = True
+        elif np.any(~np.isfinite(chain_now)) or np.any(~np.isfinite(elev_now)):
+            needs_rebuild = True
+        elif np.any(np.diff(chain_now) <= tol):
+            needs_rebuild = True
+        elif (float(chain_now[0]) < float(s0) - tol) or (float(chain_now[-1]) > float(s1) + tol):
+            needs_rebuild = True
+
+        if needs_rebuild:
+            elev_interp = np.interp(expected_chain, chain_now, elev_now)
+            weight_interp = np.interp(expected_chain, chain_now, ws)
+            elev_interp[0] = float(z0)
+            elev_interp[-1] = float(z1)
+            weight_interp = np.where(np.isfinite(weight_interp) & (weight_interp > 0.0), weight_interp, 1.0)
+            return {
+                "degree": int(max(1, min(deg, expected_chain.size - 1))),
+                "control_points": np.vstack([expected_chain, elev_interp]).T.tolist(),
+                "weights": weight_interp.tolist(),
+            }
+
+        cps[0, 0], cps[0, 1] = float(s0), float(z0)
+        cps[-1, 0], cps[-1, 1] = float(s1), float(z1)
+        return {
+            "degree": int(max(1, min(deg, cps.shape[0] - 1))),
+            "control_points": cps.tolist(),
+            "weights": ws.tolist(),
+        }
+
     def _get_nurbs_params_for_line(self, line_id: str) -> Optional[Dict[str, Any]]:
         return self._nurbs_params_by_line.get(line_id)
 
@@ -1587,6 +1718,8 @@ class CurveAnalyzeTab(QWidget):
             params = self._try_load_nurbs_params_file(line_id)
         if not params:
             params = self._build_default_nurbs_params(line_id, prof, groups, base)
+        else:
+            params = self._reconcile_nurbs_params_with_groups(line_id, prof, groups, base, params)
 
         cps = params.get("control_points", []) or []
         ww = params.get("weights", []) or []
@@ -1801,7 +1934,6 @@ class CurveAnalyzeTab(QWidget):
             return None
         out = {"chain": sx, "elev": sz}
         out = self._constrain_curve_to_cross_anchors(out)
-        out = self._clamp_curve_below_ground(out, prof=prof, clearance=0.3, keep_endpoints=True)
         return out
 
     def _on_nurbs_cp_spin_changed(self, val: int) -> None:
@@ -2240,8 +2372,6 @@ class CurveAnalyzeTab(QWidget):
             else:
                 # Last-resort fallback for display only; keep UI responsive.
                 self._warn("[UI3] NURBS fit failed after reseed; showing Bezier-like seed curve.")
-            curve = self._clamp_curve_below_ground(curve, prof=prof, clearance=0.3, keep_endpoints=True) or curve
-
             # 5) Re-render base PNG (no curve baked-in), then draw overlay in scene
             out_png = self._profile_png_path_for(line_id)
 
@@ -3388,8 +3518,25 @@ class CurveAnalyzeTab(QWidget):
                 "control_points": cps,
                 "weights": ws if len(ws) == len(cps) else [1.0] * len(cps),
             }
+            if not self._active_prof:
+                self._active_prof = self._build_profile_for_current_line()
+            groups_now = self._read_groups_from_table() or []
+            if groups_now and self._active_prof:
+                try:
+                    groups_now = clamp_groups_to_slip(self._active_prof, groups_now, min_len=WORKFLOW_GROUP_MIN_LEN_M)
+                except Exception:
+                    pass
+            self._active_groups = groups_now
+            if self._active_prof:
+                params = self._reconcile_nurbs_params_with_groups(
+                    line_id,
+                    self._active_prof,
+                    self._active_groups,
+                    self._active_base_curve or {},
+                    params,
+                )
             self._set_nurbs_params_for_line(line_id, params)
-            n_ctrl = len(cps)
+            n_ctrl = len(params.get("control_points", []) or [])
             deg = max(1, min(int(params.get("degree", 3)), n_ctrl - 1))
             self._nurbs_updating_ui = True
             try:
@@ -3402,15 +3549,6 @@ class CurveAnalyzeTab(QWidget):
             self._draw_control_points_overlay(params)
             self._set_curve_method_for_line(line_id, "nurbs")
             # Ensure live NURBS overlay is recomputed from loaded control points.
-            if not self._active_prof:
-                self._active_prof = self._build_profile_for_current_line()
-            groups_now = self._read_groups_from_table() or []
-            if groups_now and self._active_prof:
-                try:
-                    groups_now = clamp_groups_to_slip(self._active_prof, groups_now, min_len=WORKFLOW_GROUP_MIN_LEN_M)
-                except Exception:
-                    pass
-            self._active_groups = groups_now
             self._schedule_nurbs_live_update()
             self._log(f"[UI3] Loaded NURBS table from: {path}")
             return True
@@ -3929,7 +4067,11 @@ class CurveAnalyzeTab(QWidget):
             chain = np.asarray(nodes.get("chain", []), dtype=float)
             elev = np.asarray(nodes.get("elev", []), dtype=float)
             curv = np.asarray(nodes.get("curvature", []), dtype=float)
-            slip_span = self._profile_slip_span_range(prof)
+            slip_span = self._profile_slip_span_range(
+                prof,
+                rdp_eps_m=float(params.get("rdp_eps_m", 0.5)),
+                smooth_radius_m=float(params.get("smooth_radius_m", 0.0)),
+            )
             if slip_span:
                 smin, smax = slip_span
                 keep = np.isfinite(chain) & np.isfinite(elev) & np.isfinite(curv) & (chain >= float(smin)) & (chain <= float(smax))
@@ -3961,32 +4103,66 @@ class CurveAnalyzeTab(QWidget):
         return out
 
     @staticmethod
-    def _profile_slip_span_range(prof: Optional[dict]) -> Optional[Tuple[float, float]]:
-        chain = np.asarray((prof or {}).get("chain", []), dtype=float)
-        if chain.ndim != 1 or chain.size == 0:
-            return None
+    def _profile_slip_span_range(
+        prof: Optional[dict],
+        *,
+        rdp_eps_m: float = 0.5,
+        smooth_radius_m: float = 0.0,
+    ) -> Optional[Tuple[float, float]]:
+        return _effective_profile_slip_span_range(
+            prof,
+            rdp_eps_m=float(rdp_eps_m),
+            smooth_radius_m=float(smooth_radius_m),
+        )
 
+    @staticmethod
+    def _filter_rdp_nodes_to_slip_zone(
+        prof: Optional[dict],
+        chain: np.ndarray,
+        elev: np.ndarray,
+        curv: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        chain = np.asarray(chain, dtype=float)
+        elev = np.asarray(elev, dtype=float)
+        curv = np.asarray(curv, dtype=float)
+        n = int(min(chain.size, elev.size, curv.size))
+        if n <= 0:
+            empty = np.array([], dtype=float)
+            return empty, empty, empty
+        chain = chain[:n]
+        elev = elev[:n]
+        curv = curv[:n]
+
+        prof_chain = np.asarray((prof or {}).get("chain", []), dtype=float)
         slip_mask = (prof or {}).get("slip_mask", None)
+        keep = None
         if slip_mask is not None:
             try:
                 mask = np.asarray(slip_mask)
-                if mask.shape == chain.shape:
-                    keep = np.isfinite(chain) & (mask == True)
-                    if np.any(keep):
-                        return float(np.nanmin(chain[keep])), float(np.nanmax(chain[keep]))
+                if mask.shape == prof_chain.shape:
+                    slip_chain = prof_chain[np.isfinite(prof_chain) & (mask == True)]
+                    if slip_chain.size > 0:
+                        lookup = {round(float(v), 9) for v in slip_chain if np.isfinite(v)}
+                        keep = np.asarray(
+                            [round(float(v), 9) in lookup for v in chain],
+                            dtype=bool,
+                        )
             except Exception:
-                pass
+                keep = None
 
-        slip_span = (prof or {}).get("slip_span", None)
-        if slip_span:
-            try:
-                smin, smax = map(float, slip_span)
-                if smax < smin:
-                    smin, smax = smax, smin
-                return smin, smax
-            except Exception:
-                pass
-        return None
+        if keep is None:
+            slip_span = CurveAnalyzeTab._profile_slip_span_range(
+                prof,
+                rdp_eps_m=float(WORKFLOW_GROUPING_PARAMS.get("rdp_eps_m", 0.5)),
+                smooth_radius_m=float(WORKFLOW_GROUPING_PARAMS.get("smooth_radius_m", 0.0)),
+            )
+            if slip_span:
+                smin, smax = slip_span
+                keep = np.isfinite(chain) & (chain >= float(smin)) & (chain <= float(smax))
+
+        if keep is None:
+            return chain, elev, curv
+        return chain[keep], elev[keep], curv[keep]
 
     def _save_vectors_json_for_line(self, line_id: str, prof: dict, groups: Optional[List[dict]]) -> Optional[str]:
         def _to_float(arr, i: int) -> Optional[float]:
@@ -4009,7 +4185,12 @@ class CurveAnalyzeTab(QWidget):
         elev_s = np.asarray(prof.get("elev_s", []), dtype=float) if prof.get("elev_s", None) is not None else None
         theta = np.asarray(prof.get("theta", []), dtype=float) if prof.get("theta", None) is not None else None
         slip_mask = np.asarray(prof.get("slip_mask", [])) if prof.get("slip_mask", None) is not None else None
-        slip_span = self._profile_slip_span_range(prof)
+        params = self._grouping_params_current()
+        slip_span = self._profile_slip_span_range(
+            prof,
+            rdp_eps_m=float(params.get("rdp_eps_m", 0.5)),
+            smooth_radius_m=float(params.get("smooth_radius_m", 0.0)),
+        )
         if slip_span:
             span_min, span_max = slip_span
         else:
@@ -4144,9 +4325,12 @@ class CurveAnalyzeTab(QWidget):
             smooth_radius_m=float(params.get("smooth_radius_m", 0.0)),
             restrict_to_slip_span=False,
         )
-        chain = np.asarray(nodes.get("chain", []), dtype=float)
-        elev = np.asarray(nodes.get("elev", []), dtype=float)
-        curv = np.asarray(nodes.get("curvature", []), dtype=float)
+        chain, elev, curv = self._filter_rdp_nodes_to_slip_zone(
+            prof,
+            nodes.get("chain", []),
+            nodes.get("elev", []),
+            nodes.get("curvature", []),
+        )
         n = int(min(chain.size, elev.size, curv.size))
         if n <= 0:
             return None

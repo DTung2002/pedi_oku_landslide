@@ -38,6 +38,22 @@ def _merge_close_boundaries(cands: List[Dict[str, Any]], tol_m: float = 1e-6) ->
     return out
 
 
+def _snap_slip_span_end_to_rdp_node(smin: float, smax: float, xs: np.ndarray, snap_tol_m: float) -> float:
+    xs = np.asarray(xs, dtype=float)
+    tol = max(0.0, float(snap_tol_m))
+    if tol <= 0.0 or xs.ndim != 1 or xs.size <= 0:
+        return float(smax)
+
+    keep = np.isfinite(xs) & (xs >= float(smin)) & (xs <= float(smax))
+    if int(np.count_nonzero(keep)) <= 0:
+        return float(smax)
+
+    snapped_end = float(np.nanmax(xs[keep]))
+    if (float(smax) - snapped_end) <= tol:
+        return snapped_end
+    return float(smax)
+
+
 def _prune_first_20m_descending_curvature_pair(
     cands: List[Dict[str, Any]],
     *,
@@ -248,11 +264,6 @@ def auto_group_profile_by_criteria(
     if smax <= smin:
         return []
 
-    boundaries_meta: List[Dict[str, Any]] = [
-        _mk_boundary(float(smin), "slip_span_start", score=0.0, fixed=True),
-        _mk_boundary(float(smax), "slip_span_end", score=0.0, fixed=True),
-    ]
-
     nodes = extract_curvature_rdp_nodes(
         prof,
         rdp_eps_m=float(rdp_eps_m),
@@ -261,13 +272,20 @@ def auto_group_profile_by_criteria(
     )
     xs = np.asarray(nodes.get("chain", []), dtype=float)
     ks = np.asarray(nodes.get("curvature", []), dtype=float)
+    smax_effective = _snap_slip_span_end_to_rdp_node(float(smin), float(smax), xs, snap_tol_m=float(rdp_eps_m))
+
+    boundaries_meta: List[Dict[str, Any]] = [
+        _mk_boundary(float(smin), "slip_span_start", score=0.0, fixed=True),
+        _mk_boundary(float(smax_effective), "slip_span_end", score=0.0, fixed=True),
+    ]
+
     if bool(include_curvature_threshold) and xs.size >= 3 and ks.size == xs.size:
         for i in range(1, xs.size - 1):
             x = float(xs[i])
             k = float(ks[i])
             if not (np.isfinite(x) and np.isfinite(k)):
                 continue
-            if not (smin < x < smax):
+            if not (smin < x < smax_effective):
                 continue
             if abs(k) > float(curvature_thr_abs):
                 curv_boundary = _mk_boundary(x, f"curvature_gt_{float(curvature_thr_abs):.2f}", score=abs(k), fixed=False)
@@ -277,7 +295,7 @@ def auto_group_profile_by_criteria(
     if bool(include_vector_angle_zero):
         theta = np.asarray(prof.get("theta", []), dtype=float)
         chain = np.asarray(prof.get("chain", []), dtype=float)
-        boundaries_meta.extend(_vector_horizontal_boundaries(chain, theta, float(smin), float(smax)))
+        boundaries_meta.extend(_vector_horizontal_boundaries(chain, theta, float(smin), float(smax_effective)))
 
     boundaries_meta = _merge_close_boundaries(boundaries_meta, tol_m=1e-6)
     if bool(include_curvature_threshold):
@@ -290,7 +308,7 @@ def auto_group_profile_by_criteria(
         return [{
             "id": "G1",
             "start": float(smin),
-            "end": float(smax),
+            "end": float(smax_effective),
             "color": "#1f77b4",
             "start_reason": "slip_span_start",
             "end_reason": "slip_span_end",
@@ -323,22 +341,24 @@ def auto_group_profile_by_criteria(
 def clamp_groups_to_slip(prof: Dict[str, Any], groups: List[Dict[str, Any]], min_len: float = WORKFLOW_GROUP_MIN_LEN_M) -> List[Dict[str, Any]]:
     chain = np.asarray(prof.get("chain", []), dtype=float)
     elevs = np.asarray(prof.get("elev_s", []), dtype=float)
+    nodes = extract_curvature_rdp_nodes(
+        prof,
+        rdp_eps_m=0.5,
+        smooth_radius_m=0.0,
+        restrict_to_slip_span=False,
+    )
+    xs = np.asarray(nodes.get("chain", []), dtype=float)
+    raw_span = None
     slip_mask = np.asarray(prof.get("slip_mask", [])) if prof.get("slip_mask", None) is not None else None
     if slip_mask is not None and slip_mask.shape == chain.shape:
         keep = np.isfinite(chain) & (slip_mask == True)
         if int(np.count_nonzero(keep)) > 0:
-            smin = float(np.nanmin(chain[keep]))
-            smax = float(np.nanmax(chain[keep]))
-        elif "slip_span" in prof and prof["slip_span"]:
-            smin, smax = map(float, prof["slip_span"])
-        else:
-            keep = np.isfinite(chain) & np.isfinite(elevs)
-            if int(np.count_nonzero(keep)) <= 0:
-                return []
-            smin = float(np.nanmin(chain[keep]))
-            smax = float(np.nanmax(chain[keep]))
-    elif "slip_span" in prof and prof["slip_span"]:
-        smin, smax = map(float, prof["slip_span"])
+            raw_span = (float(np.nanmin(chain[keep])), float(np.nanmax(chain[keep])))
+    if raw_span is None and "slip_span" in prof and prof["slip_span"]:
+        raw_span = tuple(map(float, prof["slip_span"]))
+    if raw_span is not None:
+        smin, smax = raw_span
+        smax = _snap_slip_span_end_to_rdp_node(float(smin), float(smax), xs, snap_tol_m=0.5)
     else:
         keep = np.isfinite(chain) & np.isfinite(elevs)
         if int(np.count_nonzero(keep)) <= 0:

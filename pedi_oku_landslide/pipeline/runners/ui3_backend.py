@@ -305,6 +305,85 @@ def _clip_polyline_to_span(xs: np.ndarray, ys: np.ndarray, smin: float, smax: fl
     return np.asarray(out_x, dtype=float), np.asarray(out_y, dtype=float)
 
 
+def _raw_profile_slip_span_range(
+    prof: Dict[str, np.ndarray],
+    *,
+    chain: Optional[np.ndarray] = None,
+    finite_fallback: Optional[np.ndarray] = None,
+) -> Optional[Tuple[float, float]]:
+    chain = np.asarray(prof.get("chain", []), dtype=float) if chain is None else np.asarray(chain, dtype=float)
+    if chain.ndim != 1 or chain.size == 0:
+        return None
+
+    slip_mask = prof.get("slip_mask", None)
+    if slip_mask is not None:
+        try:
+            mask = np.asarray(slip_mask)
+            if mask.shape == chain.shape:
+                keep = np.isfinite(chain) & (mask == True)
+                if np.any(keep):
+                    return float(np.nanmin(chain[keep])), float(np.nanmax(chain[keep]))
+        except Exception:
+            pass
+
+    slip_span = prof.get("slip_span", None)
+    if slip_span:
+        try:
+            smin, smax = map(float, slip_span)
+            if smax < smin:
+                smin, smax = smax, smin
+            return float(smin), float(smax)
+        except Exception:
+            pass
+
+    if finite_fallback is not None:
+        keep = np.asarray(finite_fallback, dtype=bool)
+        if keep.shape == chain.shape and np.any(keep):
+            return float(np.nanmin(chain[keep])), float(np.nanmax(chain[keep]))
+    return None
+
+
+def _snap_slip_span_end_to_rdp_node(smin: float, smax: float, xs: np.ndarray, snap_tol_m: float) -> float:
+    xs = np.asarray(xs, dtype=float)
+    tol = max(0.0, float(snap_tol_m))
+    if tol <= 0.0 or xs.ndim != 1 or xs.size <= 0:
+        return float(smax)
+
+    keep = np.isfinite(xs) & (xs >= float(smin)) & (xs <= float(smax))
+    if int(np.count_nonzero(keep)) <= 0:
+        return float(smax)
+
+    snapped_end = float(np.nanmax(xs[keep]))
+    if (float(smax) - snapped_end) <= tol:
+        return snapped_end
+    return float(smax)
+
+
+def _effective_profile_slip_span_range(
+    prof: Dict[str, np.ndarray],
+    *,
+    rdp_eps_m: float = 0.5,
+    smooth_radius_m: float = 2.0,
+    xs: Optional[np.ndarray] = None,
+    chain: Optional[np.ndarray] = None,
+    finite_fallback: Optional[np.ndarray] = None,
+) -> Optional[Tuple[float, float]]:
+    raw_span = _raw_profile_slip_span_range(prof, chain=chain, finite_fallback=finite_fallback)
+    if raw_span is None:
+        return None
+    smin, smax = raw_span
+    if xs is None:
+        nodes = extract_curvature_rdp_nodes(
+            prof,
+            rdp_eps_m=float(rdp_eps_m),
+            smooth_radius_m=float(smooth_radius_m),
+            restrict_to_slip_span=False,
+        )
+        xs = np.asarray(nodes.get("chain", []), dtype=float)
+    smax_effective = _snap_slip_span_end_to_rdp_node(float(smin), float(smax), np.asarray(xs, dtype=float), float(rdp_eps_m))
+    return float(smin), float(smax_effective)
+
+
 def extract_curvature_rdp_nodes(
     prof: Dict[str, np.ndarray],
     *,
@@ -332,15 +411,11 @@ def extract_curvature_rdp_nodes(
         return empty
     full_min = float(np.nanmin(chain[finite0]))
     full_max = float(np.nanmax(chain[finite0]))
-    if prof.get("slip_span"):
-        try:
-            smin, smax = map(float, prof.get("slip_span"))
-            if smax < smin:
-                smin, smax = smax, smin
-        except Exception:
-            smin, smax = full_min, full_max
-    else:
+    raw_span = _raw_profile_slip_span_range(prof, chain=chain, finite_fallback=finite0)
+    if raw_span is None:
         smin, smax = full_min, full_max
+    else:
+        smin, smax = raw_span
 
     if int(np.count_nonzero(finite)) < 3:
         return empty
@@ -363,8 +438,9 @@ def extract_curvature_rdp_nodes(
     k_x = np.asarray([p[0] for p in rdp_pts], dtype=float)
     k_z = np.asarray([p[1] for p in rdp_pts], dtype=float)
     k_vals = np.asarray(_curvature_points_from_rdp(rdp_pts), dtype=float)
+    smax_effective = _snap_slip_span_end_to_rdp_node(float(smin), float(smax), k_x, snap_tol_m=float(rdp_eps_m))
     if restrict_to_slip_span:
-        keep = np.isfinite(k_x) & (k_x >= float(smin)) & (k_x <= float(smax))
+        keep = np.isfinite(k_x) & (k_x >= float(smin)) & (k_x <= float(smax_effective))
         k_x = k_x[keep]
         k_z = k_z[keep]
         k_vals = k_vals[keep]
@@ -373,7 +449,7 @@ def extract_curvature_rdp_nodes(
         "elev": k_z,
         "curvature": k_vals,
         "smin": np.asarray([float(smin)], dtype=float),
-        "smax": np.asarray([float(smax)], dtype=float),
+        "smax": np.asarray([float(smax_effective)], dtype=float),
     }
 
 
@@ -395,12 +471,15 @@ def _curvature_plot_series(
     ys = np.asarray(nodes.get("curvature", []), dtype=float)
     if xs.size < 2 or ys.size != xs.size:
         return np.array([], dtype=float), np.array([], dtype=float)
-    if prof.get("slip_span"):
-        try:
-            smin, smax = map(float, prof.get("slip_span"))
-            return _clip_polyline_to_span(xs, ys, float(smin), float(smax))
-        except Exception:
-            return xs, ys
+    eff_span = _effective_profile_slip_span_range(
+        prof,
+        rdp_eps_m=float(rdp_eps_m),
+        smooth_radius_m=float(smooth_radius_m),
+        xs=xs,
+    )
+    if eff_span is not None:
+        smin, smax = eff_span
+        return _clip_polyline_to_span(xs, ys, float(smin), float(smax))
     return xs, ys
 
 
@@ -669,9 +748,16 @@ def render_profile_png(
     elif profile_src == "smooth":
         ground_label = "Ground (smoothed DEM)"
 
+    effective_span = _effective_profile_slip_span_range(
+        prof,
+        rdp_eps_m=float(curvature_rdp_eps_m),
+        smooth_radius_m=float(curvature_smooth_radius_m),
+        chain=chain,
+        finite_fallback=np.isfinite(chain) & np.isfinite(elev_s),
+    )
     if (x_min is None) or (x_max is None):
-        if "slip_span" in prof and prof["slip_span"]:
-            smin, smax = prof["slip_span"]
+        if effective_span is not None:
+            smin, smax = effective_span
             if x_min is None:
                 x_min = float(smin)
             if x_max is None:
@@ -726,30 +812,16 @@ def render_profile_png(
                     slip_mask_arr = (sm == True)
         except Exception:
             slip_mask_arr = None
-        if slip_mask_arr is not None:
-            finite_span = np.isfinite(chain) & np.isfinite(elev_s) & slip_mask_arr
+        if effective_span is not None:
+            plot_span_min, plot_span_max = map(float, effective_span)
+        else:
+            finite_span = np.isfinite(chain) & np.isfinite(elev_s)
             if finite_span.any():
                 plot_span_min = float(np.nanmin(chain[finite_span]))
                 plot_span_max = float(np.nanmax(chain[finite_span]))
             else:
                 plot_span_min = None
                 plot_span_max = None
-        else:
-            plot_span_min = None
-            plot_span_max = None
-        if (plot_span_min is None) or (plot_span_max is None):
-            if "slip_span" in prof and prof["slip_span"]:
-                plot_span_min, plot_span_max = map(float, prof["slip_span"])
-                if plot_span_max < plot_span_min:
-                    plot_span_min, plot_span_max = plot_span_max, plot_span_min
-            else:
-                finite_span = np.isfinite(chain) & np.isfinite(elev_s)
-                if finite_span.any():
-                    plot_span_min = float(np.nanmin(chain[finite_span]))
-                    plot_span_max = float(np.nanmax(chain[finite_span]))
-                else:
-                    plot_span_min = None
-                    plot_span_max = None
         prof_curv = dict(prof)
         if (plot_span_min is not None) and (plot_span_max is not None):
             prof_curv["slip_span"] = (float(plot_span_min), float(plot_span_max))
@@ -780,8 +852,8 @@ def render_profile_png(
                 smooth_radius_m=float(curvature_smooth_radius_m),
             )
         if group_ranges:
-            if "slip_span" in prof and prof["slip_span"]:
-                smin, smax = prof["slip_span"]
+            if (plot_span_min is not None) and (plot_span_max is not None):
+                smin, smax = float(plot_span_min), float(plot_span_max)
             else:
                 smin = float(np.nanmin(prof["chain"][finite_prof]))
                 smax = float(np.nanmax(prof["chain"][finite_prof]))
