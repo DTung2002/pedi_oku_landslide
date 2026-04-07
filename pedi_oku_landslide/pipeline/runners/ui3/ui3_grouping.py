@@ -118,6 +118,7 @@ def _prune_vector_zero_boundaries(
     curvature_reason_prefix: str = "curvature_gt_",
     vector_reason: str = "vector_angle_zero_deg",
 ) -> List[Dict[str, Any]]:
+    _ = first_curvature_gap_m, repeat_vector_gap_m, curvature_reason_prefix
     if not cands:
         return []
     out = [dict(c) for c in sorted(cands, key=lambda t: float(t.get("x", 0.0)))]
@@ -133,23 +134,6 @@ def _prune_vector_zero_boundaries(
             out[idx] = cur
         else:
             del out[idx]
-
-    while True:
-        first_idx = next((i for i, c in enumerate(out) if _has_vector_reason(c)), None)
-        if first_idx is None:
-            break
-        curv_idx = None
-        for j in range(first_idx - 1, -1, -1):
-            if _has_curvature_reason(out[j], curvature_reason_prefix):
-                curv_idx = j
-                break
-        if curv_idx is None:
-            break
-        dist = float(out[first_idx]["x"]) - float(out[curv_idx]["x"])
-        if dist < float(first_curvature_gap_m):
-            _drop_vector_reason(first_idx)
-            continue
-        break
 
     first_kept_vector_x = None
     i = 0
