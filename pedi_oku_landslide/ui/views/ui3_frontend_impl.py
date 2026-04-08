@@ -732,10 +732,7 @@ class CurveAnalyzeTab(QWidget):
         self.lines_path = ""
         self.slip_path = ""
         self.profile_source_combo = None
-        self.curvature_check = None
-        self.vector_zero_check = None
         self.rdp_eps_spin = None
-        self.smooth_radius_spin = None
 
         # UI widgets chính (để dùng lại)
         self.line_combo = None
@@ -1949,16 +1946,16 @@ class CurveAnalyzeTab(QWidget):
         self._schedule_nurbs_live_update()
 
     def _nurbs_png_path_for(self, line_id: str) -> str:
-        return os.path.join(self._curve_dir(), f"profile_{line_id}_nurbs.png")
+        return os.path.join(self._preview_dir(), f"profile_{line_id}_nurbs.png")
 
     def _nurbs_json_path_for(self, line_id: str) -> str:
         return os.path.join(self._preview_dir(), f"profile_{line_id}_nurbs.json")
 
     def _ground_csv_path_for(self, line_id: str) -> str:
-        return os.path.join(self._curve_dir(), f"{line_id}_ground.csv")
+        return os.path.join(self._ground_dir(), f"{line_id}_ground.csv")
 
     def _rdp_csv_path_for(self, line_id: str) -> str:
-        return os.path.join(self._curve_dir(), f"{line_id}_RDP.csv")
+        return os.path.join(self._ground_dir(), f"{line_id}_RDP.csv")
 
     def _on_nurbs_save(self) -> None:
         if not self._active_prof:
@@ -2047,30 +2044,8 @@ class CurveAnalyzeTab(QWidget):
             with open(curve_json, "w", encoding="utf-8") as f:
                 json.dump(nurbs_curve_payload, f, ensure_ascii=False, indent=2)
 
-            # 2) group_Line_n__(n_m).json -> group ID, start, end
+            # 2) ui3/groups/Line_n__(n_m).json -> canonical groups file for UI3
             table_groups = self._read_groups_from_table()
-            group_rows = []
-            for g in (table_groups or []):
-                group_rows.append({
-                    "group_id": str(g.get("id", "")),
-                    "start": float(g.get("start")),
-                    "end": float(g.get("end")),
-                })
-            group_payload = {
-                "line_id": line_id,
-                "count": int(len(group_rows)),
-                "groups": group_rows,
-                "chainage_origin": self._ui3_chainage_origin(),
-                "rdp_eps_m": self._current_rdp_eps_m(),
-                "smooth_radius_m": self._current_smooth_radius_m(),
-                "include_curvature_threshold": self._include_curvature_threshold(),
-                "include_vector_angle_zero": self._include_vector_angle_zero(),
-            }
-            group_json = os.path.join(curve_dir, f"group_{line_id}.json")
-            with open(group_json, "w", encoding="utf-8") as f:
-                json.dump(group_payload, f, ensure_ascii=False, indent=2)
-
-            # 2b) ui3/groups/Line_n__(n_m).json -> canonical groups file for UI3
             groups_ui3_json = self._groups_json_path_for(line_id)
             groups_for_json = self._groups_with_median_theta(table_groups, self._active_prof)
             group_method = None
@@ -2124,7 +2099,6 @@ class CurveAnalyzeTab(QWidget):
             self._ok(f"[UI3] Saved NURBS: {path}")
             self._log(f"[UI3] Saved NURBS params: {jpath}")
             self._log(f"[UI3] Saved NURBS curve: {curve_json}")
-            self._log(f"[UI3] Saved group table: {group_json}")
             self._log(f"[UI3] Saved groups JSON: {groups_ui3_json}")
             self._log(f"[UI3] Saved NURBS info: {nurbs_info_json}")
             try:
@@ -2564,10 +2538,6 @@ class CurveAnalyzeTab(QWidget):
         _set_table_visible_rows(self.group_table, rows=6, row_h=30)
         lg.addWidget(self.group_table)
 
-        self.curvature_check = QCheckBox("Use curvature > 0.02 as boundary")
-        self.curvature_check.setChecked(True)
-        lg.addWidget(self.curvature_check)
-
         row_curv = QHBoxLayout()
         row_curv.addWidget(QLabel("RDP eps (m):"))
         self.rdp_eps_spin = KeyboardOnlyDoubleSpinBox()
@@ -2577,19 +2547,7 @@ class CurveAnalyzeTab(QWidget):
         self.rdp_eps_spin.setValue(float(WORKFLOW_GROUPING_PARAMS.get("rdp_eps_m", 0.5)))
         self.rdp_eps_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
         row_curv.addWidget(self.rdp_eps_spin)
-        row_curv.addWidget(QLabel("Smooth radius (m):"))
-        self.smooth_radius_spin = KeyboardOnlyDoubleSpinBox()
-        self.smooth_radius_spin.setDecimals(3)
-        self.smooth_radius_spin.setRange(0.0, 1000.0)
-        self.smooth_radius_spin.setSingleStep(0.1)
-        self.smooth_radius_spin.setValue(float(WORKFLOW_GROUPING_PARAMS.get("smooth_radius_m", 0.0)))
-        self.smooth_radius_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
-        row_curv.addWidget(self.smooth_radius_spin)
         lg.addLayout(row_curv)
-
-        self.vector_zero_check = QCheckBox("Use vector = 0° as boundary")
-        self.vector_zero_check.setChecked(True)
-        lg.addWidget(self.vector_zero_check)
 
         rowg = QHBoxLayout()
         self.btn_add_g = QPushButton("Add")
@@ -2814,24 +2772,10 @@ class CurveAnalyzeTab(QWidget):
             self._log(f"[UI3] Sampling step synced to raw DEM pixel size: {step_m:.4f} m")
 
     def _include_vector_angle_zero(self) -> bool:
-        try:
-            if self.vector_zero_check is not None:
-                return bool(self.vector_zero_check.isChecked())
-        except Exception:
-            pass
-        return bool(WORKFLOW_GROUPING_PARAMS.get("include_vector_angle_zero", True))
+        return True
 
     def _include_curvature_threshold(self) -> bool:
-        try:
-            if self.curvature_check is not None:
-                return bool(self.curvature_check.isChecked())
-        except Exception:
-            pass
-        if not meta_inputs:
-            meta_inputs = dict(backend_inputs.get("meta_inputs", {}) or {})
-        if not meta_processed:
-            meta_processed = dict(backend_inputs.get("meta_processed", {}) or {})
-        return bool(WORKFLOW_GROUPING_PARAMS.get("include_curvature_threshold", True))
+        return True
 
     def _current_rdp_eps_m(self) -> float:
         try:
@@ -2844,14 +2788,7 @@ class CurveAnalyzeTab(QWidget):
         return float(WORKFLOW_GROUPING_PARAMS.get("rdp_eps_m", 0.5))
 
     def _current_smooth_radius_m(self) -> float:
-        try:
-            if self.smooth_radius_spin is not None:
-                val = float(self.smooth_radius_spin.value())
-                if np.isfinite(val) and val >= 0.0:
-                    return float(val)
-        except Exception:
-            pass
-        return float(WORKFLOW_GROUPING_PARAMS.get("smooth_radius_m", 0.0))
+        return 0.0
 
     def _grouping_params_current(self) -> Dict[str, Any]:
         params = dict(WORKFLOW_GROUPING_PARAMS)
@@ -2863,23 +2800,8 @@ class CurveAnalyzeTab(QWidget):
 
     def _apply_group_json_settings(self, data: Dict[str, Any], *, log_paths: bool = False) -> None:
         try:
-            if self.curvature_check is not None and "include_curvature_threshold" in data:
-                self.curvature_check.setChecked(bool(data.get("include_curvature_threshold")))
-        except Exception:
-            pass
-        try:
-            if self.vector_zero_check is not None and "include_vector_angle_zero" in data:
-                self.vector_zero_check.setChecked(bool(data.get("include_vector_angle_zero")))
-        except Exception:
-            pass
-        try:
             if self.rdp_eps_spin is not None and "rdp_eps_m" in data:
                 self.rdp_eps_spin.setValue(max(0.0, float(data.get("rdp_eps_m"))))
-        except Exception:
-            pass
-        try:
-            if self.smooth_radius_spin is not None and "smooth_radius_m" in data:
-                self.smooth_radius_spin.setValue(max(0.0, float(data.get("smooth_radius_m"))))
         except Exception:
             pass
         try:
@@ -3256,23 +3178,8 @@ class CurveAnalyzeTab(QWidget):
         except Exception:
             pass
         try:
-            if self.curvature_check is not None:
-                self.curvature_check.setChecked(True)
-        except Exception:
-            pass
-        try:
             if self.rdp_eps_spin is not None:
                 self.rdp_eps_spin.setValue(float(WORKFLOW_GROUPING_PARAMS.get("rdp_eps_m", 0.5)))
-        except Exception:
-            pass
-        try:
-            if self.smooth_radius_spin is not None:
-                self.smooth_radius_spin.setValue(float(WORKFLOW_GROUPING_PARAMS.get("smooth_radius_m", 0.0)))
-        except Exception:
-            pass
-        try:
-            if self.vector_zero_check is not None:
-                self.vector_zero_check.setChecked(True)
         except Exception:
             pass
 
@@ -3437,10 +3344,6 @@ class CurveAnalyzeTab(QWidget):
             return True
         return False
 
-    def _try_load_group_table_from_curve(self, line_id: str) -> bool:
-        path = self._curve_group_json_path_for(line_id)
-        return self._load_group_table_from_path(path, line_id)
-
     def _on_load_group_info(self) -> None:
         if self.line_combo.count() == 0:
             self._warn("[UI3] No line selected.")
@@ -3590,9 +3493,7 @@ class CurveAnalyzeTab(QWidget):
 
     def _load_saved_curve_state_for_current_line(self) -> None:
         line_id = self._line_id_current()
-        loaded_groups = self._try_load_group_table_from_curve(line_id)
-        if not loaded_groups:
-            self._populate_group_table_for_current_line()
+        self._populate_group_table_for_current_line()
 
         prof = self._build_profile_for_current_line()
         if prof is not None:
@@ -3656,24 +3557,21 @@ class CurveAnalyzeTab(QWidget):
         os.makedirs(path, exist_ok=True)
         return path
 
-    def _vectors_dir(self) -> str:
-        path = os.path.join(self._ui3_run_dir(), "vectors")
-        os.makedirs(path, exist_ok=True)
-        return path
-
     def _curve_dir(self) -> str:
         path = os.path.join(self._ui3_run_dir(), "curve")
         os.makedirs(path, exist_ok=True)
         return path
 
-    def _curve_group_json_path_for(self, line_id: str) -> str:
-        return os.path.join(self._curve_dir(), f"group_{line_id}.json")
+    def _ground_dir(self) -> str:
+        path = os.path.join(self._ui3_run_dir(), "ground")
+        os.makedirs(path, exist_ok=True)
+        return path
 
     def _curve_nurbs_info_json_path_for(self, line_id: str) -> str:
         return os.path.join(self._curve_dir(), f"nurbs_info_{line_id}.json")
 
     def _curve_nurbs_png_path_for(self, line_id: str) -> str:
-        return os.path.join(self._curve_dir(), f"profile_{line_id}_nurbs.png")
+        return os.path.join(self._preview_dir(), f"profile_{line_id}_nurbs.png")
 
     def _line_id_current(self) -> str:
         # dùng id ổn định để tên file không đụng nhau (ưu tiên tên trong combo)
@@ -3690,9 +3588,6 @@ class CurveAnalyzeTab(QWidget):
     def _groups_json_path_for(self, line_id: str) -> str:
         return os.path.join(self._groups_dir(), f"{line_id}.json")
 
-    def _vectors_json_path_for(self, line_id: str) -> str:
-        return os.path.join(self._vectors_dir(), f"{line_id}.json")
-
     def _ui2_intersections_json_path(self) -> str:
         run_dir = (self._ctx.get("run_dir") or "").strip()
         if not run_dir:
@@ -3700,7 +3595,7 @@ class CurveAnalyzeTab(QWidget):
         return os.path.join(run_dir, "ui2", "intersections_main_cross.json")
 
     def _anchors_xyz_json_path(self) -> str:
-        return os.path.join(self._ui3_run_dir(), "anchors_xyz.json")
+        return os.path.join(self._ui3_run_dir(), "anchors.json")
 
     @staticmethod
     def _normalize_line_role(line_role: str, line_id: str = "") -> str:
@@ -3934,12 +3829,6 @@ class CurveAnalyzeTab(QWidget):
             if key[0] and key[1]:
                 index_by_key[key] = i
 
-        try:
-            import datetime as _dt
-            saved_at = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        except Exception:
-            saved_at = ""
-
         updated = 0
         for it in inter_items:
             try:
@@ -3960,10 +3849,6 @@ class CurveAnalyzeTab(QWidget):
                 "z": z_val,
                 "s_on_main": float(it.get("s_on_main")),
                 "s_on_cross": float(it.get("s_on_cross")),
-                "status": str(it.get("status", "ok")),
-                "saved_at": saved_at,
-                "curve_method": "nurbs",
-                "source_ui3_line_id": self._line_id_current(),
             }
             key = (rec["main_line_id"], rec["cross_line_id"])
             if key in index_by_key:
@@ -3976,8 +3861,6 @@ class CurveAnalyzeTab(QWidget):
         payload = {
             "version": 1,
             "items": items,
-            "updated_at": saved_at,
-            "source_intersections": inter.get("_path", ""),
         }
         out_path = self._save_anchors_xyz(payload)
         return out_path, updated
@@ -4145,81 +4028,6 @@ class CurveAnalyzeTab(QWidget):
             return chain, elev, curv
         return chain[keep], elev[keep], curv[keep]
 
-    def _save_vectors_json_for_line(self, line_id: str, prof: dict, groups: Optional[List[dict]]) -> Optional[str]:
-        def _to_float(arr, i: int) -> Optional[float]:
-            if arr is None:
-                return None
-            try:
-                v = float(arr[i])
-            except Exception:
-                return None
-            return v if np.isfinite(v) else None
-
-        chain = np.asarray(prof.get("chain", []), dtype=float)
-        n = int(chain.size)
-        if n == 0:
-            return None
-
-        x = np.asarray(prof.get("x", []), dtype=float) if prof.get("x", None) is not None else None
-        y = np.asarray(prof.get("y", []), dtype=float) if prof.get("y", None) is not None else None
-        elev = np.asarray(prof.get("elev", []), dtype=float) if prof.get("elev", None) is not None else None
-        elev_s = np.asarray(prof.get("elev_s", []), dtype=float) if prof.get("elev_s", None) is not None else None
-        theta = np.asarray(prof.get("theta", []), dtype=float) if prof.get("theta", None) is not None else None
-        slip_mask = np.asarray(prof.get("slip_mask", [])) if prof.get("slip_mask", None) is not None else None
-        params = self._grouping_params_current()
-        slip_span = self._profile_slip_span_range(
-            prof,
-            rdp_eps_m=float(params.get("rdp_eps_m", 0.5)),
-            smooth_radius_m=float(params.get("smooth_radius_m", 0.0)),
-        )
-        if slip_span:
-            span_min, span_max = slip_span
-        else:
-            span_min = span_max = None
-
-        rows: List[dict] = []
-        for i in range(n):
-            ch = _to_float(chain, i)
-            if ch is None:
-                continue
-            if (span_min is not None) and (span_max is not None) and not (float(span_min) <= float(ch) <= float(span_max)):
-                continue
-            in_slip = None
-            if slip_mask is not None and i < slip_mask.size:
-                try:
-                    in_slip = bool(slip_mask[i])
-                except Exception:
-                    in_slip = None
-            gid = None
-            if in_slip is not False:
-                gid, _ = self._group_for_chainage(groups or [], ch)
-            rows.append({
-                "index": i,
-                "chain_m": ch,
-                "x": _to_float(x, i),
-                "y": _to_float(y, i),
-                "elev_raw_m": _to_float(elev, i),
-                "elev_s_m": _to_float(elev_s, i),
-                "theta_deg": _to_float(theta, i),
-                "in_slip_zone": in_slip,
-                "group_id": gid,
-            })
-
-        payload = {
-            "line_id": line_id,
-            "count": len(rows),
-            "chainage_origin": self._ui3_chainage_origin(),
-            "profile_dem_source": self._current_profile_source_key(),
-            "profile_dem_path": str(getattr(self, "ground_export_dem_path", "") or "").replace("\\", "/"),
-            "slip_span": ([float(span_min), float(span_max)] if (span_min is not None and span_max is not None) else None),
-            "groups": groups or [],
-            "vectors": rows,
-        }
-        out_json = self._vectors_json_path_for(line_id)
-        with open(out_json, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
-        return out_json
-
     def _save_ground_csv_for_line(self, line_id: str, geom, step_m: float) -> Optional[str]:
         profile_src = self._current_profile_source_key()
         dem_path = str(getattr(self, "ground_export_dem_path", "") or "").strip()
@@ -4247,37 +4055,29 @@ class CurveAnalyzeTab(QWidget):
 
         chain = np.asarray(prof.get("chain", []), dtype=float)
         elev = np.asarray(prof.get("elev", []), dtype=float) if prof.get("elev", None) is not None else None
-        prof_x = np.asarray(prof.get("x", []), dtype=float) if prof.get("x", None) is not None else None
-        prof_y = np.asarray(prof.get("y", []), dtype=float) if prof.get("y", None) is not None else None
-        if chain.size == 0 or elev is None or prof_x is None or prof_y is None:
+        if chain.size == 0 or elev is None:
             return None
 
-        n = min(chain.size, elev.size, prof_x.size, prof_y.size)
+        n = min(chain.size, elev.size)
         if n <= 0:
             return None
 
         chain = chain[:n]
         elev = elev[:n]
-        prof_x = prof_x[:n]
-        prof_y = prof_y[:n]
 
-        keep = np.isfinite(chain) & np.isfinite(elev) & np.isfinite(prof_x) & np.isfinite(prof_y)
+        keep = np.isfinite(chain) & np.isfinite(elev)
         if not np.any(keep):
             return None
         chain_valid = np.asarray(chain[keep], dtype=float)
         elev_valid = np.asarray(elev[keep], dtype=float)
-        x_valid = np.asarray(prof_x[keep], dtype=float)
-        y_valid = np.asarray(prof_y[keep], dtype=float)
 
-        rows: List[Tuple[str, str, str, str]] = [
+        rows: List[Tuple[str, str]] = [
             (
                 f"{float(ch):.1f}",
                 f"{float(zz):.10f}".rstrip("0").rstrip("."),
-                f"{float(xx):.10f}".rstrip("0").rstrip("."),
-                f"{float(yy):.10f}".rstrip("0").rstrip("."),
             )
-            for ch, zz, xx, yy in zip(chain_valid, elev_valid, x_valid, y_valid)
-            if np.isfinite(ch) and np.isfinite(zz) and np.isfinite(xx) and np.isfinite(yy)
+            for ch, zz in zip(chain_valid, elev_valid)
+            if np.isfinite(ch) and np.isfinite(zz)
         ]
         if not rows:
             return None
@@ -4379,12 +4179,6 @@ class CurveAnalyzeTab(QWidget):
         self._active_base_curve = None
         self._active_curve = None
 
-        try:
-            vec_json = self._save_vectors_json_for_line(line_id, prof, groups if groups else [])
-            if vec_json:
-                self._log(f"[UI3] Saved vectors JSON: {vec_json}")
-        except Exception as e:
-            self._warn(f"[UI3] Cannot save vectors JSON: {e}")
         try:
             ground_csv = self._save_ground_csv_for_line(line_id, geom, step_m=float(self.step_box.value()))
             if ground_csv:
