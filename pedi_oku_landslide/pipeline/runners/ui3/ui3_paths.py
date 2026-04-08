@@ -1,5 +1,7 @@
 import json
 import os
+from dataclasses import dataclass
+from typing import Dict
 
 from pedi_oku_landslide.core.paths import OUTPUT_ROOT
 
@@ -8,7 +10,7 @@ def _out(*parts: str) -> str:
     return os.path.join(OUTPUT_ROOT, *parts)
 
 
-def auto_paths() -> dict:
+def auto_paths() -> Dict[str, str]:
     def pick_first_exists(cands):
         for p in cands:
             if p and os.path.exists(p):
@@ -71,3 +73,64 @@ def auto_paths() -> dict:
     ])
 
     return {"dem": dem, "dem_orig": dem_orig, "dx": dx, "dy": dy, "dz": dz, "lines": lines, "slip": slip}
+
+
+@dataclass(frozen=True)
+class UI3RunPaths:
+    run_dir: str
+
+    def ui3_run_dir(self) -> str:
+        if not self.run_dir:
+            raise RuntimeError("[UI3] Run context is empty. Call set_context() first.")
+        path = os.path.join(self.run_dir, "ui3")
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def preview_dir(self) -> str:
+        path = os.path.join(self.ui3_run_dir(), "preview")
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def groups_dir(self) -> str:
+        path = os.path.join(self.ui3_run_dir(), "groups")
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def curve_dir(self) -> str:
+        path = os.path.join(self.ui3_run_dir(), "curve")
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def ground_dir(self) -> str:
+        path = os.path.join(self.ui3_run_dir(), "ground")
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def profile_png_path_for(self, line_id: str) -> str:
+        return os.path.join(self.preview_dir(), f"profile_{line_id}.png")
+
+    def nurbs_png_path_for(self, line_id: str) -> str:
+        return os.path.join(self.preview_dir(), f"profile_{line_id}_nurbs.png")
+
+    def nurbs_json_path_for(self, line_id: str) -> str:
+        return os.path.join(self.preview_dir(), f"profile_{line_id}_nurbs.json")
+
+    def groups_json_path_for(self, line_id: str) -> str:
+        return os.path.join(self.groups_dir(), f"{line_id}.json")
+
+    def ground_csv_path_for(self, line_id: str) -> str:
+        return os.path.join(self.ground_dir(), f"{line_id}_ground.csv")
+
+    def rdp_csv_path_for(self, line_id: str) -> str:
+        return os.path.join(self.ground_dir(), f"{line_id}_RDP.csv")
+
+    def curve_nurbs_info_json_path_for(self, line_id: str) -> str:
+        return os.path.join(self.curve_dir(), f"nurbs_info_{line_id}.json")
+
+    def anchors_json_path(self) -> str:
+        return os.path.join(self.ui3_run_dir(), "anchors.json")
+
+    def ui2_intersections_json_path(self) -> str:
+        if not self.run_dir:
+            raise RuntimeError("[UI3] Run context is empty. Call set_context() first.")
+        return os.path.join(self.run_dir, "ui2", "intersections_main_cross.json")

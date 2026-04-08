@@ -8,9 +8,9 @@ from PyQt5.QtWidgets import (
     QDialog, QScrollArea
 )
 from PyQt5.QtGui import QFont, QFontDatabase
-from .views.analyze_tab import AnalyzeTab
-from .views.section_tab import SectionSelectionTab
-from .views.curve_tab import CurveAnalyzeTab
+from .views.ui1_frontend import AnalyzeTab
+from .views.ui2_frontend import SectionSelectionTab
+from .views.ui3_frontend import CurveAnalyzeTab
 from .views.ui4_frontend import UI4FrontendTab
 from .views.settings_dialog import SettingsDialog
 from pedi_oku_landslide.app.workflow import MainWorkflowCoordinator
