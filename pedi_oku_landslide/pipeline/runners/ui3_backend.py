@@ -242,23 +242,14 @@ def _profile_elevation_for_curvature(prof: Dict[str, np.ndarray]) -> np.ndarray:
     elev = np.asarray(prof.get("elev", []), dtype=float)
     elev_s = np.asarray(prof.get("elev_s", []), dtype=float)
     elev_orig = np.asarray(prof.get("elev_orig", []), dtype=float)
-    src = str(prof.get("profile_dem_source", "") or "").strip().lower()
 
     def _valid(arr: np.ndarray) -> bool:
         return arr.ndim == 1 and arr.size == chain.size
 
-    if src == "raw":
-        for arr in (elev, elev_s, elev_orig):
-            if _valid(arr):
-                return arr
-    elif src == "smooth":
-        for arr in (elev_s, elev, elev_orig):
-            if _valid(arr):
-                return arr
-    else:
-        for arr in (elev_s, elev, elev_orig):
-            if _valid(arr):
-                return arr
+    # UI3 RDP/curvature must always be derived from the raw DEM profile.
+    for arr in (elev, elev_orig, elev_s):
+        if _valid(arr):
+            return arr
     return np.array([], dtype=float)
 
 
@@ -425,12 +416,12 @@ def extract_curvature_rdp_nodes(
     order = np.argsort(chain_w)
     chain_w = chain_w[order]
     elev_w = elev_w[order]
-    elev_sm = _mean_filter_profile_by_chain(chain_w, elev_w, float(smooth_radius_m))
-    finite_sm = np.isfinite(chain_w) & np.isfinite(elev_sm)
+    _ = smooth_radius_m
+    finite_sm = np.isfinite(chain_w) & np.isfinite(elev_w)
     if int(np.count_nonzero(finite_sm)) < 3:
         return empty
 
-    pts = list(zip(chain_w[finite_sm].tolist(), elev_sm[finite_sm].tolist()))
+    pts = list(zip(chain_w[finite_sm].tolist(), elev_w[finite_sm].tolist()))
     rdp_pts = _rdp_polyline(pts, float(rdp_eps_m))
     if len(rdp_pts) < 2:
         return empty

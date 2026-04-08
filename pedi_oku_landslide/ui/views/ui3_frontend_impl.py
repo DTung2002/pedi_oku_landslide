@@ -892,7 +892,7 @@ class CurveAnalyzeTab(QWidget):
                 "head_w": 4.0,
                 "ungrouped_color": self._get_ungrouped_color(),
                 "curvature_rdp_eps_m": self._current_rdp_eps_m(),
-                "curvature_smooth_radius_m": self._current_smooth_radius_m(),
+                "curvature_smooth_radius_m": 0.0,
             },
             groups=groups,
             overlay_curves=overlay_curves,
@@ -946,7 +946,7 @@ class CurveAnalyzeTab(QWidget):
                 "profile_dem_source": self._current_profile_source_key(),
                 "profile_dem_path": str(getattr(self, "dem_path", "") or "").replace("\\", "/"),
                 "rdp_eps_m": self._current_rdp_eps_m(),
-                "smooth_radius_m": self._current_smooth_radius_m(),
+                "smooth_radius_m": 0.0,
                 "include_curvature_threshold": self._include_curvature_threshold(),
                 "include_vector_angle_zero": self._include_vector_angle_zero(),
             }
@@ -1955,7 +1955,7 @@ class CurveAnalyzeTab(QWidget):
         return os.path.join(self._preview_dir(), f"profile_{line_id}_nurbs.json")
 
     def _ground_csv_path_for(self, line_id: str) -> str:
-        return os.path.join(self._curve_dir(), f"ground_{line_id}_raw.csv")
+        return os.path.join(self._curve_dir(), f"{line_id}_ground.csv")
 
     def _rdp_csv_path_for(self, line_id: str) -> str:
         return os.path.join(self._curve_dir(), f"{line_id}_RDP.csv")
@@ -2856,7 +2856,7 @@ class CurveAnalyzeTab(QWidget):
     def _grouping_params_current(self) -> Dict[str, Any]:
         params = dict(WORKFLOW_GROUPING_PARAMS)
         params["rdp_eps_m"] = self._current_rdp_eps_m()
-        params["smooth_radius_m"] = self._current_smooth_radius_m()
+        params["smooth_radius_m"] = 0.0
         params["include_curvature_threshold"] = self._include_curvature_threshold()
         params["include_vector_angle_zero"] = self._include_vector_angle_zero()
         return params
@@ -4221,7 +4221,6 @@ class CurveAnalyzeTab(QWidget):
         return out_json
 
     def _save_ground_csv_for_line(self, line_id: str, geom, step_m: float) -> Optional[str]:
-        _ = step_m
         profile_src = self._current_profile_source_key()
         dem_path = str(getattr(self, "ground_export_dem_path", "") or "").strip()
         if dem_path and not os.path.exists(dem_path):
@@ -4248,43 +4247,37 @@ class CurveAnalyzeTab(QWidget):
 
         chain = np.asarray(prof.get("chain", []), dtype=float)
         elev = np.asarray(prof.get("elev", []), dtype=float) if prof.get("elev", None) is not None else None
-        if chain.size == 0 or elev is None:
+        prof_x = np.asarray(prof.get("x", []), dtype=float) if prof.get("x", None) is not None else None
+        prof_y = np.asarray(prof.get("y", []), dtype=float) if prof.get("y", None) is not None else None
+        if chain.size == 0 or elev is None or prof_x is None or prof_y is None:
             return None
 
-        keep = np.isfinite(chain) & np.isfinite(elev)
+        n = min(chain.size, elev.size, prof_x.size, prof_y.size)
+        if n <= 0:
+            return None
+
+        chain = chain[:n]
+        elev = elev[:n]
+        prof_x = prof_x[:n]
+        prof_y = prof_y[:n]
+
+        keep = np.isfinite(chain) & np.isfinite(elev) & np.isfinite(prof_x) & np.isfinite(prof_y)
         if not np.any(keep):
             return None
         chain_valid = np.asarray(chain[keep], dtype=float)
         elev_valid = np.asarray(elev[keep], dtype=float)
-        order = np.argsort(chain_valid)
-        chain_valid = chain_valid[order]
-        elev_valid = elev_valid[order]
-        chain_valid, uniq_idx = np.unique(chain_valid, return_index=True)
-        elev_valid = elev_valid[uniq_idx]
-        if chain_valid.size == 0:
-            return None
+        x_valid = np.asarray(prof_x[keep], dtype=float)
+        y_valid = np.asarray(prof_y[keep], dtype=float)
 
-        step = float(self._GROUND_EXPORT_STEP_M)
-        tol = max(1e-9, step * 0.05)
-        chain_start = 0.0
-        chain_end = float(chain_valid[-1])
-        snapped_end = round(chain_end / step) * step
-        if abs(chain_end - snapped_end) <= tol:
-            chain_end = float(snapped_end)
-
-        export_chain = np.arange(chain_start, chain_end + (step * 0.5), step, dtype=float)
-        if export_chain.size == 0 or not np.isclose(export_chain[0], chain_start):
-            export_chain = np.insert(export_chain, 0, chain_start)
-        if chain_end > float(export_chain[-1]) + tol:
-            export_chain = np.append(export_chain, chain_end)
-        elif abs(float(export_chain[-1]) - chain_end) <= tol:
-            export_chain[-1] = chain_end
-
-        export_elev = np.interp(export_chain, chain_valid, elev_valid)
-        rows: List[Tuple[str, str]] = [
-            (f"{float(ch):.1f}", f"{float(zz):.10f}".rstrip("0").rstrip("."))
-            for ch, zz in zip(export_chain, export_elev)
-            if np.isfinite(ch) and np.isfinite(zz)
+        rows: List[Tuple[str, str, str, str]] = [
+            (
+                f"{float(ch):.1f}",
+                f"{float(zz):.10f}".rstrip("0").rstrip("."),
+                f"{float(xx):.10f}".rstrip("0").rstrip("."),
+                f"{float(yy):.10f}".rstrip("0").rstrip("."),
+            )
+            for ch, zz, xx, yy in zip(chain_valid, elev_valid, x_valid, y_valid)
+            if np.isfinite(ch) and np.isfinite(zz) and np.isfinite(xx) and np.isfinite(yy)
         ]
         if not rows:
             return None
