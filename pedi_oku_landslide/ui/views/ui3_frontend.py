@@ -1,7 +1,7 @@
 from typing import Any, Dict
 
 from .ui3_frontend_impl import CurveAnalyzeTab
-from .ui3_line_controller import WORKFLOW_GROUPING_PARAMS
+from pedi_oku_landslide.ui.controllers.ui3_line_controller import WORKFLOW_GROUPING_PARAMS
 from pedi_oku_landslide.pipeline.runners.ui3.ui3_grouping import WORKFLOW_GROUP_MIN_LEN_M
 from pedi_oku_landslide.pipeline.runners.ui3.ui3_storage import SECTION_CHAINAGE_ORIGIN
 

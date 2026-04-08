@@ -29,12 +29,12 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 from pedi_oku_landslide.pipeline.runners.ui3_backend import UI3BackendService
-from .ui3_preview_scene import ZoomableGraphicsView
-from .ui3_preview_controller import UI3PreviewControllerMixin
-from .ui3_group_panel import UI3GroupPanelMixin
-from .ui3_curve_panel import UI3CurvePanelMixin
-from .ui3_line_controller import UI3LineControllerMixin, WORKFLOW_GROUPING_PARAMS
-from .ui3_widgets import KeyboardOnlyDoubleSpinBox, KeyboardOnlySpinBox, NoWheelComboBox
+from pedi_oku_landslide.ui.scenes.ui3_preview_scene import ZoomableGraphicsView
+from pedi_oku_landslide.ui.controllers.ui3_preview_controller import UI3PreviewControllerMixin
+from pedi_oku_landslide.ui.controllers.ui3_group_panel import UI3GroupPanelMixin
+from pedi_oku_landslide.ui.controllers.ui3_curve_panel import UI3CurvePanelMixin
+from pedi_oku_landslide.ui.controllers.ui3_line_controller import UI3LineControllerMixin, WORKFLOW_GROUPING_PARAMS
+from pedi_oku_landslide.ui.widgets.ui3_widgets import KeyboardOnlyDoubleSpinBox, KeyboardOnlySpinBox, NoWheelComboBox
 
 class CurveAnalyzeTab(
     UI3PreviewControllerMixin,

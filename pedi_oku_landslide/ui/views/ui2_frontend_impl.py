@@ -50,9 +50,9 @@ from pedi_oku_landslide.pipeline.runners.ui2.ui2_sections_storage import (
     canonical_section_csv_row as storage_canonical_section_csv_row,
     reverse_section_points as storage_reverse_section_points,
 )
-from .ui2_dialogs import AutoLineDialog
+from pedi_oku_landslide.ui.dialogs.ui2_dialogs import AutoLineDialog
 from .ui2_layered_viewer import _LayeredViewer
-from .ui2_widgets import HBox, NoWheelComboBox as _NoWheelComboBox
+from pedi_oku_landslide.ui.widgets.ui2_widgets import HBox, NoWheelComboBox as _NoWheelComboBox
 
 # ---------- UI2: Section Selection tab ----------
 

@@ -1,4 +1,3 @@
-import json
 import os
 from typing import Dict, Optional
 
@@ -25,9 +24,14 @@ from PyQt5.QtWidgets import (
 
 from pedi_oku_landslide.pipeline.runners.ui4_backend import (
     collect_ui4_run_inputs,
+    list_ui4_preview_pngs,
+    load_ui4_summary_for_run,
     render_ui4_contours_for_run,
     run_ui4_kriging_for_run,
+    summary_range_for_kind,
 )
+from pedi_oku_landslide.ui.controllers.ui4_preview_controller import UI4PreviewControllerMixin
+from pedi_oku_landslide.ui.controllers.ui4_run_controller import UI4RunControllerMixin
 
 
 class ZoomableImageView(QGraphicsView):
@@ -96,7 +100,7 @@ class ZoomableImageView(QGraphicsView):
         event.accept()
 
 
-class UI4FrontendTab(QWidget):
+class UI4FrontendTab(UI4PreviewControllerMixin, UI4RunControllerMixin, QWidget):
     """
     Minimal UI4 connector tab.
     Purpose for now: receive run context from UI1/UI2/UI3 and show whether
@@ -115,6 +119,12 @@ class UI4FrontendTab(QWidget):
         self._left_default_w = 490
         self._pending_init_splitter = True
         self._ui_shown_once = False
+        self._backend_collect_ui4_run_inputs = collect_ui4_run_inputs
+        self._backend_list_ui4_preview_pngs = list_ui4_preview_pngs
+        self._backend_load_ui4_summary = load_ui4_summary_for_run
+        self._backend_summary_range = summary_range_for_kind
+        self._backend_render_ui4_contours_for_run = render_ui4_contours_for_run
+        self._backend_run_ui4_kriging_for_run = run_ui4_kriging_for_run
 
         self.lbl_project_value = QLabel("-")
         self.lbl_run_label_value = QLabel("-")
@@ -385,304 +395,3 @@ class UI4FrontendTab(QWidget):
         if not checked:
             self._populate_manual_range_from_summary("depth")
         self._update_contour_range_controls()
-
-    def _read_json_file(self, path: str) -> Dict:
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            return data if isinstance(data, dict) else {}
-        except Exception:
-            return {}
-
-    def _load_ui4_summary_for_current_run(self) -> Dict:
-        run_dir = (self._ctx.get("run_dir") or "").strip()
-        if not run_dir:
-            self._last_ui4_summary = {}
-            return {}
-        ui4_dir = os.path.join(run_dir, "ui4")
-        shared_path = os.path.join(ui4_dir, "ui_shared_data.json")
-        shared = self._read_json_file(shared_path) if os.path.exists(shared_path) else {}
-        summary_path = str(shared.get("ui4_summary_json") or os.path.join(ui4_dir, "ui4_kriging_summary.json"))
-        if not os.path.exists(summary_path):
-            self._last_ui4_summary = {}
-            return {}
-        self._last_ui4_summary = self._read_json_file(summary_path)
-        return self._last_ui4_summary
-
-    def _summary_range_for_kind(self, kind: str) -> Optional[tuple]:
-        summary = self._last_ui4_summary or self._load_ui4_summary_for_current_run()
-        if not isinstance(summary, dict):
-            return None
-        raster_stats = summary.get("raster_stats", {}) if isinstance(summary.get("raster_stats"), dict) else {}
-        for key in (f"{kind}_masked", kind):
-            rs = raster_stats.get(key, {})
-            if not isinstance(rs, dict):
-                continue
-            zmin = rs.get("min")
-            zmax = rs.get("max")
-            try:
-                zmin_f = float(zmin)
-                zmax_f = float(zmax)
-            except Exception:
-                continue
-            if zmax_f > zmin_f:
-                return (zmin_f, zmax_f)
-
-        stats = summary.get("stats", {}) if isinstance(summary.get("stats"), dict) else {}
-        legacy_min = stats.get(f"{kind}_min_m")
-        legacy_max = stats.get(f"{kind}_max_m")
-        try:
-            legacy_min_f = float(legacy_min)
-            legacy_max_f = float(legacy_max)
-        except Exception:
-            return None
-        if legacy_max_f > legacy_min_f:
-            return (legacy_min_f, legacy_max_f)
-        return None
-
-    def _populate_manual_range_from_summary(self, kind: str) -> None:
-        rng = self._summary_range_for_kind(kind)
-        if rng is None:
-            self._append(f"[UI4] Cannot auto-fill {kind} manual range: summary min/max not available.")
-            return
-        zmin, zmax = rng
-        if kind == "surface":
-            self.surface_zmin.setValue(zmin)
-            self.surface_zmax.setValue(zmax)
-        else:
-            self.depth_zmin.setValue(zmin)
-            self.depth_zmax.setValue(zmax)
-        self._append(f"[UI4] {kind} manual range auto-filled from raster stats: {zmin:g} .. {zmax:g}")
-
-    def _validate_contour_params(self, params: Dict[str, float | None]) -> Optional[str]:
-        if params.get("surface_z_min") is not None and params.get("surface_z_max") is not None:
-            if float(params["surface_z_max"]) <= float(params["surface_z_min"]):
-                return "Invalid surface manual range: zmax must be greater than zmin."
-        if params.get("depth_z_min") is not None and params.get("depth_z_max") is not None:
-            if float(params["depth_z_max"]) <= float(params["depth_z_min"]):
-                return "Invalid depth manual range: zmax must be greater than zmin."
-        return None
-
-    def _contour_param_values(self) -> Dict[str, float | None]:
-        surf_zmin = None if self.surface_auto_range.isChecked() else float(self.surface_zmin.value())
-        surf_zmax = None if self.surface_auto_range.isChecked() else float(self.surface_zmax.value())
-        depth_zmin = None if self.depth_auto_range.isChecked() else float(self.depth_zmin.value())
-        depth_zmax = None if self.depth_auto_range.isChecked() else float(self.depth_zmax.value())
-        return {
-            "surface_interval_m": float(self.surface_step.value()),
-            "depth_interval_m": float(self.depth_step.value()),
-            "surface_z_min": surf_zmin,
-            "surface_z_max": surf_zmax,
-            "depth_z_min": depth_zmin,
-            "depth_z_max": depth_zmax,
-        }
-
-    def _on_preview_file_changed(self, idx: int) -> None:
-        if idx < 0 or idx >= len(self._preview_png_paths):
-            self.preview_view.clear_image()
-            return
-        path = self._preview_png_paths[idx]
-        ok = self.preview_view.load_image(path)
-        if ok:
-            self.lbl_preview_status.setText(
-                f"Preview: {len(self._preview_png_paths)} PNG file(s) | Showing: {os.path.basename(path)} "
-                f"(wheel/Zoom +/-/Fit)"
-            )
-        else:
-            self.lbl_preview_status.setText(f"Preview: cannot load image ({path})")
-
-    def _refresh_preview_pngs(self, prefer_surface: bool = False) -> None:
-        run_dir = (self._ctx.get("run_dir") or "").strip()
-        prev_selected = self.preview_file_combo.currentData()
-        self.preview_file_combo.blockSignals(True)
-        self.preview_file_combo.clear()
-        self.preview_file_combo.blockSignals(False)
-        self._preview_png_paths = []
-        self.preview_view.clear_image()
-        if not run_dir:
-            self.lbl_preview_status.setText("Preview: missing run context")
-            return
-
-        preview_dir = os.path.join(run_dir, "ui4", "preview")
-        if not os.path.isdir(preview_dir):
-            self.lbl_preview_status.setText(f"Preview: folder not found ({preview_dir})")
-            return
-
-        pngs = sorted(
-            os.path.join(preview_dir, n)
-            for n in os.listdir(preview_dir)
-            if n.lower().endswith(".png")
-        )
-        self._preview_png_paths = pngs
-        self.lbl_preview_status.setText(f"Preview: {len(pngs)} PNG file(s) in {preview_dir}")
-        if not pngs:
-            return
-
-        self.preview_file_combo.blockSignals(True)
-        for p in pngs:
-            self.preview_file_combo.addItem(os.path.basename(p), p)
-        self.preview_file_combo.blockSignals(False)
-
-        idx = 0
-        if prefer_surface:
-            for i, p in enumerate(pngs):
-                if os.path.basename(p).lower() == "contours_surface.png":
-                    idx = i
-                    break
-        elif prev_selected:
-            try:
-                idx = pngs.index(prev_selected)
-            except ValueError:
-                idx = 0
-        self.preview_file_combo.setCurrentIndex(idx)
-        self._on_preview_file_changed(idx)
-
-    def set_context(self, project: str, run_label: str, run_dir: str) -> None:
-        self._ctx = {
-            "project": str(project or ""),
-            "run_label": str(run_label or ""),
-            "run_dir": str(run_dir or ""),
-        }
-        self.lbl_project_value.setText(self._ctx["project"] or "-")
-        self.lbl_run_label_value.setText(self._ctx["run_label"] or "-")
-        self.refresh_from_context()
-
-    def on_upstream_curve_saved(self, curve_json_path: str = "") -> None:
-        if curve_json_path:
-            self._append(f"[UI3] curve_saved -> {curve_json_path}")
-        self.refresh_from_context()
-
-    def refresh_from_context(self) -> None:
-        run_dir = (self._ctx.get("run_dir") or "").strip()
-        if not run_dir:
-            self.lbl_input_status_value.setText("Not Ready")
-            self._append("[UI4] Waiting for run context from previous tabs.")
-            self._refresh_preview_pngs()
-            return
-
-        info = collect_ui4_run_inputs(run_dir)
-        self._last_info = info
-        self._load_ui4_summary_for_current_run()
-        if not info.get("ok", False):
-            self.lbl_input_status_value.setText("Not Ready")
-            self._append(f"[UI4] Error: {info.get('error', 'unknown error')}")
-            self._refresh_preview_pngs()
-            return
-
-        ready = bool(info.get("ready_for_ui4"))
-        self.lbl_input_status_value.setText("Ready" if ready else "Not Ready")
-
-        paths = info.get("paths", {})
-        counts = info.get("counts", {})
-        missing = info.get("missing_required", [])
-
-        lines = [
-            f"[UI4] Refresh run: {os.path.basename(run_dir)}",
-            f"  Input dir: {paths.get('input_dir') or '-'}",
-            f"  DEM: {paths.get('dem') or '-'}",
-            f"  Mask (optional): {paths.get('mask_tif') or '-'}",
-            f"  UI3 curve dir: {paths.get('ui3_curve_dir') or '-'}",
-            f"  NURBS curves (CL/ML pattern): {counts.get('nurbs_curves', 0)}",
-            f"  Groups: {counts.get('groups', 0)}",
-            f"  NURBS info: {counts.get('nurbs_info', 0)}",
-        ]
-        if missing:
-            lines.append("  Missing required: " + ", ".join(missing))
-        else:
-            lines.append("  Required inputs look ready for UI4 (DEM .tif + NURBS CL/ML curves).")
-
-        self.status_box.clear()
-        for ln in lines:
-            self._append(ln)
-        self._refresh_preview_pngs()
-
-    def _on_generate_contours(self) -> None:
-        run_dir = (self._ctx.get("run_dir") or "").strip()
-        if not run_dir:
-            self._append("[UI4] Cannot generate contours: missing run context.")
-            return
-        try:
-            self._append("[UI4] Generating contour previews...")
-            contour_kwargs = self._contour_param_values()
-            err = self._validate_contour_params(contour_kwargs)
-            if err:
-                self._append(f"[UI4] {err}")
-                return
-            self._append(
-                "[UI4] Contour settings: "
-                f"surface(step={contour_kwargs['surface_interval_m']}, "
-                f"zmin={contour_kwargs['surface_z_min']}, zmax={contour_kwargs['surface_z_max']}), "
-                f"depth(step={contour_kwargs['depth_interval_m']}, "
-                f"zmin={contour_kwargs['depth_z_min']}, zmax={contour_kwargs['depth_z_max']})"
-            )
-            res = render_ui4_contours_for_run(run_dir, log_fn=self._append, **contour_kwargs)
-            if not res.get("ok", False):
-                self._append(f"[UI4] Contours failed: {res.get('error', 'unknown error')}")
-                if "No UI4 kriging rasters found" in str(res.get("error", "")):
-                    self._append("[UI4] Hint: click 'Calculate Kriging' first, then 'Preview'.")
-                return
-            items = res.get("items", {})
-            for key in ("surface", "depth"):
-                it = items.get(key, {})
-                if it.get("ok"):
-                    self._append(f"[UI4] {key} contours PNG: {it.get('png_path')}")
-                elif it:
-                    self._append(f"[UI4] {key} contours error: {it.get('error')}")
-            if res.get("summary_json"):
-                self._append(f"[UI4] Contour summary: {res.get('summary_json')}")
-            self._refresh_preview_pngs(prefer_surface=True)
-        except Exception as e:
-            self._append(f"[UI4] Contours exception: {e}")
-
-    def _on_run_ui4(self) -> None:
-        run_dir = (self._ctx.get("run_dir") or "").strip()
-        if not run_dir:
-            self._append("[UI4] Cannot run UI4: missing run context.")
-            return
-        try:
-            self._append("[UI4] Running kriging backend...")
-            res = run_ui4_kriging_for_run(run_dir, log_fn=self._append)
-            if not res.get("ok", False):
-                self._append(f"[UI4] Kriging failed: {res.get('error', 'unknown error')}")
-                missing = res.get("missing_required", [])
-                if missing:
-                    self._append("[UI4] Missing required inputs: " + ", ".join(map(str, missing)))
-                return
-            outputs = res.get("outputs", {})
-            self._append(f"[UI4] Surface raster: {outputs.get('slip_surface_tif')}")
-            self._append(f"[UI4] Depth raster: {outputs.get('slip_depth_tif')}")
-            self._append(f"[UI4] Variance raster: {outputs.get('slip_depth_variance_tif')}")
-            if outputs.get("slip_surface_masked_tif"):
-                self._append(f"[UI4] Surface raster (masked): {outputs.get('slip_surface_masked_tif')}")
-            if outputs.get("slip_depth_masked_tif"):
-                self._append(f"[UI4] Depth raster (masked): {outputs.get('slip_depth_masked_tif')}")
-            if outputs.get("summary_json"):
-                self._append(f"[UI4] Summary: {outputs.get('summary_json')}")
-            self._load_ui4_summary_for_current_run()
-            self.refresh_from_context()
-            self._refresh_preview_pngs()
-        except Exception as e:
-            self._append(f"[UI4] Kriging exception: {e}")
-
-    def reset_session(self) -> None:
-        self._ctx = {"project": "", "run_label": "", "run_dir": ""}
-        self._last_info = {}
-        self._last_ui4_summary = {}
-        self.lbl_project_value.setText("-")
-        self.lbl_run_label_value.setText("-")
-        self.lbl_input_status_value.setText("Not Ready")
-        self.status_box.clear()
-        self.lbl_preview_status.setText("Preview: -")
-        self.preview_file_combo.blockSignals(True)
-        self.preview_file_combo.clear()
-        self.preview_file_combo.blockSignals(False)
-        self._preview_png_paths = []
-        self.preview_view.clear_image()
-        self.surface_auto_range.setChecked(True)
-        self.depth_auto_range.setChecked(True)
-        self.surface_step.setValue(1.0)
-        self.depth_step.setValue(1.0)
-        self.surface_zmin.setValue(0.0)
-        self.surface_zmax.setValue(0.0)
-        self.depth_zmin.setValue(0.0)
-        self.depth_zmax.setValue(0.0)
