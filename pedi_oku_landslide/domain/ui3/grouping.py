@@ -323,60 +323,48 @@ def filter_rdp_nodes_to_slip_zone(
     return chain[keep], elev[keep], curv[keep]
 
 
-def _prune_first_20m_descending_curvature_pair(
-    cands: List[Dict[str, Any]],
+def _prune_first_20m_descending_curvature_nodes(
+    slip_start_x: float,
+    xs: np.ndarray,
+    ks: np.ndarray,
     *,
     window_m: float = 20.0,
-    curvature_reason_prefix: str = "curvature_gt_",
-    slip_start_reason: str = "slip_span_start",
-) -> List[Dict[str, Any]]:
-    if not cands:
-        return []
-    out = [dict(c) for c in sorted(cands, key=lambda t: float(t.get("x", 0.0)))]
+) -> Tuple[np.ndarray, np.ndarray]:
+    xs = np.asarray(xs, dtype=float)
+    ks = np.asarray(ks, dtype=float)
+    n = int(min(xs.size, ks.size))
+    if n <= 0:
+        empty = np.array([], dtype=float)
+        return empty, empty
+    xs = xs[:n]
+    ks = ks[:n]
+
+    if not np.isfinite(float(slip_start_x)):
+        return xs, ks
     win = max(0.0, float(window_m))
     if win <= 0.0:
-        return out
+        return xs, ks
 
-    slip_start_x: Optional[float] = None
-    for c in out:
-        reasons = [str(r) for r in list(c.get("reasons", []))]
-        if any(r == slip_start_reason for r in reasons):
-            try:
-                slip_start_x = float(c.get("x", np.nan))
-            except Exception:
-                slip_start_x = None
-            break
-    if slip_start_x is None or not np.isfinite(slip_start_x):
-        return out
+    keep = np.ones(n, dtype=bool)
+    in_window = np.isfinite(xs) & (xs > float(slip_start_x)) & (xs <= (float(slip_start_x) + win))
+    window_idxs = np.flatnonzero(in_window)
+    if window_idxs.size <= 1:
+        return xs, ks
 
-    eligible_idxs: List[int] = []
-    for idx, c in enumerate(out):
-        if not _has_curvature_reason(c, curvature_reason_prefix):
-            continue
-        try:
-            x = float(c.get("x", np.nan))
-            kval = float(c.get("curvature_value", np.nan))
-        except Exception:
-            continue
-        if not (np.isfinite(x) and np.isfinite(kval)):
-            continue
-        if not (float(slip_start_x) < x <= (float(slip_start_x) + win)):
-            continue
-        eligible_idxs.append(idx)
-
-    for pos in range(len(eligible_idxs) - 1):
-        left_idx = eligible_idxs[pos]
-        right_idx = eligible_idxs[pos + 1]
-        left_k = float(out[left_idx].get("curvature_value", np.nan))
-        right_k = float(out[right_idx].get("curvature_value", np.nan))
-        if not (np.isfinite(left_k) and np.isfinite(right_k)):
-            continue
-        if left_k >= right_k:
-            continue
-        for idx in sorted((left_idx, right_idx), reverse=True):
-            del out[idx]
-        return _merge_close_boundaries(out, tol_m=1e-6)
-    return out
+    # The synthetic list is [slip_start] + window nodes, so the last window node
+    # is always kept as the list endpoint and never enters pair pruning.
+    middle_idxs = window_idxs[:-1]
+    i = 0
+    while i + 1 < middle_idxs.size:
+        left_idx = int(middle_idxs[i])
+        right_idx = int(middle_idxs[i + 1])
+        left_k = float(ks[left_idx])
+        right_k = float(ks[right_idx])
+        if np.isfinite(left_k) and np.isfinite(right_k) and right_k < left_k:
+            keep[left_idx] = False
+            keep[right_idx] = False
+        i += 2
+    return xs[keep], ks[keep]
 
 
 def _prune_vector_zero_boundaries(
@@ -523,6 +511,8 @@ def auto_group_profile_by_criteria(
     xs = np.asarray(nodes.get("chain", []), dtype=float)
     ks = np.asarray(nodes.get("curvature", []), dtype=float)
     smax_effective = snap_slip_span_end_to_rdp_node(float(smin), float(smax), xs, snap_tol_m=float(rdp_eps_m))
+    if bool(include_curvature_threshold) and xs.size >= 1 and ks.size == xs.size:
+        xs, ks = _prune_first_20m_descending_curvature_nodes(float(smin), xs, ks, window_m=20.0)
 
     boundaries_meta: List[Dict[str, Any]] = [
         _mk_boundary(float(smin), "slip_span_start", score=0.0, fixed=True),
@@ -548,8 +538,6 @@ def auto_group_profile_by_criteria(
         boundaries_meta.extend(_vector_horizontal_boundaries(chain, theta, float(smin), float(smax_effective)))
 
     boundaries_meta = _merge_close_boundaries(boundaries_meta, tol_m=1e-6)
-    if bool(include_curvature_threshold):
-        boundaries_meta = _prune_first_20m_descending_curvature_pair(boundaries_meta, window_m=20.0)
     if bool(include_vector_angle_zero):
         boundaries_meta = _prune_vector_zero_boundaries(
             boundaries_meta,

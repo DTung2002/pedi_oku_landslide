@@ -1,6 +1,6 @@
 import json
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 from PyQt5.QtWidgets import QAbstractSpinBox, QDoubleSpinBox, QTableWidgetItem
@@ -71,12 +71,16 @@ class UI3CurvePanelMixin:
         base = grouped if grouped is not None else self._profile_endpoints(prof)
         if base is None:
             return None
-        if self._current_ui2_line_role() != "cross":
+        points = self._active_curve_constraints(log_skips=False)
+        if not points:
             return base
-        anchors = self._anchors_for_cross_line(self._current_ui2_line_id(), require_ready=True)
-        if not anchors:
-            return base
-        return self._backend.extend_endpoint_targets_with_cross_anchors(prof, base, anchors)
+        return self._backend.extend_endpoint_targets_with_points(
+            prof,
+            base,
+            points,
+            chain_key="s",
+            elev_key="z",
+        )
 
     def _build_default_nurbs_params(self, line_id: str, prof: dict, groups: list, base_curve: dict) -> Dict[str, Any]:
         ends = self._nurbs_endpoint_targets(prof, groups, line_id=line_id)
@@ -110,13 +114,42 @@ class UI3CurvePanelMixin:
             endpoints=ends,
         )
 
-    def _constrain_curve_to_cross_anchors(self, curve: Optional[Dict[str, np.ndarray]]) -> Optional[Dict[str, np.ndarray]]:
+    def _active_curve_constraints(self, *, log_skips: bool = False) -> List[dict]:
+        _ = log_skips
+        points: List[dict] = []
+        if self._current_ui2_line_role() == "cross":
+            anchors = self._anchors_for_cross_line(self._current_ui2_line_id(), require_ready=True)
+            for anchor in anchors:
+                try:
+                    s_val = float(anchor.get("s_on_cross"))
+                    z_val = float(anchor.get("z"))
+                except Exception:
+                    continue
+                if not (np.isfinite(s_val) and np.isfinite(z_val)):
+                    continue
+                points.append(
+                    {
+                        "label": str(anchor.get("main_label_fixed", anchor.get("main_line_id", "")) or "").strip(),
+                        "s": float(s_val),
+                        "z": float(z_val),
+                        "source": "cross_anchor",
+                    }
+                )
+        points.sort(key=lambda d: (float(d.get("s", 0.0)), str(d.get("label", ""))))
+        return points
+
+    def _constrain_curve_to_active_constraints(self, curve: Optional[Dict[str, np.ndarray]], *, log_skips: bool = False) -> Optional[Dict[str, np.ndarray]]:
         if not curve:
             return curve
-        if self._current_ui2_line_role() != "cross":
+        points = self._active_curve_constraints(log_skips=log_skips)
+        if not points:
             return curve
-        anchors = self._anchors_for_cross_line(self._current_ui2_line_id(), require_ready=True)
-        return self._backend.constrain_curve_to_cross_anchors(curve, anchors)
+        return self._backend.constrain_curve_to_points(
+            curve,
+            points,
+            chain_key="s",
+            elev_key="z",
+        )
 
     def _get_nurbs_params_for_line(self, line_id: str) -> Optional[Dict[str, Any]]:
         return self._nurbs_params_by_line.get(line_id)
@@ -372,7 +405,7 @@ class UI3CurvePanelMixin:
         if sx.size < 2:
             return None
         out = {"chain": sx, "elev": sz}
-        out = self._constrain_curve_to_cross_anchors(out)
+        out = self._constrain_curve_to_active_constraints(out)
         return out
 
     def _on_nurbs_cp_spin_changed(self, val: int) -> None:
@@ -419,6 +452,12 @@ class UI3CurvePanelMixin:
         if curve is None:
             self._warn("[UI3] Cannot evaluate NURBS curve.")
             return
+        boring_result = self._project_boring_holes_for_current_line(use_unsaved_table=True, log_skips=True)
+        boring_snapshot = {
+            "distance_tolerance_m": float(boring_result.get("distance_tolerance_m", 1.0)),
+            "count": int(len(boring_result.get("items", []) or [])),
+            "items": list(boring_result.get("items", []) or []),
+        }
         out_png = self._nurbs_png_path_for(line_id)
         path = self._render_profile_png_current_settings(
             self._active_prof,
@@ -511,6 +550,7 @@ class UI3CurvePanelMixin:
                         "degree": int(params.get("degree", 3)),
                         "control_points": params.get("control_points", []),
                         "weights": params.get("weights", []),
+                        "applied_boring_holes": boring_snapshot,
                         "curve": {
                             "chain": np.asarray(curve["chain"], dtype=float).tolist(),
                             "elev": np.asarray(curve["elev"], dtype=float).tolist(),
@@ -523,6 +563,7 @@ class UI3CurvePanelMixin:
                         "line_id": line_id,
                         "curve_method": "nurbs",
                         "chainage_origin": self._ui3_chainage_origin(),
+                        "applied_boring_holes": boring_snapshot,
                         "count": int(len(curve_rows)),
                         "points": curve_rows,
                     },
@@ -644,6 +685,7 @@ class UI3CurvePanelMixin:
             except Exception as e:
                 self._warn(f"[UI3] Bezier-like seed fit failed, using base target. ({e})")
 
+            curve = self._constrain_curve_to_active_constraints(curve, log_skips=True) or curve
             self._active_prof = prof
             self._active_groups = groups
             self._active_base_curve = {"chain": np.asarray(curve["chain"], dtype=float), "elev": np.asarray(curve["elev"], dtype=float)}

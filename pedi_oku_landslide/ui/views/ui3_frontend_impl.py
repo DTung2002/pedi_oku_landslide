@@ -107,8 +107,10 @@ class CurveAnalyzeTab(
         self._anchor_overlay_items: List[Any] = []
         self._ui2_intersections_cache: Optional[Dict[str, Any]] = None
         self._anchors_xyz_cache: Optional[Dict[str, Any]] = None
+        self._boring_holes_data: Dict[str, Any] = {"version": 1, "distance_tolerance_m": 1.0, "items": []}
         self._nurbs_params_by_line: Dict[str, Dict[str, Any]] = {}
         self._group_table_updating: bool = False
+        self._boring_table_updating: bool = False
         self._nurbs_updating_ui: bool = False
         # True when background image already has a baked slip-curve (profile_*_nurbs.png).
         self._static_nurbs_bg_loaded: bool = False
@@ -299,18 +301,6 @@ class CurveAnalyzeTab(
         # Group table
         box_grp = QGroupBox("Group")
         lg = QVBoxLayout(box_grp)
-        self.group_table = QTableWidget(0, 4)
-        self.group_table.setHorizontalHeaderLabels(
-            ["Group ID", "Start (m)", "End (m)", "Color"]
-        )
-        self.group_table.verticalHeader().setVisible(False)
-        self.group_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.group_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        self.group_table.cellDoubleClicked.connect(self._on_group_cell_double_clicked)
-        self.group_table.itemChanged.connect(self._on_group_table_item_changed)
-        _set_table_visible_rows(self.group_table, rows=6, row_h=30)
-        lg.addWidget(self.group_table)
-
         row_curv = QHBoxLayout()
         row_curv.addWidget(QLabel("RDP eps (m):"))
         self.rdp_eps_spin = KeyboardOnlyDoubleSpinBox()
@@ -321,6 +311,18 @@ class CurveAnalyzeTab(
         self.rdp_eps_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
         row_curv.addWidget(self.rdp_eps_spin)
         lg.addLayout(row_curv)
+
+        self.group_table = QTableWidget(0, 4)
+        self.group_table.setHorizontalHeaderLabels(
+            ["Group ID", "Start (m)", "End (m)", "Color"]
+        )
+        self.group_table.verticalHeader().setVisible(False)
+        self.group_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.group_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.group_table.cellDoubleClicked.connect(self._on_group_cell_double_clicked)
+        self.group_table.itemChanged.connect(self._on_group_table_item_changed)
+        _set_table_visible_rows(self.group_table, rows=4, row_h=30)
+        lg.addWidget(self.group_table)
 
         rowg = QHBoxLayout()
         self.btn_add_g = QPushButton("Add")
@@ -339,6 +341,30 @@ class CurveAnalyzeTab(
             rowg.addWidget(btn, 1)
         lg.addLayout(rowg)
         left.addWidget(box_grp, 1)
+
+        box_bh = QGroupBox("Boring Holes")
+        lbh = QVBoxLayout(box_bh)
+        self.boring_table = QTableWidget(0, 4)
+        self.boring_table.setHorizontalHeaderLabels(["BH", "X", "Y", "Z"])
+        self.boring_table.verticalHeader().setVisible(False)
+        self.boring_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.boring_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.boring_table.itemChanged.connect(self._on_boring_holes_table_item_changed)
+        _set_table_visible_rows(self.boring_table, rows=3, row_h=30)
+        lbh.addWidget(self.boring_table)
+
+        row_bh_btn = QHBoxLayout()
+        self.btn_add_bh = QPushButton("Add")
+        self.btn_add_bh.clicked.connect(self._on_add_boring_hole)
+        self.btn_del_bh = QPushButton("Delete")
+        self.btn_del_bh.clicked.connect(self._on_delete_boring_hole)
+        self.btn_save_bh = QPushButton("Save")
+        self.btn_save_bh.clicked.connect(self._on_save_boring_holes)
+        for btn in (self.btn_add_bh, self.btn_del_bh, self.btn_save_bh):
+            btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            row_bh_btn.addWidget(btn, 1)
+        lbh.addLayout(row_bh_btn)
+        left.addWidget(box_bh, 0)
 
         # NURBS controls
         box_nurbs = QGroupBox("NURBS")
@@ -367,7 +393,7 @@ class CurveAnalyzeTab(
         self.nurbs_table.verticalHeader().setVisible(False)
         self.nurbs_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.nurbs_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        _set_table_visible_rows(self.nurbs_table, rows=6, row_h=34)
+        _set_table_visible_rows(self.nurbs_table, rows=4, row_h=34)
         ln.addWidget(self.nurbs_table)
 
         row_nurbs_btn = QHBoxLayout()

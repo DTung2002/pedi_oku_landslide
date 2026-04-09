@@ -196,10 +196,65 @@ class UI3PreviewControllerMixin:
         except Exception:
             pass
 
+    def _on_boring_hole_marker_clicked(self, hole: dict) -> None:
+        try:
+            lbl = str(hole.get("label", hole.get("bh", "")) or "").strip() or "Boring hole"
+            self._log(
+                f"[UI3] {lbl}: x={float(hole.get('x')):.3f}, "
+                f"y={float(hole.get('y')):.3f}, z={float(hole.get('z')):.3f}, "
+                f"s={float(hole.get('s_on_line')):.3f}, d={float(hole.get('distance_to_line_m')):.3f}"
+            )
+        except Exception:
+            pass
+
     def _refresh_anchor_overlay(self) -> None:
         self._clear_anchor_overlay()
         if self.scene is None or self._img_ground is None or self._ax_top is None:
             return
+        boring_result = self._project_boring_holes_for_current_line(use_unsaved_table=True, log_skips=False)
+        for hole in (boring_result.get("items", []) or []):
+            try:
+                s = float(hole.get("s_on_line"))
+                z = float(hole.get("z"))
+            except Exception:
+                continue
+            pt = self._chain_elev_to_scene_xy(s, z)
+            if pt is None:
+                continue
+            x, y = pt
+            label = str(hole.get("label", hole.get("bh", "")) or "").strip() or "BH"
+            tip = (
+                f"{label}\n"
+                f"x={float(hole.get('x')):.3f}\n"
+                f"y={float(hole.get('y')):.3f}\n"
+                f"z={float(hole.get('z')):.3f}\n"
+                f"s={float(hole.get('s_on_line')):.3f}\n"
+                f"d={float(hole.get('distance_to_line_m')):.3f}"
+            )
+            marker = AnchorMarkerItem(
+                x=x, y=y, r=9.0, tooltip=tip,
+                on_click=lambda hh=dict(hole): self._on_boring_hole_marker_clicked(hh)
+            )
+            marker.setBrush(QColor("#ff3b30"))
+            pen = QPen(QColor("#ffffff"))
+            pen.setWidth(2)
+            pen.setCosmetic(True)
+            marker.setPen(pen)
+            marker.setZValue(144.0)
+            self.scene.addItem(marker)
+            self._anchor_overlay_items.append(marker)
+
+            lbl = QGraphicsSimpleTextItem(label)
+            lbl.setBrush(QColor("#7a0c00"))
+            fnt = lbl.font()
+            psz = fnt.pointSizeF() if fnt.pointSizeF() > 0 else 8.0
+            fnt.setPointSizeF(psz * 1.25)
+            lbl.setFont(fnt)
+            lbl.setToolTip(tip)
+            lbl.setPos(x + 8.0, y - 18.0)
+            lbl.setZValue(145.0)
+            self.scene.addItem(lbl)
+            self._anchor_overlay_items.append(lbl)
         if self._current_ui2_line_role() != "cross":
             return
         cross_id = self._current_ui2_line_id()

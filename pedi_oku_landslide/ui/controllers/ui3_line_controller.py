@@ -7,6 +7,8 @@ import numpy as np
 import rasterio
 from PyQt5.QtWidgets import QFileDialog, QTableWidgetItem, QMessageBox
 
+from pedi_oku_landslide.domain.ui3.boring_holes import BORING_HOLES_DEFAULT_TOLERANCE_M
+
 WORKFLOW_GROUP_MIN_LEN_M = 0.0
 WORKFLOW_GROUPING_PARAMS = {
     "rdp_eps_m": 0.5,
@@ -291,6 +293,7 @@ class UI3LineControllerMixin:
         self.dz_path = str(backend_inputs.get("dz_path", "") or "")
         self.lines_path = ""
         self.slip_path = str(backend_inputs.get("slip_path", "") or "")
+        self._load_boring_holes_into_ui()
         if not self.slip_path or not os.path.exists(self.slip_path):
             self._warn("[UI3] Slip-zone mask not found. Vectors outside landslide may appear.")
         self._load_lines_into_combo()
@@ -335,6 +338,11 @@ class UI3LineControllerMixin:
         except Exception:
             pass
         try:
+            if self.boring_table is not None:
+                self.boring_table.setRowCount(0)
+        except Exception:
+            pass
+        try:
             if self.scene is not None:
                 self.scene.clear()
         except Exception:
@@ -359,6 +367,7 @@ class UI3LineControllerMixin:
         self._active_curve = None
         self._ui2_intersections_cache = None
         self._anchors_xyz_cache = None
+        self._boring_holes_data = self._empty_boring_holes_payload()
         self._plot_x0_px = None
         self._plot_w_px = None
         self._x_min = None
@@ -417,6 +426,207 @@ class UI3LineControllerMixin:
     def _anchors_xyz_json_path(self) -> str:
         return self._paths().anchors_json_path()
 
+    def _boring_holes_dir(self) -> str:
+        return self._paths().boring_holes_dir()
+
+    def _boring_holes_json_path_for(self, line_id: str) -> str:
+        return self._paths().boring_holes_json_path_for(line_id)
+
+    def _boring_holes_json_path(self) -> str:
+        return self._boring_holes_json_path_for(self._line_id_current())
+
+    @staticmethod
+    def _empty_boring_holes_payload() -> Dict[str, Any]:
+        return {
+            "version": 1,
+            "distance_tolerance_m": float(BORING_HOLES_DEFAULT_TOLERANCE_M),
+            "items": [],
+        }
+
+    def _populate_boring_holes_table(self, payload: Optional[Dict[str, Any]]) -> None:
+        if self.boring_table is None:
+            return
+        data = self._backend.build_boring_holes_payload(
+            (payload or {}).get("items", []),
+            distance_tolerance_m=(payload or {}).get("distance_tolerance_m", BORING_HOLES_DEFAULT_TOLERANCE_M),
+        )
+        self._boring_holes_data = data
+        self._boring_table_updating = True
+        try:
+            self.boring_table.setRowCount(0)
+            items = list(data.get("items", []) or [])
+            if not items:
+                items = [
+                    {"bh": "BH1", "x": "", "y": "", "z": ""},
+                    {"bh": "BH2", "x": "", "y": "", "z": ""},
+                    {"bh": "BH3", "x": "", "y": "", "z": ""},
+                ]
+            for rec in items:
+                r = self.boring_table.rowCount()
+                self.boring_table.insertRow(r)
+                self.boring_table.setItem(r, 0, QTableWidgetItem(str(rec.get("bh", "") or "").strip()))
+                for col, key in ((1, "x"), (2, "y"), (3, "z")):
+                    val = rec.get(key, "")
+                    if isinstance(val, (int, float, np.floating)) and np.isfinite(float(val)):
+                        txt = f"{float(val):.3f}"
+                    else:
+                        txt = ""
+                    self.boring_table.setItem(r, col, QTableWidgetItem(txt))
+        finally:
+            self._boring_table_updating = False
+
+    def _parse_boring_holes_from_table(self, *, strict: bool) -> Tuple[Dict[str, Any], List[str]]:
+        errors: List[str] = []
+        items: List[Dict[str, Any]] = []
+        seen = set()
+        if self.boring_table is None:
+            return self._empty_boring_holes_payload(), errors
+
+        tol = float((self._boring_holes_data or {}).get("distance_tolerance_m", BORING_HOLES_DEFAULT_TOLERANCE_M))
+        for r in range(self.boring_table.rowCount()):
+            cells = []
+            for c in range(4):
+                item = self.boring_table.item(r, c)
+                cells.append(item.text().strip() if item and item.text() else "")
+            bh_txt, x_txt, y_txt, z_txt = cells
+            if not any(cells):
+                continue
+            if not strict and (not bh_txt or not x_txt or not y_txt or not z_txt):
+                continue
+            if not bh_txt:
+                errors.append(f"Row {r + 1}: BH is required.")
+                continue
+            if bh_txt in seen:
+                if strict:
+                    errors.append(f"Row {r + 1}: duplicate BH '{bh_txt}'.")
+                continue
+            try:
+                x_val = float(x_txt)
+                y_val = float(y_txt)
+                z_val = float(z_txt)
+            except Exception:
+                if strict:
+                    errors.append(f"Row {r + 1}: X, Y, Z must be numeric.")
+                continue
+            if not (np.isfinite(x_val) and np.isfinite(y_val) and np.isfinite(z_val)):
+                if strict:
+                    errors.append(f"Row {r + 1}: X, Y, Z must be finite.")
+                continue
+            seen.add(bh_txt)
+            items.append({"bh": bh_txt, "x": float(x_val), "y": float(y_val), "z": float(z_val)})
+        payload = self._backend.build_boring_holes_payload(items, distance_tolerance_m=tol)
+        return payload, errors
+
+    def _current_boring_holes_payload(self, *, strict: bool = False) -> Dict[str, Any]:
+        payload, _errors = self._parse_boring_holes_from_table(strict=bool(strict))
+        return payload
+
+    def _load_boring_holes_into_ui(self) -> None:
+        line_id = self._line_id_current().strip()
+        if not line_id or (hasattr(self, "line_combo") and self.line_combo.currentIndex() < 0):
+            self._populate_boring_holes_table(self._empty_boring_holes_payload())
+            return
+        try:
+            payload = self._backend.load_boring_holes(self._boring_holes_json_path_for(line_id))
+        except Exception:
+            payload = self._empty_boring_holes_payload()
+        self._populate_boring_holes_table(payload)
+
+    def _current_line_geom(self):
+        try:
+            if not hasattr(self, "_gdf") or self._gdf is None or self._gdf.empty:
+                return None
+            row = self.line_combo.currentIndex()
+            if row < 0 or row >= len(self._gdf):
+                return None
+            return self._gdf.geometry.iloc[row]
+        except Exception:
+            return None
+
+    def _project_boring_holes_to_line(
+        self,
+        geom,
+        *,
+        use_unsaved_table: bool = True,
+        log_skips: bool = False,
+    ) -> Dict[str, Any]:
+        payload = self._current_boring_holes_payload(strict=False) if use_unsaved_table else dict(self._boring_holes_data or {})
+        tol = float(payload.get("distance_tolerance_m", BORING_HOLES_DEFAULT_TOLERANCE_M))
+        result = self._backend.project_boring_holes_to_line(
+            geom,
+            payload,
+            distance_tolerance_m=tol,
+        )
+        if log_skips:
+            for msg in (result.get("skipped", []) or []):
+                self._log(f"[UI3] {msg}")
+        return result
+
+    def _project_boring_holes_for_current_line(
+        self,
+        *,
+        use_unsaved_table: bool = True,
+        log_skips: bool = False,
+    ) -> Dict[str, Any]:
+        geom = self._current_line_geom()
+        if geom is None:
+            return {"distance_tolerance_m": float(BORING_HOLES_DEFAULT_TOLERANCE_M), "items": [], "skipped": []}
+        return self._project_boring_holes_to_line(
+            geom,
+            use_unsaved_table=use_unsaved_table,
+            log_skips=log_skips,
+        )
+
+    def _on_boring_holes_table_item_changed(self, _item) -> None:
+        if self._boring_table_updating:
+            return
+        self._refresh_anchor_overlay()
+        if self._active_prof:
+            self._schedule_nurbs_live_update()
+
+    def _on_add_boring_hole(self) -> None:
+        if self.boring_table is None:
+            return
+        r = self.boring_table.rowCount()
+        self.boring_table.insertRow(r)
+        for c in range(4):
+            self.boring_table.setItem(r, c, QTableWidgetItem(""))
+        self._refresh_anchor_overlay()
+        if self._active_prof:
+            self._schedule_nurbs_live_update()
+
+    def _on_delete_boring_hole(self) -> None:
+        if self.boring_table is None:
+            return
+        rows = sorted({i.row() for i in self.boring_table.selectedIndexes()}, reverse=True)
+        if not rows:
+            self._log("[!] Select boring hole row(s) to delete.")
+            return
+        for r in rows:
+            self.boring_table.removeRow(r)
+        self._refresh_anchor_overlay()
+        if self._active_prof:
+            self._schedule_nurbs_live_update()
+
+    def _on_save_boring_holes(self) -> None:
+        payload, errors = self._parse_boring_holes_from_table(strict=True)
+        if errors:
+            for msg in errors[:8]:
+                self._warn(f"[UI3] {msg}")
+            if len(errors) > 8:
+                self._warn(f"[UI3] {len(errors) - 8} additional boring-hole validation errors omitted.")
+            return
+        line_id = self._line_id_current().strip()
+        if not line_id or (hasattr(self, "line_combo") and self.line_combo.currentIndex() < 0):
+            self._warn("[UI3] No line selected for saving boring holes.")
+            return
+        path = self._backend.save_boring_holes(self._boring_holes_json_path_for(line_id), payload)
+        self._boring_holes_data = payload
+        self._ok(f"[UI3] Saved boring holes: {path}")
+        self._refresh_anchor_overlay()
+        if self._active_prof:
+            self._schedule_nurbs_live_update()
+
     @staticmethod
     def _normalize_line_role(line_role: str, line_id: str = "") -> str:
         role = (line_role or "").strip().lower()
@@ -459,6 +669,20 @@ class UI3LineControllerMixin:
 
     def _current_ui2_line_role(self) -> str:
         return str(self._line_row_meta().get("line_role", "") or "")
+
+    def _refresh_group_controls_for_line_role(self) -> None:
+        btn = getattr(self, "btn_auto_group", None)
+        if btn is None:
+            return
+        role = self._current_ui2_line_role()
+        is_main = (role == "main")
+        btn.setEnabled(is_main)
+        if is_main:
+            btn.setToolTip("")
+        elif role == "cross":
+            btn.setToolTip("Auto Group is available only for Main Lines.")
+        else:
+            btn.setToolTip("Auto Group requires a line marked as Main.")
 
     def _load_ui2_intersections(self, force: bool = False) -> Dict[str, Any]:
         if (not force) and isinstance(self._ui2_intersections_cache, dict):
@@ -624,6 +848,8 @@ class UI3LineControllerMixin:
         self._active_groups = []
         self._active_base_curve = None
         self._active_curve = None
+        self._refresh_group_controls_for_line_role()
+        self._load_boring_holes_into_ui()
         try:
             row = self.line_combo.currentIndex()
             if row >= 0 and hasattr(self, "_gdf") and self._gdf is not None and not self._gdf.empty:

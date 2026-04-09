@@ -35,12 +35,19 @@ from pedi_oku_landslide.application.ui3.group_state import (
 )
 from pedi_oku_landslide.application.ui3.inputs import discover_ui3_inputs
 from pedi_oku_landslide.domain.ui3.anchors import (
+    constrain_curve_to_points as _constrain_curve_to_points_impl,
     constrain_curve_to_cross_anchors as _constrain_curve_to_cross_anchors_impl,
+    extend_endpoint_targets_with_points as _extend_endpoint_targets_with_points_impl,
     extend_endpoint_targets_with_cross_anchors as _extend_endpoint_targets_with_cross_anchors_impl,
     anchors_for_cross_line as _anchors_for_cross_line_impl,
     anchors_ready_for_cross_constraints as _anchors_ready_for_cross_constraints_impl,
     load_json_items as _load_anchor_json_items_impl,
     save_json_items as _save_anchor_json_items_impl,
+)
+from pedi_oku_landslide.domain.ui3.boring_holes import (
+    build_boring_holes_payload as _build_boring_holes_payload_impl,
+    load_boring_holes_payload as _load_boring_holes_payload_impl,
+    project_boring_holes_to_line as _project_boring_holes_to_line_impl,
 )
 from pedi_oku_landslide.domain.ui3.curve_state import (
     build_default_nurbs_chainage as _build_default_nurbs_chainage_impl,
@@ -296,6 +303,28 @@ class UI3BackendService:
     def save_anchor_items(self, path: str, data: Dict[str, Any]) -> str:
         return _save_anchor_json_items_impl(path, data)
 
+    def load_boring_holes(self, path: str) -> Dict[str, Any]:
+        return _load_boring_holes_payload_impl(path)
+
+    def build_boring_holes_payload(self, items: List[dict], *, distance_tolerance_m: float) -> Dict[str, Any]:
+        return _build_boring_holes_payload_impl(items, distance_tolerance_m=distance_tolerance_m)
+
+    def save_boring_holes(self, path: str, payload: Dict[str, Any]) -> str:
+        return save_json(path, payload)
+
+    def project_boring_holes_to_line(
+        self,
+        line_geom: LineString,
+        boring_holes: Dict[str, Any],
+        *,
+        distance_tolerance_m: float,
+    ) -> Dict[str, Any]:
+        return _project_boring_holes_to_line_impl(
+            line_geom,
+            boring_holes,
+            distance_tolerance_m=distance_tolerance_m,
+        )
+
     def anchors_ready_for_cross_constraints(self, intersections: Dict[str, Any], anchors: Dict[str, Any]) -> bool:
         return _anchors_ready_for_cross_constraints_impl(intersections, anchors)
 
@@ -309,6 +338,38 @@ class UI3BackendService:
         anchors: List[dict],
     ) -> Optional[Tuple[float, float, float, float]]:
         return _extend_endpoint_targets_with_cross_anchors_impl(prof, endpoints, anchors)
+
+    def extend_endpoint_targets_with_points(
+        self,
+        prof: dict,
+        endpoints: Optional[Tuple[float, float, float, float]],
+        points: List[dict],
+        *,
+        chain_key: str,
+        elev_key: str,
+    ) -> Optional[Tuple[float, float, float, float]]:
+        return _extend_endpoint_targets_with_points_impl(
+            prof,
+            endpoints,
+            points,
+            chain_key=chain_key,
+            elev_key=elev_key,
+        )
+
+    def constrain_curve_to_points(
+        self,
+        curve: Optional[Dict[str, np.ndarray]],
+        points: List[dict],
+        *,
+        chain_key: str,
+        elev_key: str,
+    ) -> Optional[Dict[str, np.ndarray]]:
+        return _constrain_curve_to_points_impl(
+            curve,
+            points,
+            chain_key=chain_key,
+            elev_key=elev_key,
+        )
 
     def constrain_curve_to_cross_anchors(self, curve: Optional[Dict[str, np.ndarray]], anchors: List[dict]) -> Optional[Dict[str, np.ndarray]]:
         return _constrain_curve_to_cross_anchors_impl(curve, anchors)

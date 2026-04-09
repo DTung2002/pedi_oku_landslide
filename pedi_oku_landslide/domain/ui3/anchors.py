@@ -32,6 +32,117 @@ def save_json_items(path: str, data: Dict[str, Any]) -> str:
     return path
 
 
+def extend_endpoint_targets_with_points(
+    prof: dict,
+    endpoints: Optional[Tuple[float, float, float, float]],
+    points: List[dict],
+    *,
+    chain_key: str,
+    elev_key: str,
+) -> Optional[Tuple[float, float, float, float]]:
+    if endpoints is None or not points:
+        return endpoints
+    s_vals = []
+    for pt in points:
+        try:
+            s_val = float(pt.get(chain_key))
+            z_val = float(pt.get(elev_key))
+        except Exception:
+            continue
+        if np.isfinite(s_val) and np.isfinite(z_val):
+            s_vals.append(s_val)
+    if not s_vals:
+        return endpoints
+    s0, z0, s1, z1 = map(float, endpoints)
+    lo = min(s0, s1)
+    hi = max(s0, s1)
+    new_lo = min(lo, min(s_vals))
+    new_hi = max(hi, max(s_vals))
+    if not (new_hi > new_lo):
+        return endpoints
+    if abs(new_lo - lo) < 1e-9 and abs(new_hi - hi) < 1e-9:
+        return endpoints
+    chain = np.asarray(prof.get("chain", []), dtype=float)
+    elev = np.asarray(prof.get("elev_s", []), dtype=float)
+    m = np.isfinite(chain) & np.isfinite(elev)
+    if int(np.count_nonzero(m)) < 2:
+        return endpoints
+    chain = chain[m]
+    elev = elev[m]
+    order = np.argsort(chain)
+    chain = chain[order]
+    elev = elev[order]
+    z_lo = float(np.interp(new_lo, chain, elev))
+    z_hi = float(np.interp(new_hi, chain, elev))
+    return (new_lo, z_lo, new_hi, z_hi)
+
+
+def constrain_curve_to_points(
+    curve: Optional[Dict[str, np.ndarray]],
+    points: List[dict],
+    *,
+    chain_key: str,
+    elev_key: str,
+) -> Optional[Dict[str, np.ndarray]]:
+    if not curve or not points:
+        return curve
+
+    ch = np.asarray((curve or {}).get("chain", []), dtype=float)
+    zz = np.asarray((curve or {}).get("elev", []), dtype=float)
+    m = np.isfinite(ch) & np.isfinite(zz)
+    ch = ch[m]
+    zz = zz[m]
+    if ch.size < 2:
+        return curve
+    order = np.argsort(ch)
+    ch = ch[order]
+    zz = zz[order]
+
+    a_s = []
+    a_z = []
+    for pt in points:
+        try:
+            s_val = float(pt.get(chain_key))
+            z_val = float(pt.get(elev_key))
+        except Exception:
+            continue
+        if np.isfinite(s_val) and np.isfinite(z_val):
+            a_s.append(s_val)
+            a_z.append(z_val)
+    if not a_s:
+        return curve
+    a_s = np.asarray(a_s, dtype=float)
+    a_z = np.asarray(a_z, dtype=float)
+    o = np.argsort(a_s)
+    a_s = a_s[o]
+    a_z = a_z[o]
+
+    ch_aug = np.unique(np.concatenate([ch, a_s]))
+    if ch_aug.size < 2:
+        return curve
+    base_zz = np.interp(ch_aug, ch, zz)
+
+    base_at_anchor = np.interp(a_s, ch_aug, base_zz)
+    residual = a_z - base_at_anchor
+    node_x = np.concatenate([[float(ch_aug[0])], a_s, [float(ch_aug[-1])]])
+    node_r = np.concatenate([[0.0], residual, [0.0]])
+    keep = np.ones(node_x.shape, dtype=bool)
+    for i in range(1, node_x.size):
+        if not (node_x[i] > node_x[i - 1]):
+            keep[i] = False
+    node_x = node_x[keep]
+    node_r = node_r[keep]
+    if node_x.size < 2:
+        return {"chain": ch_aug, "elev": base_zz}
+
+    corr = np.interp(ch_aug, node_x, node_r)
+    zz_adj = base_zz + corr
+    for s_val, z_val in zip(a_s, a_z):
+        hit = np.isclose(ch_aug, s_val, rtol=0.0, atol=1e-9)
+        zz_adj[hit] = z_val
+    return {"chain": ch_aug, "elev": zz_adj}
+
+
 def anchors_ready_for_cross_constraints(intersections: Dict[str, Any], anchors: Dict[str, Any]) -> bool:
     inter_items = [it for it in (intersections.get("items", []) or []) if str(it.get("status", "")).startswith(("ok", "multi_point"))]
     if not inter_items:
@@ -116,94 +227,24 @@ def extend_endpoint_targets_with_cross_anchors(
     endpoints: Optional[Tuple[float, float, float, float]],
     anchors: List[dict],
 ) -> Optional[Tuple[float, float, float, float]]:
-    if endpoints is None or not anchors:
-        return endpoints
-    s_vals = [float(a.get("s_on_cross")) for a in anchors if a.get("s_on_cross", None) is not None]
-    s_vals = [s for s in s_vals if np.isfinite(s)]
-    if not s_vals:
-        return endpoints
-    s0, z0, s1, z1 = map(float, endpoints)
-    lo = min(s0, s1)
-    hi = max(s0, s1)
-    new_lo = min(lo, min(s_vals))
-    new_hi = max(hi, max(s_vals))
-    if not (new_hi > new_lo):
-        return endpoints
-    if abs(new_lo - lo) < 1e-9 and abs(new_hi - hi) < 1e-9:
-        return endpoints
-    chain = np.asarray(prof.get("chain", []), dtype=float)
-    elev = np.asarray(prof.get("elev_s", []), dtype=float)
-    m = np.isfinite(chain) & np.isfinite(elev)
-    if int(np.count_nonzero(m)) < 2:
-        return endpoints
-    chain = chain[m]
-    elev = elev[m]
-    order = np.argsort(chain)
-    chain = chain[order]
-    elev = elev[order]
-    z_lo = float(np.interp(new_lo, chain, elev))
-    z_hi = float(np.interp(new_hi, chain, elev))
-    return (new_lo, z_lo, new_hi, z_hi)
+    return extend_endpoint_targets_with_points(
+        prof,
+        endpoints,
+        anchors,
+        chain_key="s_on_cross",
+        elev_key="z",
+    )
 
 
 def constrain_curve_to_cross_anchors(curve: Optional[Dict[str, np.ndarray]], anchors: List[dict]) -> Optional[Dict[str, np.ndarray]]:
     if not curve or len(anchors) < 3:
         return curve
-
-    ch = np.asarray((curve or {}).get("chain", []), dtype=float)
-    zz = np.asarray((curve or {}).get("elev", []), dtype=float)
-    m = np.isfinite(ch) & np.isfinite(zz)
-    ch = ch[m]
-    zz = zz[m]
-    if ch.size < 2:
-        return curve
-    order = np.argsort(ch)
-    ch = ch[order]
-    zz = zz[order]
-
-    a_s = []
-    a_z = []
-    for a in anchors:
-        try:
-            s = float(a.get("s_on_cross"))
-            z = float(a.get("z"))
-        except Exception:
-            continue
-        if np.isfinite(s) and np.isfinite(z):
-            a_s.append(s)
-            a_z.append(z)
-    if len(a_s) < 3:
-        return curve
-    a_s = np.asarray(a_s, dtype=float)
-    a_z = np.asarray(a_z, dtype=float)
-    o = np.argsort(a_s)
-    a_s = a_s[o]
-    a_z = a_z[o]
-
-    ch_aug = np.unique(np.concatenate([ch, a_s]))
-    if ch_aug.size < 2:
-        return curve
-    base_zz = np.interp(ch_aug, ch, zz)
-
-    base_at_anchor = np.interp(a_s, ch_aug, base_zz)
-    residual = a_z - base_at_anchor
-    node_x = np.concatenate([[float(ch_aug[0])], a_s, [float(ch_aug[-1])]])
-    node_r = np.concatenate([[0.0], residual, [0.0]])
-    keep = np.ones(node_x.shape, dtype=bool)
-    for i in range(1, node_x.size):
-        if not (node_x[i] > node_x[i - 1]):
-            keep[i] = False
-    node_x = node_x[keep]
-    node_r = node_r[keep]
-    if node_x.size < 2:
-        return {"chain": ch_aug, "elev": base_zz}
-
-    corr = np.interp(ch_aug, node_x, node_r)
-    zz_adj = base_zz + corr
-    for s, z in zip(a_s, a_z):
-        hit = np.isclose(ch_aug, s, rtol=0.0, atol=1e-9)
-        zz_adj[hit] = z
-    return {"chain": ch_aug, "elev": zz_adj}
+    return constrain_curve_to_points(
+        curve,
+        anchors,
+        chain_key="s_on_cross",
+        elev_key="z",
+    )
 
 
 def update_anchors_for_saved_main_curve(

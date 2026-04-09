@@ -127,6 +127,14 @@ class UI3RunPaths:
     def curve_nurbs_info_json_path_for(self, line_id: str) -> str:
         return os.path.join(self.curve_dir(), f"nurbs_info_{line_id}.json")
 
+    def boring_holes_dir(self) -> str:
+        path = os.path.join(self.ui3_run_dir(), "boring_holes")
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def boring_holes_json_path_for(self, line_id: str) -> str:
+        return os.path.join(self.boring_holes_dir(), f"{line_id}_boring_holes.json")
+
     def anchors_json_path(self) -> str:
         return os.path.join(self.ui3_run_dir(), "anchors.json")
 

@@ -462,6 +462,9 @@ class UI3GroupPanelMixin:
             if not hasattr(self, "_gdf") or self._gdf is None or self._gdf.empty:
                 self._warn("[UI3] No lines loaded from UI2.")
                 return
+            if self._current_ui2_line_role() != "main":
+                self._warn("[UI3] Auto Group applies only to Main Lines. Cross Lines will use a separate method.")
+                return
             row = self.line_combo.currentIndex()
             if row < 0:
                 self._warn("[UI3] No line selected.")
