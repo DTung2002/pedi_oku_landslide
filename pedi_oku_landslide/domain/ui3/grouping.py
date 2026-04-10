@@ -323,11 +323,12 @@ def filter_rdp_nodes_to_slip_zone(
     return chain[keep], elev[keep], curv[keep]
 
 
-def _prune_first_20m_descending_curvature_nodes(
+def _keep_only_last_curvature_boundary_in_first_window(
     slip_start_x: float,
     xs: np.ndarray,
     ks: np.ndarray,
     *,
+    curvature_thr_abs: float,
     window_m: float = 20.0,
 ) -> Tuple[np.ndarray, np.ndarray]:
     xs = np.asarray(xs, dtype=float)
@@ -345,25 +346,15 @@ def _prune_first_20m_descending_curvature_nodes(
     if win <= 0.0:
         return xs, ks
 
-    keep = np.ones(n, dtype=bool)
+    thr = abs(float(curvature_thr_abs))
     in_window = np.isfinite(xs) & (xs > float(slip_start_x)) & (xs <= (float(slip_start_x) + win))
-    window_idxs = np.flatnonzero(in_window)
-    if window_idxs.size <= 1:
+    above_thr = np.isfinite(ks) & (np.abs(ks) > thr)
+    candidate_idxs = np.flatnonzero(in_window & above_thr)
+    if candidate_idxs.size <= 1:
         return xs, ks
 
-    # The synthetic list is [slip_start] + window nodes, so the last window node
-    # is always kept as the list endpoint and never enters pair pruning.
-    middle_idxs = window_idxs[:-1]
-    i = 0
-    while i + 1 < middle_idxs.size:
-        left_idx = int(middle_idxs[i])
-        right_idx = int(middle_idxs[i + 1])
-        left_k = float(ks[left_idx])
-        right_k = float(ks[right_idx])
-        if np.isfinite(left_k) and np.isfinite(right_k) and right_k < left_k:
-            keep[left_idx] = False
-            keep[right_idx] = False
-        i += 2
+    keep = np.ones(n, dtype=bool)
+    keep[candidate_idxs[:-1]] = False
     return xs[keep], ks[keep]
 
 
@@ -512,7 +503,13 @@ def auto_group_profile_by_criteria(
     ks = np.asarray(nodes.get("curvature", []), dtype=float)
     smax_effective = snap_slip_span_end_to_rdp_node(float(smin), float(smax), xs, snap_tol_m=float(rdp_eps_m))
     if bool(include_curvature_threshold) and xs.size >= 1 and ks.size == xs.size:
-        xs, ks = _prune_first_20m_descending_curvature_nodes(float(smin), xs, ks, window_m=20.0)
+        xs, ks = _keep_only_last_curvature_boundary_in_first_window(
+            float(smin),
+            xs,
+            ks,
+            curvature_thr_abs=float(curvature_thr_abs),
+            window_m=20.0,
+        )
 
     boundaries_meta: List[Dict[str, Any]] = [
         _mk_boundary(float(smin), "slip_span_start", score=0.0, fixed=True),
