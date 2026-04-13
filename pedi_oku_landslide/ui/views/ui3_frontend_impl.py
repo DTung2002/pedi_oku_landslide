@@ -109,6 +109,7 @@ class CurveAnalyzeTab(
         self._anchors_xyz_cache: Optional[Dict[str, Any]] = None
         self._boring_holes_data: Dict[str, Any] = {"version": 1, "distance_tolerance_m": 1.0, "items": []}
         self._nurbs_params_by_line: Dict[str, Dict[str, Any]] = {}
+        self._nurbs_seed_method_by_line: Dict[str, str] = {}
         self._group_table_updating: bool = False
         self._boring_table_updating: bool = False
         self._nurbs_updating_ui: bool = False
@@ -386,6 +387,12 @@ class CurveAnalyzeTab(
         self.nurbs_deg_spin.setValue(3)
         self.nurbs_deg_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
         row_cfg.addWidget(self.nurbs_deg_spin)
+        row_cfg.addSpacing(8)
+        row_cfg.addWidget(QLabel("Seed:"))
+        self.nurbs_seed_method_combo = NoWheelComboBox()
+        self.nurbs_seed_method_combo.addItem("Bezier-like", "bezier_like")
+        self.nurbs_seed_method_combo.addItem("Slope-guided", "slope_guided")
+        row_cfg.addWidget(self.nurbs_seed_method_combo, 1)
         ln.addLayout(row_cfg)
 
         self.nurbs_table = QTableWidget(0, 4)
@@ -407,6 +414,7 @@ class CurveAnalyzeTab(
 
         self.nurbs_cp_spin.valueChanged.connect(self._on_nurbs_cp_spin_changed)
         self.nurbs_deg_spin.valueChanged.connect(self._on_nurbs_deg_spin_changed)
+        self.nurbs_seed_method_combo.currentIndexChanged.connect(self._on_nurbs_seed_method_changed)
         self.btn_nurbs_load.clicked.connect(self._on_load_nurbs_info)
         self.btn_nurbs_reset.clicked.connect(self._on_nurbs_reset_defaults)
         self.btn_nurbs_save.clicked.connect(self._on_nurbs_save)

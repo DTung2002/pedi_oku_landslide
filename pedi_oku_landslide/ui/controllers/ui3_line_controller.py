@@ -776,6 +776,14 @@ class UI3LineControllerMixin:
             out_csv=self._rdp_csv_path_for(line_id),
         )
 
+    def _save_theta_csv_for_line(self, line_id: str, prof: dict, groups: Optional[list] = None) -> Optional[str]:
+        return self._backend.save_theta_csv(
+            line_id=line_id,
+            profile=prof,
+            groups=groups if groups is not None else (self._active_groups or []),
+            out_csv=self._theta_csv_path_for(line_id),
+        )
+
     def _profile_png_path(self) -> str:
         return self._profile_png_path_for(self._line_id_current())
 
@@ -793,6 +801,9 @@ class UI3LineControllerMixin:
 
     def _rdp_csv_path_for(self, line_id: str) -> str:
         return os.path.join(self._ground_dir(), f"{line_id}_RDP.csv")
+
+    def _theta_csv_path_for(self, line_id: str) -> str:
+        return os.path.join(self._ground_dir(), f"{line_id}_theta.csv")
 
     def _load_lines_into_combo(self) -> None:
         self.line_combo.blockSignals(True)
@@ -906,6 +917,7 @@ class UI3LineControllerMixin:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f) or {}
+            self._set_nurbs_seed_method_for_line(line_id, data.get("nurbs_seed_method"), sync_ui=False)
             cp_items = data.get("control_points", []) or []
             if not cp_items:
                 return False
@@ -945,6 +957,8 @@ class UI3LineControllerMixin:
                 self.nurbs_cp_spin.setValue(n_ctrl)
                 self.nurbs_deg_spin.setMaximum(max(1, n_ctrl - 1))
                 self.nurbs_deg_spin.setValue(deg)
+                method_idx = self.nurbs_seed_method_combo.findData(self._get_nurbs_seed_method_for_line(line_id))
+                self.nurbs_seed_method_combo.setCurrentIndex(method_idx if method_idx >= 0 else 0)
                 self._populate_nurbs_table(params)
             finally:
                 self._nurbs_updating_ui = False

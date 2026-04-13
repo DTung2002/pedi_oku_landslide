@@ -26,6 +26,7 @@ from pedi_oku_landslide.infrastructure.storage.ui3_storage import (
 from pedi_oku_landslide.application.ui3.exports import (
     save_ground_csv_for_line as _save_ground_csv_for_line_impl,
     save_rdp_csv_for_line as _save_rdp_csv_for_line_impl,
+    save_theta_csv_for_line as _save_theta_csv_for_line_impl,
 )
 from pedi_oku_landslide.application.ui3.group_state import (
     build_group_json_payload as _build_group_json_payload_impl,
@@ -237,6 +238,14 @@ class UI3BackendService:
             out_csv=out_csv,
         )
 
+    def save_theta_csv(self, *, line_id: str, profile: Dict[str, Any], groups: Optional[List[dict]], out_csv: str) -> Optional[str]:
+        return _save_theta_csv_for_line_impl(
+            line_id=line_id,
+            prof=profile,
+            groups=groups,
+            out_csv=out_csv,
+        )
+
     def load_group_json_data(
         self,
         *,
@@ -260,6 +269,7 @@ class UI3BackendService:
         prof: Optional[dict],
         chainage_origin: str,
         curve_method: str,
+        nurbs_seed_method: Optional[str],
         profile_dem_source: str,
         profile_dem_path: str,
         grouping_params: Dict[str, Any],
@@ -271,6 +281,7 @@ class UI3BackendService:
             prof=prof,
             chainage_origin=chainage_origin,
             curve_method=curve_method,
+            nurbs_seed_method=nurbs_seed_method,
             profile_dem_source=profile_dem_source,
             profile_dem_path=profile_dem_path,
             grouping_params=grouping_params,
@@ -395,12 +406,14 @@ class UI3BackendService:
         groups: List[dict],
         base_curve: dict,
         endpoints: Tuple[float, float, float, float],
+        nurbs_seed_method: Optional[str] = None,
     ) -> Dict[str, Any]:
         return _build_default_nurbs_params_impl(
             prof=prof,
             groups=groups,
             base_curve=base_curve,
             endpoints=endpoints,
+            nurbs_seed_method=nurbs_seed_method,
         )
 
     def reconcile_nurbs_params_with_groups(
@@ -411,6 +424,7 @@ class UI3BackendService:
         base_curve: dict,
         params: Optional[Dict[str, Any]],
         endpoints: Tuple[float, float, float, float],
+        nurbs_seed_method: Optional[str] = None,
     ) -> Dict[str, Any]:
         return _reconcile_nurbs_params_with_groups_impl(
             prof=prof,
@@ -418,6 +432,7 @@ class UI3BackendService:
             base_curve=base_curve,
             params=params,
             endpoints=endpoints,
+            nurbs_seed_method=nurbs_seed_method,
         )
 
     def clamp_curve_below_ground(

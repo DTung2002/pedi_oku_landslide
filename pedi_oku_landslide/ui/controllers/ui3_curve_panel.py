@@ -12,6 +12,13 @@ WORKFLOW_GROUP_MIN_LEN_M = 0.0
 
 class UI3CurvePanelMixin:
     @staticmethod
+    def _normalize_nurbs_seed_method(method: Optional[str]) -> str:
+        m = str(method or "").strip().lower()
+        if m == "slope_guided":
+            return "slope_guided"
+        return "bezier_like"
+
+    @staticmethod
     def _normalize_curve_method(method: Optional[str]) -> str:
         m = str(method or "").strip().lower()
         if m == "nurbs":
@@ -58,6 +65,37 @@ class UI3CurvePanelMixin:
                 pass
         return self._set_curve_method_for_line(line_id, "bezier")
 
+    def _set_nurbs_seed_method_for_line(self, line_id: str, method: Optional[str], *, sync_ui: bool = True) -> str:
+        nm = self._normalize_nurbs_seed_method(method)
+        self._nurbs_seed_method_by_line[line_id] = nm
+        is_current = False
+        try:
+            is_current = bool(line_id) and (line_id == self._line_id_current())
+        except Exception:
+            is_current = False
+        if sync_ui and is_current:
+            self._sync_nurbs_seed_method_combo(line_id)
+        return nm
+
+    def _sync_nurbs_seed_method_combo(self, line_id: Optional[str] = None) -> None:
+        combo = getattr(self, "nurbs_seed_method_combo", None)
+        if combo is None:
+            return
+        lid = line_id or self._line_id_current()
+        method = self._normalize_nurbs_seed_method(self._nurbs_seed_method_by_line.get(lid, "bezier_like"))
+        idx = combo.findData(method)
+        if idx < 0:
+            idx = 0
+        combo.blockSignals(True)
+        combo.setCurrentIndex(idx)
+        combo.blockSignals(False)
+
+    def _get_nurbs_seed_method_for_line(self, line_id: str) -> str:
+        method = self._nurbs_seed_method_by_line.get(line_id, "")
+        if method:
+            return self._normalize_nurbs_seed_method(method)
+        return self._set_nurbs_seed_method_for_line(line_id, "bezier_like", sync_ui=False)
+
     def _profile_endpoints(self, prof: dict):
         return self._backend.profile_endpoints(
             prof,
@@ -86,11 +124,13 @@ class UI3CurvePanelMixin:
         ends = self._nurbs_endpoint_targets(prof, groups, line_id=line_id)
         if ends is None:
             return {"degree": 1, "control_points": [], "weights": []}
+        seed_method = self._get_nurbs_seed_method_for_line(line_id)
         params = self._backend.build_default_nurbs_params(
             prof=prof,
             groups=groups,
             base_curve=base_curve,
             endpoints=ends,
+            nurbs_seed_method=seed_method,
         )
         self._nurbs_params_by_line[line_id] = params
         return params
@@ -106,12 +146,14 @@ class UI3CurvePanelMixin:
         ends = self._nurbs_endpoint_targets(prof, groups, line_id=line_id)
         if ends is None:
             return self._build_default_nurbs_params(line_id, prof, groups, base_curve)
+        seed_method = self._get_nurbs_seed_method_for_line(line_id)
         return self._backend.reconcile_nurbs_params_with_groups(
             prof=prof,
             groups=groups,
             base_curve=base_curve,
             params=params,
             endpoints=ends,
+            nurbs_seed_method=seed_method,
         )
 
     def _active_curve_constraints(self, *, log_skips: bool = False) -> List[dict]:
@@ -164,6 +206,7 @@ class UI3CurvePanelMixin:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 js = json.load(f) or {}
+            self._set_nurbs_seed_method_for_line(line_id, js.get("nurbs_seed_method"), sync_ui=False)
             params = {
                 "degree": int(js.get("degree", 3)),
                 "control_points": js.get("control_points", []),
@@ -197,6 +240,7 @@ class UI3CurvePanelMixin:
         else:
             params = self._reconcile_nurbs_params_with_groups(line_id, prof, groups, base, params)
 
+        seed_method = self._get_nurbs_seed_method_for_line(line_id)
         cps = params.get("control_points", []) or []
         ww = params.get("weights", []) or []
         deg = int(params.get("degree", 3))
@@ -213,6 +257,8 @@ class UI3CurvePanelMixin:
             self.nurbs_cp_spin.setValue(n_ctrl)
             self.nurbs_deg_spin.setMaximum(max(1, n_ctrl - 1))
             self.nurbs_deg_spin.setValue(deg)
+            idx = self.nurbs_seed_method_combo.findData(seed_method)
+            self.nurbs_seed_method_combo.setCurrentIndex(idx if idx >= 0 else 0)
             self._populate_nurbs_table(params)
         finally:
             self._nurbs_updating_ui = False
@@ -428,6 +474,20 @@ class UI3CurvePanelMixin:
                 self._nurbs_updating_ui = False
         self._schedule_nurbs_live_update()
 
+    def _on_nurbs_seed_method_changed(self, _idx: int) -> None:
+        if self._nurbs_updating_ui:
+            return
+        if self.line_combo is None or self.line_combo.count() == 0:
+            return
+        line_id = self._line_id_current()
+        method = self.nurbs_seed_method_combo.currentData()
+        method = self._set_nurbs_seed_method_for_line(line_id, method, sync_ui=False)
+        if not self._active_prof:
+            return
+        self._sync_nurbs_panel_for_current_line(reset_defaults=True)
+        self._schedule_nurbs_live_update()
+        self._log(f"[UI3] NURBS seed method for '{line_id}': {method}")
+
     def _on_nurbs_table_changed(self, _row: int) -> None:
         self._enforce_nurbs_endpoint_lock()
         self._schedule_nurbs_live_update()
@@ -522,6 +582,7 @@ class UI3CurvePanelMixin:
             prof=self._active_prof,
             chainage_origin=self._ui3_chainage_origin(),
             curve_method=self._get_curve_method_for_line(line_id),
+            nurbs_seed_method=self._get_nurbs_seed_method_for_line(line_id),
             profile_dem_source=self._current_profile_source_key(),
             profile_dem_path=str(getattr(self, "dem_path", "") or ""),
             grouping_params=self._grouping_params_current(),
@@ -547,6 +608,7 @@ class UI3CurvePanelMixin:
                     "payload": {
                         "line_id": line_id,
                         "curve_method": "nurbs",
+                        "nurbs_seed_method": self._get_nurbs_seed_method_for_line(line_id),
                         "degree": int(params.get("degree", 3)),
                         "control_points": params.get("control_points", []),
                         "weights": params.get("weights", []),
@@ -562,6 +624,7 @@ class UI3CurvePanelMixin:
                     "payload": {
                         "line_id": line_id,
                         "curve_method": "nurbs",
+                        "nurbs_seed_method": self._get_nurbs_seed_method_for_line(line_id),
                         "chainage_origin": self._ui3_chainage_origin(),
                         "applied_boring_holes": boring_snapshot,
                         "count": int(len(curve_rows)),
@@ -574,6 +637,7 @@ class UI3CurvePanelMixin:
                     "payload": {
                         "line_id": line_id,
                         "chainage_origin": self._ui3_chainage_origin(),
+                        "nurbs_seed_method": self._get_nurbs_seed_method_for_line(line_id),
                         "control_points_count": int(cps.shape[0]),
                         "degree": int(params.get("degree", 3)),
                         "control_points": cp_rows,

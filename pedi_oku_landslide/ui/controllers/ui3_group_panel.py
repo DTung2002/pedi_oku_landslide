@@ -26,6 +26,7 @@ class UI3GroupPanelMixin:
             apply_group_json_settings=self._apply_group_json_settings,
         )
         self._set_curve_method_for_line(lid, cm)
+        self._set_nurbs_seed_method_for_line(lid, data.get("nurbs_seed_method"), sync_ui=(lid == self._line_id_current()))
         return data, groups
 
     def _populate_group_table_rows(self, groups: List[dict], *, length_m: Optional[float]) -> int:
@@ -70,6 +71,7 @@ class UI3GroupPanelMixin:
                 prof=prof,
                 chainage_origin=self._ui3_chainage_origin(),
                 curve_method=cm,
+                nurbs_seed_method=self._get_nurbs_seed_method_for_line(line_id),
                 profile_dem_source=self._current_profile_source_key(),
                 profile_dem_path=str(getattr(self, "dem_path", "") or ""),
                 grouping_params=self._grouping_params_current(),
@@ -413,6 +415,7 @@ class UI3GroupPanelMixin:
                 prof=prof_for_stats,
                 chainage_origin=self._ui3_chainage_origin(),
                 curve_method=curve_method,
+                nurbs_seed_method=self._get_nurbs_seed_method_for_line(line_id),
                 profile_dem_source=self._current_profile_source_key(),
                 profile_dem_path=str(getattr(self, "dem_path", "") or ""),
                 grouping_params=self._grouping_params_current(),
@@ -502,6 +505,7 @@ class UI3GroupPanelMixin:
 
             line_id = self._line_id_current()
             rdp_csv = self._save_rdp_csv_for_line(line_id, prof)
+            theta_csv = self._save_theta_csv_for_line(line_id, prof, groups)
             self._save_groups_to_ui(
                 groups,
                 prof,
@@ -512,6 +516,8 @@ class UI3GroupPanelMixin:
             )
             if rdp_csv:
                 self._log(f"[UI3] Saved RDP CSV: {rdp_csv}")
+            if theta_csv:
+                self._log(f"[UI3] Saved theta CSV: {theta_csv}")
             self._render_current_safe()
             try:
                 self._nurbs_live_timer.stop()

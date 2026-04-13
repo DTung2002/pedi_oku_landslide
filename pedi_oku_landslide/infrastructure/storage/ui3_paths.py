@@ -124,6 +124,9 @@ class UI3RunPaths:
     def rdp_csv_path_for(self, line_id: str) -> str:
         return os.path.join(self.ground_dir(), f"{line_id}_RDP.csv")
 
+    def theta_csv_path_for(self, line_id: str) -> str:
+        return os.path.join(self.ground_dir(), f"{line_id}_theta.csv")
+
     def curve_nurbs_info_json_path_for(self, line_id: str) -> str:
         return os.path.join(self.curve_dir(), f"nurbs_info_{line_id}.json")
 

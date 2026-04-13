@@ -5,6 +5,10 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
 
 from pedi_oku_landslide.domain.ui3.grouping import renumber_groups_visual_order
+from pedi_oku_landslide.domain.ui3.curve_state import (
+    normalize_nurbs_seed_method,
+    median_displacement_theta_deg_for_group,
+)
 
 
 def normalize_curve_method(method: Optional[str]) -> str:
@@ -99,28 +103,10 @@ def groups_with_median_theta(groups: List[dict], prof: Optional[dict]) -> List[d
     if not groups:
         return out
 
-    chain = np.asarray((prof or {}).get("chain", []), dtype=float)
-    theta = np.asarray((prof or {}).get("theta", []), dtype=float)
-    n = int(min(chain.size, theta.size))
-    if n > 0:
-        chain = chain[:n]
-        theta = theta[:n]
-
     for g in groups:
         gg = dict(g or {})
-        med_theta = None
         try:
-            if n > 0:
-                s = float(gg.get("start", gg.get("start_chainage", 0.0)))
-                e = float(gg.get("end", gg.get("end_chainage", 0.0)))
-                if e < s:
-                    s, e = e, s
-                mask = (chain >= s) & (chain <= e)
-                if np.any(mask):
-                    vals = theta[mask]
-                    vals = vals[np.isfinite(vals)]
-                    if vals.size > 0:
-                        med_theta = float(np.median(vals))
+            med_theta = median_displacement_theta_deg_for_group(gg, prof)
         except Exception:
             med_theta = None
         gg["median_theta_deg"] = med_theta
@@ -198,6 +184,7 @@ def load_group_json_data(
         data = json.load(f) or {}
     if apply_settings:
         apply_group_json_settings(data)
+    data["nurbs_seed_method"] = normalize_nurbs_seed_method(data.get("nurbs_seed_method"))
     curve_method = normalize_curve_method(data.get("curve_method"))
     groups = groups_to_current_chainage(
         data.get("groups", []) or [],
@@ -214,6 +201,7 @@ def build_group_json_payload(
     prof: Optional[dict],
     chainage_origin: str,
     curve_method: str,
+    nurbs_seed_method: Optional[str],
     profile_dem_source: str,
     profile_dem_path: str,
     grouping_params: Dict[str, Any],
@@ -235,6 +223,7 @@ def build_group_json_payload(
         "curvature_points": curvature_points,
         "chainage_origin": str(chainage_origin or "").strip(),
         "curve_method": normalize_curve_method(curve_method),
+        "nurbs_seed_method": normalize_nurbs_seed_method(nurbs_seed_method),
         "profile_dem_source": str(profile_dem_source or "").strip(),
         "profile_dem_path": str(profile_dem_path or "").replace("\\", "/"),
         "rdp_eps_m": float(grouping_params.get("rdp_eps_m", 0.5)),

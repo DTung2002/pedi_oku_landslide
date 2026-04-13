@@ -4,6 +4,10 @@ from typing import Optional
 
 import numpy as np
 
+from pedi_oku_landslide.domain.ui3.curve_state import (
+    median_displacement_theta_deg_for_group,
+    start_theta_deg_for_cp1,
+)
 from pedi_oku_landslide.domain.ui3.grouping import extract_curvature_rdp_nodes, filter_rdp_nodes_to_slip_zone
 
 
@@ -121,5 +125,73 @@ def save_rdp_csv_for_line(
     with open(out_csv, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["chainage", "elevation", "curvature"])
+        writer.writerows(rows)
+    return out_csv
+
+
+def save_theta_csv_for_line(
+    *,
+    line_id: str,
+    prof: dict,
+    groups: Optional[list],
+    out_csv: str,
+) -> Optional[str]:
+    if not prof:
+        return None
+    _ = line_id
+
+    group_rows = []
+    for g in (groups or []):
+        try:
+            s = float(g.get("start", g.get("start_chainage", np.nan)))
+            e = float(g.get("end", g.get("end_chainage", np.nan)))
+        except Exception:
+            continue
+        if not (np.isfinite(s) and np.isfinite(e)):
+            continue
+        if e < s:
+            s, e = e, s
+        group_rows.append({
+            "id": str(g.get("id", g.get("group_id", "")) or "").strip(),
+            "start": float(s),
+            "end": float(e),
+        })
+    group_rows.sort(key=lambda it: (float(it["start"]), float(it["end"])))
+    if len(group_rows) < 2:
+        return None
+
+    rows = []
+    start_chainage = float(group_rows[0]["start"])
+    start_theta = start_theta_deg_for_cp1(
+        prof,
+        start_chainage,
+        percentile=20.0,
+        neighbors_each_side=5,
+    )
+    first_boundary = float(group_rows[0]["end"])
+    rows.append((
+        "CP1",
+        float(first_boundary),
+        float(start_theta) if start_theta is not None and np.isfinite(start_theta) else None,
+        "theta_percentile_20",
+        "",
+    ))
+
+    for cp_idx in range(2, len(group_rows)):
+        group = group_rows[cp_idx - 1]
+        boundary_chainage = float(group_rows[cp_idx - 1]["end"])
+        theta_deg = median_displacement_theta_deg_for_group(group, prof)
+        rows.append((
+            f"CP{cp_idx}",
+            float(boundary_chainage),
+            float(theta_deg) if theta_deg is not None and np.isfinite(theta_deg) else None,
+            "median_theta_vector",
+            str(group.get("id", "") or ""),
+        ))
+
+    os.makedirs(os.path.dirname(out_csv), exist_ok=True)
+    with open(out_csv, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["control_point", "boundary_chainage", "theta_deg", "theta_source", "group_id"])
         writer.writerows(rows)
     return out_csv
