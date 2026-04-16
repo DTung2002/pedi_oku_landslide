@@ -25,6 +25,7 @@ from PyQt5.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSlider,
     QSpinBox,
@@ -84,10 +85,13 @@ class SectionSelectionTab(QWidget):
         self.project: Optional[str] = None
         self.run_label: Optional[str] = None
         self.run_dir: Optional[str] = None
-        self._section_lines: list[QGraphicsLineItem] = []
+        self._section_lines: list[object] = []
         self._section_line_labels: list[QGraphicsSimpleTextItem] = []
-        self._preview_line: Optional[QGraphicsLineItem] = None
+        self._poly_section_lines: list[object] = []
+        self._poly_section_line_labels: list[QGraphicsSimpleTextItem] = []
+        self._preview_line: Optional[object] = None
         self._preview_label: Optional[QGraphicsSimpleTextItem] = None
+        self._preview_source: Optional[str] = None
 
         # caches
         self._tr: Optional[Affine] = None
@@ -107,8 +111,10 @@ class SectionSelectionTab(QWidget):
         self._vec_pen_base: int = 1
         self._vec_arrow_base: float = 12.0
 
-        self._sections: List[Tuple[Tuple[float, float], Tuple[float, float]]] = []
+        self._sections: List[Any] = []
         self._section_meta: List[Dict[str, Any]] = []
+        self._poly_sections: List[List[Tuple[float, float]]] = []
+        self._poly_section_meta: List[Dict[str, Any]] = []
 
         self._updating_table: bool = False
 
@@ -182,7 +188,23 @@ class SectionSelectionTab(QWidget):
         self.viewer = _LayeredViewer(self)
 
         # left pane
-        left = QWidget(); left.setMinimumWidth(self._left_min_w); left_lo = QVBoxLayout(left)
+        left = QWidget()
+        left.setMinimumWidth(self._left_min_w)
+        left_shell = QVBoxLayout(left)
+        left_shell.setContentsMargins(0, 0, 0, 0)
+        left_shell.setSpacing(0)
+        left_scroll = QScrollArea(left)
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        left_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        left_scroll.setFrameShape(left_scroll.NoFrame)
+        left_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        left_container = QWidget()
+        left_lo = QVBoxLayout(left_container)
+        left_lo.setContentsMargins(0, 0, 0, 0)
+        left_lo.setSpacing(6)
+        left_scroll.setWidget(left_container)
+        left_shell.addWidget(left_scroll)
 
         grp_proj = QGroupBox("Project"); gl = QHBoxLayout(grp_proj)
         gl.setContentsMargins(8, 8, 8, 8)
@@ -324,16 +346,46 @@ class SectionSelectionTab(QWidget):
         hdr.setSectionResizeMode(3, hdr.Fixed)    # Role
         self.tbl.setColumnWidth(0, 56)
         self.tbl.setColumnWidth(3, 100)
+        self.tbl.setMinimumHeight(220)
+        self.tbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
         self.tbl.itemChanged.connect(self._on_table_item_changed)
+        sl.addWidget(QLabel("Straight Sections"))
         sl.addWidget(self.tbl)
 
-        # Một hàng nút thao tác Section: Auto Line, Draw Line, Clear All, Confirm
+        self.tbl_poly = QTableWidget(0, 6)
+        self.tbl_poly.setHorizontalHeaderLabels(["ID", "Start (x,y)", "End (x,y)", "Points", "Vertices", "Role"])
+        self.tbl_poly.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tbl_poly.viewport().setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tbl_poly.verticalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tbl_poly.verticalHeader().setVisible(False)
+        hdr_poly = self.tbl_poly.horizontalHeader()
+        hdr_poly.setStretchLastSection(False)
+        hdr_poly.setSectionResizeMode(0, hdr_poly.Fixed)
+        hdr_poly.setSectionResizeMode(1, hdr_poly.Stretch)
+        hdr_poly.setSectionResizeMode(2, hdr_poly.Stretch)
+        hdr_poly.setSectionResizeMode(3, hdr_poly.Fixed)
+        hdr_poly.setSectionResizeMode(4, hdr_poly.Stretch)
+        hdr_poly.setSectionResizeMode(5, hdr_poly.Fixed)
+        self.tbl_poly.setColumnWidth(0, 56)
+        self.tbl_poly.setColumnWidth(3, 70)
+        self.tbl_poly.setColumnWidth(5, 100)
+        self.tbl_poly.setMinimumHeight(220)
+        self.tbl_poly.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+        self.tbl_poly.itemChanged.connect(self._on_polyline_table_item_changed)
+        sl.addWidget(QLabel("Polyline Sections"))
+        sl.addWidget(self.tbl_poly)
+
+        # Một hàng nút thao tác Section: mode chọn + Auto Line, Preview, Clear All, Confirm
         row_actions = HBox()
+        self.combo_draw_mode = QComboBox()
+        self.combo_draw_mode.addItem("Straight Section", "straight")
+        self.combo_draw_mode.addItem("Polyline Section", "polyline")
         self.btn_auto = QPushButton("Auto Line")
-        self.btn_prev = QPushButton("Draw Line")
+        self.btn_prev = QPushButton("Draw")
         self.btn_clear = QPushButton("Clear All")
         self.btn_confirm = QPushButton("Confirm")
 
+        row_actions.addWidget(self.combo_draw_mode, 1)
         for b in (self.btn_auto, self.btn_prev, self.btn_clear, self.btn_confirm):
             # stretch=1 → 4 nút chia đều chiều ngang
             row_actions.addWidget(b, 1)
@@ -349,6 +401,8 @@ class SectionSelectionTab(QWidget):
         self.status_text.setLineWrapMode(QPlainTextEdit.NoWrap)
         self.status_text.setMaximumBlockCount(2000)  # tránh phình bộ nhớ khi log dài
         self.status_text.setStyleSheet("font-family: Consolas, 'Courier New', monospace;")
+        self.status_text.setMinimumHeight(220)
+        self.status_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
         sv.addWidget(self.lbl_cursor); sv.addWidget(self.status_text)
         left_lo.addWidget(grp_status)
 
@@ -460,11 +514,16 @@ class SectionSelectionTab(QWidget):
         self.btn_prev.clicked.connect(self._on_preview)
         self.btn_confirm.clicked.connect(self._on_confirm_sections)
         self.btn_auto.clicked.connect(self._on_auto_lines)
-        self.tbl.customContextMenuRequested.connect(self._on_sections_table_context_menu)
-        self.tbl.viewport().customContextMenuRequested.connect(self._on_sections_table_context_menu)
-        self.tbl.verticalHeader().customContextMenuRequested.connect(self._on_sections_table_header_context_menu)
+        self.tbl.customContextMenuRequested.connect(lambda pos: self._on_sections_table_context_menu(self.tbl, "straight", pos))
+        self.tbl.viewport().customContextMenuRequested.connect(lambda pos: self._on_sections_table_context_menu(self.tbl, "straight", pos))
+        self.tbl.verticalHeader().customContextMenuRequested.connect(lambda pos: self._on_sections_table_header_context_menu(self.tbl, "straight", pos))
+        self.tbl_poly.customContextMenuRequested.connect(lambda pos: self._on_sections_table_context_menu(self.tbl_poly, "polyline", pos))
+        self.tbl_poly.viewport().customContextMenuRequested.connect(lambda pos: self._on_sections_table_context_menu(self.tbl_poly, "polyline", pos))
+        self.tbl_poly.verticalHeader().customContextMenuRequested.connect(lambda pos: self._on_sections_table_header_context_menu(self.tbl_poly, "polyline", pos))
 
+        self.combo_draw_mode.currentIndexChanged.connect(self._on_draw_mode_changed)
         self.viewer.sectionPicked.connect(self._on_section_picked)
+        self.viewer.polylinePicked.connect(self._on_polyline_picked)
         self.viewer.cursorMoved.connect(lambda x, y: self.lbl_cursor.setText(f"Cursor: X={x:.2f}, Y={y:.2f}"))
 
     def _on_render_vectors(self) -> None:
@@ -542,7 +601,7 @@ class SectionSelectionTab(QWidget):
 
     def _load_saved_sections(self) -> None:
         """
-        Đọc lại ui2/sections.csv (nếu tồn tại) và vẽ lại các tuyến lên map + bảng.
+        Đọc lại ui2/sections.csv + ui2/polylines.json (nếu tồn tại) và vẽ lại các tuyến lên map + bảng.
         """
         if not self.run_dir:
             return
@@ -552,12 +611,11 @@ class SectionSelectionTab(QWidget):
         rows = result.get("rows", [])
         migrated = bool(result.get("migrated", False))
         csv_path = str(result.get("csv_path", ""))
-        if not rows and not os.path.isfile(csv_path):
-            self._info("[UI2] No saved sections.csv – start with empty sections.")
-            return
-
-        if not rows:
-            self._info("[UI2] sections.csv is empty.")
+        poly_result = self._backend.load_polylines(self.run_dir)
+        poly_rows = list(poly_result.get("rows", []) or [])
+        poly_path = str(poly_result.get("json_path", ""))
+        if not rows and not poly_rows and not os.path.isfile(csv_path) and not os.path.isfile(poly_path):
+            self._info("[UI2] No saved sections.csv or polylines.json – start with empty sections.")
             return
 
         # Append từng section vào bảng + vẽ line
@@ -580,9 +638,253 @@ class SectionSelectionTab(QWidget):
             self._append_section((x1, y1), (x2, y2), meta=meta)
             count += 1
 
+        for row in poly_rows:
+            vertices = [tuple(map(float, v)) for v in list(row.get("vertices", []) or [])]
+            meta = {
+                "line_id": str(row.get("line_id", "")).strip(),
+                "line_role": str(row.get("line_role", "")).strip(),
+            }
+            if vertices:
+                self._append_polyline(vertices, meta=meta)
+                count += 1
+
         if migrated:
-            self._ok("[UI2] Migrated legacy sections.csv to direction_version=2 and cleared old UI3 outputs.")
-        self._ok(f"[UI2] Loaded {count} sections from sections.csv")
+            self._ok("[UI2] Migrated legacy sections.csv to current direction version and cleared old UI3 outputs.")
+        self._ok(f"[UI2] Loaded {count} sections from saved UI2 files")
+
+    def _on_draw_mode_changed(self, _index: int) -> None:
+        mode = "straight"
+        if hasattr(self, "combo_draw_mode"):
+            mode = str(self.combo_draw_mode.currentData() or "straight")
+        self.viewer.set_draw_mode(mode)
+        self._info(f"[UI2] Draw mode: {mode}")
+
+    @staticmethod
+    def _polyline_length(vertices: List[Tuple[float, float]]) -> float:
+        if len(vertices) < 2:
+            return 0.0
+        total = 0.0
+        for i in range(1, len(vertices)):
+            total += float(math.hypot(vertices[i][0] - vertices[i - 1][0], vertices[i][1] - vertices[i - 1][1]))
+        return total
+
+    @staticmethod
+    def _section_type(meta: Optional[Dict[str, Any]]) -> str:
+        return "polyline" if str((meta or {}).get("section_type", "")).strip().lower() == "polyline" else "straight"
+
+    def _section_vertices(self, row: int) -> List[Tuple[float, float]]:
+        if not (0 <= row < len(self._sections)):
+            return []
+        geom = self._sections[row]
+        if isinstance(geom, list):
+            out: List[Tuple[float, float]] = []
+            for vertex in geom:
+                try:
+                    out.append((float(vertex[0]), float(vertex[1])))
+                except Exception:
+                    continue
+            return out
+        if isinstance(geom, tuple) and len(geom) == 2:
+            try:
+                p0 = (float(geom[0][0]), float(geom[0][1]))
+                p1 = (float(geom[1][0]), float(geom[1][1]))
+                return [p0, p1]
+            except Exception:
+                return []
+        return []
+
+    def _polyline_vertices(self, row: int) -> List[Tuple[float, float]]:
+        if not (0 <= row < len(self._poly_sections)):
+            return []
+        out: List[Tuple[float, float]] = []
+        for vertex in self._poly_sections[row]:
+            try:
+                out.append((float(vertex[0]), float(vertex[1])))
+            except Exception:
+                continue
+        return out
+
+    @staticmethod
+    def _format_polyline_vertices(vertices: List[Tuple[float, float]]) -> str:
+        return "; ".join(f"{float(x):.2f}, {float(y):.2f}" for x, y in vertices)
+
+    @staticmethod
+    def _parse_polyline_vertices(text: str) -> List[Tuple[float, float]]:
+        raw = str(text or "").strip()
+        if not raw:
+            raise ValueError("Vertices cannot be empty.")
+        vertices: List[Tuple[float, float]] = []
+        for chunk in raw.split(";"):
+            part = chunk.strip()
+            if not part:
+                continue
+            coords = [s.strip() for s in part.split(",")]
+            if len(coords) != 2:
+                raise ValueError("Each vertex must be in 'x, y' format.")
+            x = float(coords[0])
+            y = float(coords[1])
+            vertices.append((x, y))
+        if len(vertices) < 2:
+            raise ValueError("Polyline must contain at least 2 vertices.")
+        return vertices
+
+    def _current_selection(self) -> Tuple[Optional[str], int]:
+        if hasattr(self, "tbl") and self.tbl.currentRow() >= 0 and self.tbl.hasFocus():
+            return "straight", int(self.tbl.currentRow())
+        if hasattr(self, "tbl_poly") and self.tbl_poly.currentRow() >= 0 and self.tbl_poly.hasFocus():
+            return "polyline", int(self.tbl_poly.currentRow())
+        if hasattr(self, "tbl_poly") and self.tbl_poly.currentRow() >= 0 and self.tbl_poly.selectedIndexes():
+            return "polyline", int(self.tbl_poly.currentRow())
+        if hasattr(self, "tbl") and self.tbl.currentRow() >= 0 and self.tbl.selectedIndexes():
+            return "straight", int(self.tbl.currentRow())
+        return None, -1
+
+    def _section_display_type(self, meta: Dict[str, Any], vertices: List[Tuple[float, float]]) -> str:
+        if self._section_type(meta) == "polyline":
+            return f"Polyline ({len(vertices)} pts)"
+        return "Straight"
+
+    def _build_scene_path(self, vertices: List[Tuple[float, float]]) -> Optional[QPainterPath]:
+        if self._inv_tr is None or len(vertices) < 2:
+            return None
+        c0, r0 = self._inv_tr * vertices[0]
+        path = QPainterPath(QPointF(c0, r0))
+        for pt in vertices[1:]:
+            c, r = self._inv_tr * pt
+            path.lineTo(c, r)
+        return path
+
+    def _label_anchor_pixels(self, vertices: List[Tuple[float, float]]) -> Optional[Tuple[float, float, float, float]]:
+        if self._inv_tr is None or len(vertices) < 2:
+            return None
+        c0, r0 = self._inv_tr * vertices[0]
+        c1, r1 = self._inv_tr * vertices[1]
+        return float(c0), float(r0), float(c1), float(r1)
+
+    def _render_section_item(self, vertices: List[Tuple[float, float]], label_text: str) -> Tuple[Optional[object], Optional[QGraphicsSimpleTextItem]]:
+        if self._inv_tr is None or len(vertices) < 2:
+            return None, None
+        is_polyline = len(vertices) > 2
+        pen = QPen(QColor(220, 40, 40, 220) if is_polyline else QColor(30, 200, 30, 200))
+        pen.setCosmetic(True)
+        pen.setWidth(2)
+        if len(vertices) == 2:
+            c0, r0 = self._inv_tr * vertices[0]
+            c1, r1 = self._inv_tr * vertices[1]
+            item = QGraphicsLineItem(c0, r0, c1, r1)
+            item.setPen(pen)
+            item.setZValue(3)
+            self.viewer.scene.addItem(item)
+        else:
+            path = self._build_scene_path(vertices)
+            if path is None:
+                return None, None
+            item = QGraphicsPathItem(path)
+            item.setPen(pen)
+            item.setZValue(3)
+            self.viewer.scene.addItem(item)
+        label_item = None
+        label_anchor = self._label_anchor_pixels(vertices)
+        if label_anchor is not None:
+            label_item = self._add_line_label(label_text, *label_anchor, z=5)
+        return item, label_item
+
+    def _sync_polyline_row_geometry(self, row: int, vertices: List[Tuple[float, float]]) -> None:
+        if not (0 <= row < self.tbl_poly.rowCount()):
+            return
+        if len(vertices) < 2:
+            return
+        if 0 <= row < len(self._poly_sections):
+            self._poly_sections[row] = list(vertices)
+        while len(self._poly_section_meta) <= row:
+            self._poly_section_meta.append({})
+        if not isinstance(self._poly_section_meta[row], dict):
+            self._poly_section_meta[row] = {}
+        self._poly_section_meta[row]["vertex_count"] = int(len(vertices))
+        self._poly_section_meta[row]["length_m"] = float(self._polyline_length(vertices))
+
+        start_text = f"{vertices[0][0]:.2f}, {vertices[0][1]:.2f}"
+        end_text = f"{vertices[-1][0]:.2f}, {vertices[-1][1]:.2f}"
+        points_text = str(len(vertices))
+        vertices_text = self._format_polyline_vertices(vertices)
+
+        self._updating_table = True
+        try:
+            start_item = self.tbl_poly.item(row, 1)
+            if start_item is None:
+                start_item = QTableWidgetItem(start_text)
+                start_item.setFlags(start_item.flags() & ~Qt.ItemIsEditable)
+                self.tbl_poly.setItem(row, 1, start_item)
+            else:
+                start_item.setText(start_text)
+
+            end_item = self.tbl_poly.item(row, 2)
+            if end_item is None:
+                end_item = QTableWidgetItem(end_text)
+                end_item.setFlags(end_item.flags() & ~Qt.ItemIsEditable)
+                self.tbl_poly.setItem(row, 2, end_item)
+            else:
+                end_item.setText(end_text)
+
+            points_item = self.tbl_poly.item(row, 3)
+            if points_item is None:
+                points_item = QTableWidgetItem(points_text)
+                points_item.setFlags(points_item.flags() & ~Qt.ItemIsEditable)
+                self.tbl_poly.setItem(row, 3, points_item)
+            else:
+                points_item.setText(points_text)
+
+            vertices_item = self.tbl_poly.item(row, 4)
+            if vertices_item is None:
+                vertices_item = QTableWidgetItem(vertices_text)
+                self.tbl_poly.setItem(row, 4, vertices_item)
+            else:
+                vertices_item.setText(vertices_text)
+        finally:
+            self._updating_table = False
+
+        label_text = self.tbl_poly.item(row, 0).text().strip() if self.tbl_poly.item(row, 0) else f"{row + 1}"
+        new_item, new_label = self._render_section_item(vertices, label_text)
+        if 0 <= row < len(self._poly_section_lines):
+            old_item = self._poly_section_lines[row]
+            if old_item is not None:
+                self.viewer.scene.removeItem(old_item)
+            self._poly_section_lines[row] = new_item
+        if 0 <= row < len(self._poly_section_line_labels):
+            old_label = self._poly_section_line_labels[row]
+            if old_label is not None:
+                self.viewer.scene.removeItem(old_label)
+            self._poly_section_line_labels[row] = new_label
+
+        if self._preview_source == "polyline" and self.tbl_poly.currentRow() == row:
+            if self._preview_line is not None:
+                self.viewer.scene.removeItem(self._preview_line)
+                self._preview_line = None
+            if self._preview_label is not None:
+                self.viewer.scene.removeItem(self._preview_label)
+                self._preview_label = None
+            pen = QPen(QColor(200, 30, 30, 220))
+            pen.setCosmetic(True)
+            pen.setWidth(2)
+            if len(vertices) == 2 and self._inv_tr is not None:
+                c0, r0 = self._inv_tr * vertices[0]
+                c1, r1 = self._inv_tr * vertices[1]
+                item = QGraphicsLineItem(c0, r0, c1, r1)
+                item.setPen(pen)
+                item.setZValue(4)
+                self.viewer.scene.addItem(item)
+                self._preview_line = item
+            else:
+                path = self._build_scene_path(vertices)
+                if path is not None:
+                    item = QGraphicsPathItem(path)
+                    item.setPen(pen)
+                    item.setZValue(4)
+                    self.viewer.scene.addItem(item)
+                    self._preview_line = item
+            anchor = self._label_anchor_pixels(vertices)
+            if anchor is not None:
+                self._preview_label = self._add_line_label(label_text, *anchor, z=6)
 
     def _load_dx_dy_and_draw(self, ui1_dir: str, step: int = 25, scale: float = 1.0) -> None:
         self.viewer.clear_vectors()
@@ -688,6 +990,19 @@ class SectionSelectionTab(QWidget):
         self._append_section(p0, p1)
         self._ok(f"Section added: ({x1:.2f},{y1:.2f}) → ({x2:.2f},{y2:.2f})")
 
+    def _on_polyline_picked(self, points: object) -> None:
+        vertices: List[Tuple[float, float]] = []
+        for pt in list(points or []):
+            try:
+                vertices.append((float(pt[0]), float(pt[1])))
+            except Exception:
+                continue
+        if len(vertices) < 2:
+            self._warn("[UI2] Polyline needs at least 2 valid points.")
+            return
+        self._append_polyline(vertices)
+        self._ok(f"[UI2] Polyline added: {len(vertices)} points, length={self._polyline_length(vertices):.2f} m")
+
     @staticmethod
     def _reverse_section_points(
         p0: Tuple[float, float],
@@ -743,48 +1058,103 @@ class SectionSelectionTab(QWidget):
         self._section_meta.append(meta_row)
         role_combo.currentIndexChanged.connect(self._on_role_combo_changed)
 
-        # 2) vẽ line lên viewer (map → pixel)
-        line_item = None
-        label_item = None
-        if self._inv_tr is not None:
-            c0, r0 = self._inv_tr * p0
-            c1, r1 = self._inv_tr * p1
-            pen = QPen(QColor(30, 200, 30, 200))
-            pen.setCosmetic(True)
-            pen.setWidth(2)
-            line_item = QGraphicsLineItem(c0, r0, c1, r1)
-            line_item.setPen(pen)
-            line_item.setZValue(3)
-            self.viewer.scene.addItem(line_item)
-            label_item = self._add_line_label(line_label, c0, r0, c1, r1, z=5)
-
+        line_item, label_item = self._render_section_item([p0, p1], line_label)
         self._section_lines.append(line_item)
         self._section_line_labels.append(label_item)
         self._ok("Section line drawn on map.")
 
-    def _delete_section_row(self, row: int, log_msg: Optional[str] = None) -> bool:
-        if row < 0 or row >= self.tbl.rowCount():
+    def _append_polyline(
+            self,
+            vertices: List[Tuple[float, float]],
+            label: Optional[str] = None,
+            meta: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if len(vertices) < 2:
+            return
+        self._updating_table = True
+        r = self.tbl_poly.rowCount()
+        self.tbl_poly.insertRow(r)
+        hdr = self.tbl_poly.horizontalHeader()
+        hdr.setStretchLastSection(False)
+        hdr.setSectionResizeMode(0, hdr.Fixed)
+        hdr.setSectionResizeMode(1, hdr.Stretch)
+        hdr.setSectionResizeMode(2, hdr.Stretch)
+        hdr.setSectionResizeMode(3, hdr.Fixed)
+        hdr.setSectionResizeMode(4, hdr.Stretch)
+        hdr.setSectionResizeMode(5, hdr.Fixed)
+
+        meta_row = dict(meta or {})
+        meta_row["vertex_count"] = int(len(vertices))
+        meta_row["length_m"] = float(self._polyline_length(vertices))
+        role_txt = self._role_combo_text_from_value(str(meta_row.get("line_role", "") or ""), str(meta_row.get("line_id", "") or ""))
+        meta_row["line_role"] = self._role_value_from_combo_text(role_txt)
+        line_id = str(meta_row.get("line_id", "") or "").strip()
+        if not line_id:
+            line_id = self._next_line_id_for_role(meta_row["line_role"])
+        meta_row["line_id"] = line_id
+        line_label = label if label is not None else line_id
+        p0 = vertices[0]
+        p1 = vertices[-1]
+
+        id_item = QTableWidgetItem(line_label)
+        self.tbl_poly.setItem(r, 0, id_item)
+        start_item = QTableWidgetItem(f"{p0[0]:.2f}, {p0[1]:.2f}")
+        end_item = QTableWidgetItem(f"{p1[0]:.2f}, {p1[1]:.2f}")
+        for item in (start_item, end_item):
+            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+        self.tbl_poly.setItem(r, 1, start_item)
+        self.tbl_poly.setItem(r, 2, end_item)
+        points_item = QTableWidgetItem(str(len(vertices)))
+        points_item.setFlags(points_item.flags() & ~Qt.ItemIsEditable)
+        self.tbl_poly.setItem(r, 3, points_item)
+        self.tbl_poly.setItem(r, 4, QTableWidgetItem(self._format_polyline_vertices(vertices)))
+        role_combo = _NoWheelComboBox(self.tbl_poly)
+        role_combo.addItems(["Main", "Cross"])
+        role_combo.setCurrentText(role_txt)
+        self.tbl_poly.setCellWidget(r, 5, role_combo)
+        self.tbl_poly.verticalHeader().setDefaultSectionSize(30)
+        self.tbl_poly.setColumnWidth(0, 56)
+        self.tbl_poly.setColumnWidth(3, 70)
+        self.tbl_poly.setColumnWidth(5, 100)
+        self._updating_table = False
+
+        self._poly_sections.append(list(vertices))
+        self._poly_section_meta.append(meta_row)
+        role_combo.currentIndexChanged.connect(self._on_role_combo_changed)
+
+        path_item, label_item = self._render_section_item(vertices, line_label)
+        self._poly_section_lines.append(path_item)
+        self._poly_section_line_labels.append(label_item)
+        self._ok("Polyline drawn on map.")
+
+    def _delete_section_row(self, source: str, row: int, log_msg: Optional[str] = None) -> bool:
+        table = self.tbl_poly if source == "polyline" else self.tbl
+        geom_list = self._poly_sections if source == "polyline" else self._sections
+        meta_list = self._poly_section_meta if source == "polyline" else self._section_meta
+        item_list = self._poly_section_lines if source == "polyline" else self._section_lines
+        label_list = self._poly_section_line_labels if source == "polyline" else self._section_line_labels
+        if row < 0 or row >= table.rowCount():
             return False
 
         # remove map line
-        if 0 <= row < len(self._section_lines):
-            it = self._section_lines[row]
+        if 0 <= row < len(item_list):
+            it = item_list[row]
             if it is not None:
                 self.viewer.scene.removeItem(it)
-            self._section_lines.pop(row)
+            item_list.pop(row)
 
         # remove map label
-        if 0 <= row < len(self._section_line_labels):
-            it = self._section_line_labels[row]
+        if 0 <= row < len(label_list):
+            it = label_list[row]
             if it is not None:
                 self.viewer.scene.removeItem(it)
-            self._section_line_labels.pop(row)
+            label_list.pop(row)
 
         # remove section data/meta
-        if 0 <= row < len(self._sections):
-            self._sections.pop(row)
-        if 0 <= row < len(self._section_meta):
-            self._section_meta.pop(row)
+        if 0 <= row < len(geom_list):
+            geom_list.pop(row)
+        if 0 <= row < len(meta_list):
+            meta_list.pop(row)
 
         # remove preview if this row was previewed
         if self._preview_line is not None:
@@ -799,44 +1169,45 @@ class SectionSelectionTab(QWidget):
             except Exception:
                 pass
             self._preview_label = None
+            self._preview_source = None
 
-        self.tbl.removeRow(row)
+        table.removeRow(row)
         if log_msg:
             self._ok(log_msg)
         return True
 
-    def _on_sections_table_context_menu(self, pos) -> None:
-        if self.tbl is None:
+    def _on_sections_table_context_menu(self, table: QTableWidget, source: str, pos) -> None:
+        if table is None:
             return
-        idx = self.tbl.indexAt(pos)
+        idx = table.indexAt(pos)
         if not idx.isValid():
-            item = self.tbl.itemAt(pos)
+            item = table.itemAt(pos)
             if item is None:
                 return
             row = int(item.row())
         else:
             row = int(idx.row())
-        if row < 0 or row >= self.tbl.rowCount():
+        if row < 0 or row >= table.rowCount():
             return
-        self.tbl.selectRow(row)
-        menu = QMenu(self.tbl)
+        table.selectRow(row)
+        menu = QMenu(table)
         act_delete = menu.addAction("Delete")
-        chosen = menu.exec_(self.tbl.viewport().mapToGlobal(pos))
+        chosen = menu.exec_(table.viewport().mapToGlobal(pos))
         if chosen is act_delete:
-            self._delete_section_row(row, log_msg=f"Deleted section #{row + 1}.")
+            self._delete_section_row(source, row, log_msg=f"Deleted section #{row + 1}.")
 
-    def _on_sections_table_header_context_menu(self, pos) -> None:
-        if self.tbl is None:
+    def _on_sections_table_header_context_menu(self, table: QTableWidget, source: str, pos) -> None:
+        if table is None:
             return
-        row = int(self.tbl.rowAt(pos.y()))
-        if row < 0 or row >= self.tbl.rowCount():
+        row = int(table.rowAt(pos.y()))
+        if row < 0 or row >= table.rowCount():
             return
-        self.tbl.selectRow(row)
-        menu = QMenu(self.tbl)
+        table.selectRow(row)
+        menu = QMenu(table)
         act_delete = menu.addAction("Delete")
-        chosen = menu.exec_(self.tbl.verticalHeader().viewport().mapToGlobal(pos))
+        chosen = menu.exec_(table.verticalHeader().viewport().mapToGlobal(pos))
         if chosen is act_delete:
-            self._delete_section_row(row, log_msg=f"Deleted section #{row + 1}.")
+            self._delete_section_row(source, row, log_msg=f"Deleted section #{row + 1}.")
 
     def _add_line_label(
             self,
@@ -917,7 +1288,7 @@ class SectionSelectionTab(QWidget):
         # cập nhật line xanh trên map
         if 0 <= row < len(self._section_lines):
             line_item = self._section_lines[row]
-            if line_item is not None:
+            if isinstance(line_item, QGraphicsLineItem):
                 line_item.setLine(c0, r0, c1, r1)
 
         # cập nhật label (line number)
@@ -963,6 +1334,29 @@ class SectionSelectionTab(QWidget):
                 )
 
         self._ok(f"Updated section #{row + 1} from table edit.")
+
+    def _on_polyline_table_item_changed(self, item) -> None:
+        if self._updating_table or item is None:
+            return
+        row = item.row()
+        col = item.column()
+        if col not in (0, 4):
+            return
+        if col == 4:
+            try:
+                vertices = self._parse_polyline_vertices(item.text())
+            except Exception:
+                return
+            self._sync_polyline_row_geometry(row, vertices)
+        if 0 <= row < len(self._poly_section_meta) and isinstance(self._poly_section_meta[row], dict):
+            self._poly_section_meta[row]["line_id"] = (self.tbl_poly.item(row, 0).text().strip() if self.tbl_poly.item(row, 0) else "")
+        if 0 <= row < len(self._poly_section_line_labels):
+            lbl = self._poly_section_line_labels[row]
+            if lbl is not None:
+                lbl.setText(self.tbl_poly.item(row, 0).text().strip() if self.tbl_poly.item(row, 0) else f"{row + 1}")
+        if self._preview_label is not None and self._preview_source == "polyline" and self.tbl_poly.currentRow() == row:
+            self._preview_label.setText(self.tbl_poly.item(row, 0).text().strip() if self.tbl_poly.item(row, 0) else f"{row + 1}")
+        self._ok(f"Updated polyline #{row + 1} from table edit.")
 
     def _on_auto_lines(self) -> None:
         """
@@ -1038,23 +1432,7 @@ class SectionSelectionTab(QWidget):
             self._ok(f"[UI2] Main direction ≈ {ang:.1f} deg")
 
         # 4) Xoá tất cả section cũ (bảng + line trên map)
-        self.tbl.setRowCount(0)
-        self._sections.clear()
-        self._section_meta.clear()
-        for it in getattr(self, "_section_lines", []):
-            if it is not None:
-                self.viewer.scene.removeItem(it)
-        self._section_lines.clear()
-        for it in getattr(self, "_section_line_labels", []):
-            if it is not None:
-                self.viewer.scene.removeItem(it)
-        self._section_line_labels.clear()
-        if getattr(self, "_preview_line", None) is not None:
-            self.viewer.scene.removeItem(self._preview_line)
-            self._preview_line = None
-        if getattr(self, "_preview_label", None) is not None:
-            self.viewer.scene.removeItem(self._preview_label)
-            self._preview_label = None
+        self._clear_sections_state()
 
         # 5) Helper: convert feat (LineString) -> 1 dòng trong bảng + vẽ line
         def _add_feat(feat: dict) -> None:
@@ -1082,8 +1460,8 @@ class SectionSelectionTab(QWidget):
         self._ok(f"[UI2] Auto line OK: {len(mains)} main + {len(crosses)} cross lines.")
 
     def _on_preview(self) -> None:
-        r = self.tbl.currentRow()
-        if r < 0 or self._inv_tr is None:
+        source, r = self._current_selection()
+        if source is None or r < 0 or self._inv_tr is None:
             self._info("Select a row to preview.")
             return
 
@@ -1094,37 +1472,52 @@ class SectionSelectionTab(QWidget):
         if self._preview_label is not None:
             self.viewer.scene.removeItem(self._preview_label)
             self._preview_label = None
-
-        p0 = tuple(map(float, self.tbl.item(r, 1).text().split(",")))
-        p1 = tuple(map(float, self.tbl.item(r, 2).text().split(",")))
-        c0, r0 = self._inv_tr * p0
-        c1, r1 = self._inv_tr * p1
+        self._preview_source = source
 
         pen = QPen(QColor(200, 30, 30, 220))
         pen.setCosmetic(True)
         pen.setWidth(2)
-        item = QGraphicsLineItem(c0, r0, c1, r1)
-        item.setPen(pen)
-        item.setZValue(4)  # cao hơn line xanh
-        self.viewer.scene.addItem(item)
-        self._preview_line = item
-        label_item = self.tbl.item(r, 0)
-        self._preview_label = self._add_line_label(
-            label_item.text() if label_item else str(r + 1),
-            c0,
-            r0,
-            c1,
-            r1,
-            z=6,
-        )
+        vertices = self._polyline_vertices(r) if source == "polyline" else self._section_vertices(r)
+        if len(vertices) < 2:
+            self._info("Selected row has invalid geometry.")
+            return
+        if len(vertices) == 2:
+            c0, r0 = self._inv_tr * vertices[0]
+            c1, r1 = self._inv_tr * vertices[1]
+            item = QGraphicsLineItem(c0, r0, c1, r1)
+            item.setPen(pen)
+            item.setZValue(4)
+            self.viewer.scene.addItem(item)
+            self._preview_line = item
+        else:
+            path = self._build_scene_path(vertices)
+            if path is None:
+                return
+            item = QGraphicsPathItem(path)
+            item.setPen(pen)
+            item.setZValue(4)
+            self.viewer.scene.addItem(item)
+            self._preview_line = item
+        label_item = self.tbl_poly.item(r, 0) if source == "polyline" else self.tbl.item(r, 0)
+        anchor = self._label_anchor_pixels(vertices)
+        if anchor is not None:
+            self._preview_label = self._add_line_label(
+                label_item.text() if label_item else str(r + 1),
+                *anchor,
+                z=6,
+            )
 
         self._ok("Preview line drawn.")
 
     def _clear_sections_state(self) -> None:
         if hasattr(self, "tbl"):
             self.tbl.setRowCount(0)
+        if hasattr(self, "tbl_poly"):
+            self.tbl_poly.setRowCount(0)
         self._sections.clear()
         self._section_meta.clear()
+        self._poly_sections.clear()
+        self._poly_section_meta.clear()
 
         for it in getattr(self, "_section_lines", []):
             if it is not None:
@@ -1136,12 +1529,23 @@ class SectionSelectionTab(QWidget):
                 self.viewer.scene.removeItem(it)
         self._section_line_labels.clear()
 
+        for it in getattr(self, "_poly_section_lines", []):
+            if it is not None:
+                self.viewer.scene.removeItem(it)
+        self._poly_section_lines.clear()
+
+        for it in getattr(self, "_poly_section_line_labels", []):
+            if it is not None:
+                self.viewer.scene.removeItem(it)
+        self._poly_section_line_labels.clear()
+
         if getattr(self, "_preview_line", None) is not None:
             self.viewer.scene.removeItem(self._preview_line)
             self._preview_line = None
         if getattr(self, "_preview_label", None) is not None:
             self.viewer.scene.removeItem(self._preview_label)
             self._preview_label = None
+        self._preview_source = None
 
     def _on_clear(self) -> None:
         """Xoá toàn bộ sections + line trên map."""
@@ -1176,57 +1580,66 @@ class SectionSelectionTab(QWidget):
     def _parse_auto_line_id(line_id: str) -> Tuple[str, int]:
         return backend_parse_auto_line_id(line_id)
 
-    def _next_line_id_for_role(self, line_role: str, exclude_row: int = -1) -> str:
+    def _next_line_id_for_role(self, line_role: str, exclude_row: int = -1, exclude_source: str = "straight") -> str:
         role = self._normalize_line_role(line_role, "")
         prefix = "CL" if role == "cross" else "ML"
         used = set()
-        for r in range(self.tbl.rowCount()):
-            if r == exclude_row:
-                continue
-            cand = ""
-            if 0 <= r < len(self._section_meta) and isinstance(self._section_meta[r], dict):
-                cand = str(self._section_meta[r].get("line_id", "") or "").strip()
-            if not cand:
-                item = self.tbl.item(r, 0)
-                cand = item.text().strip() if item else ""
-            parsed_role, parsed_idx = self._parse_auto_line_id(cand)
-            if parsed_role == role and parsed_idx > 0:
-                used.add(parsed_idx)
+        for source, table, meta_list in (
+            ("straight", self.tbl, self._section_meta),
+            ("polyline", self.tbl_poly, self._poly_section_meta),
+        ):
+            for r in range(table.rowCount()):
+                if source == exclude_source and r == exclude_row:
+                    continue
+                cand = ""
+                if 0 <= r < len(meta_list) and isinstance(meta_list[r], dict):
+                    cand = str(meta_list[r].get("line_id", "") or "").strip()
+                if not cand:
+                    item = table.item(r, 0)
+                    cand = item.text().strip() if item else ""
+                parsed_role, parsed_idx = self._parse_auto_line_id(cand)
+                if parsed_role == role and parsed_idx > 0:
+                    used.add(parsed_idx)
         n = 1
         while n in used:
             n += 1
         return f"{prefix}{n}"
 
-    def _find_role_combo_row(self, combo: QComboBox) -> int:
+    def _find_role_combo_row(self, combo: QComboBox) -> Tuple[Optional[str], int]:
         for r in range(self.tbl.rowCount()):
             if self.tbl.cellWidget(r, 3) is combo:
-                return r
-        return -1
+                return "straight", r
+        for r in range(self.tbl_poly.rowCount()):
+            if self.tbl_poly.cellWidget(r, 5) is combo:
+                return "polyline", r
+        return None, -1
 
     def _on_role_combo_changed(self, _index: int) -> None:
         combo = self.sender()
         if not isinstance(combo, QComboBox):
             return
-        row = self._find_role_combo_row(combo)
-        if row < 0:
+        source, row = self._find_role_combo_row(combo)
+        if source is None or row < 0:
             return
-        while len(self._section_meta) <= row:
-            self._section_meta.append({})
-        meta = self._section_meta[row]
+        table = self.tbl_poly if source == "polyline" else self.tbl
+        meta_list = self._poly_section_meta if source == "polyline" else self._section_meta
+        while len(meta_list) <= row:
+            meta_list.append({})
+        meta = meta_list[row]
         if not isinstance(meta, dict):
             meta = {}
-            self._section_meta[row] = meta
-        label = (self.tbl.item(row, 0).text().strip() if self.tbl.item(row, 0) else f"{row + 1}")
+            meta_list[row] = meta
+        label = (table.item(row, 0).text().strip() if table.item(row, 0) else f"{row + 1}")
         cur_line_id = str(meta.get("line_id", "") or "").strip() or label
         new_role = self._role_value_from_combo_text(combo.currentText())
         auto_role, auto_idx = self._parse_auto_line_id(cur_line_id)
         if (not cur_line_id) or (auto_idx > 0 and auto_role in ("main", "cross")):
-            new_line_id = self._next_line_id_for_role(new_role, exclude_row=row)
+            new_line_id = self._next_line_id_for_role(new_role, exclude_row=row, exclude_source=source)
             if new_line_id != cur_line_id:
-                item0 = self.tbl.item(row, 0)
+                item0 = table.item(row, 0)
                 if item0 is None:
                     item0 = QTableWidgetItem(new_line_id)
-                    self.tbl.setItem(row, 0, item0)
+                    table.setItem(row, 0, item0)
                 else:
                     item0.setText(new_line_id)
                 cur_line_id = new_line_id
@@ -1234,11 +1647,14 @@ class SectionSelectionTab(QWidget):
         meta["line_role"] = new_role
         self._ok(f"[UI2] Line role set: row {row + 1} -> {meta['line_role']}")
 
-    def _get_row_line_role(self, row: int) -> str:
-        combo = self.tbl.cellWidget(row, 3) if self.tbl is not None else None
+    def _get_row_line_role(self, source: str, row: int) -> str:
+        table = self.tbl_poly if source == "polyline" else self.tbl
+        combo_col = 5 if source == "polyline" else 3
+        meta_list = self._poly_section_meta if source == "polyline" else self._section_meta
+        combo = table.cellWidget(row, combo_col) if table is not None else None
         if isinstance(combo, QComboBox):
             return self._role_value_from_combo_text(combo.currentText())
-        meta = self._section_meta[row] if 0 <= row < len(self._section_meta) else {}
+        meta = meta_list[row] if 0 <= row < len(meta_list) else {}
         line_id = str((meta or {}).get("line_id", "")).strip()
         return self._normalize_line_role(str((meta or {}).get("line_role", "")).strip(), line_id)
 
@@ -1252,20 +1668,21 @@ class SectionSelectionTab(QWidget):
 
     def _save_main_cross_intersections(self, ui2_dir: str) -> Optional[str]:
         records: List[Dict[str, Any]] = []
+        skipped_polyline = len(self._poly_sections)
         for r in range(self.tbl.rowCount()):
+            meta = self._section_meta[r] if 0 <= r < len(self._section_meta) else {}
             try:
                 p0 = tuple(map(float, self.tbl.item(r, 1).text().split(",")))
                 p1 = tuple(map(float, self.tbl.item(r, 2).text().split(",")))
             except Exception:
                 continue
-            meta = self._section_meta[r] if 0 <= r < len(self._section_meta) else {}
             line_id = str((meta or {}).get("line_id", "")).strip()
             label = (self.tbl.item(r, 0).text().strip() if self.tbl.item(r, 0) else f"{r + 1}")
             if not line_id:
                 line_id = label
                 if 0 <= r < len(self._section_meta) and isinstance(self._section_meta[r], dict):
                     self._section_meta[r]["line_id"] = line_id
-            line_role = self._normalize_line_role(self._get_row_line_role(r), line_id)
+            line_role = self._normalize_line_role(self._get_row_line_role("straight", r), line_id)
             if 0 <= r < len(self._section_meta) and isinstance(self._section_meta[r], dict):
                 self._section_meta[r]["line_role"] = line_role
             try:
@@ -1284,6 +1701,8 @@ class SectionSelectionTab(QWidget):
                 "geom": geom,
             })
         _ = ui2_dir
+        if skipped_polyline > 0:
+            self._info(f"[UI2] Skipped {skipped_polyline} polyline section(s) for intersections export.")
         return self._backend.save_main_cross_intersections(self.run_dir or "", records)
 
     def _on_confirm_sections(self) -> None:
@@ -1313,9 +1732,8 @@ class SectionSelectionTab(QWidget):
 
         try:
             rows_to_save: List[Dict[str, Any]] = []
+            polylines_to_save: List[Dict[str, Any]] = []
             for r in range(self.tbl.rowCount()):
-                p0 = tuple(map(float, self.tbl.item(r, 1).text().split(",")))
-                p1 = tuple(map(float, self.tbl.item(r, 2).text().split(",")))
                 meta = self._section_meta[r] if 0 <= r < len(self._section_meta) else {}
                 line_id = str((meta or {}).get("line_id", "")).strip()
                 if not line_id:
@@ -1323,19 +1741,42 @@ class SectionSelectionTab(QWidget):
                     line_id = label
                     if 0 <= r < len(self._section_meta) and isinstance(self._section_meta[r], dict):
                         self._section_meta[r]["line_id"] = line_id
-                line_role = self._normalize_line_role(self._get_row_line_role(r), line_id)
+                line_role = self._normalize_line_role(self._get_row_line_role("straight", r), line_id)
                 if 0 <= r < len(self._section_meta) and isinstance(self._section_meta[r], dict):
                     self._section_meta[r]["line_role"] = line_role
+                p0 = tuple(map(float, self.tbl.item(r, 1).text().split(",")))
+                p1 = tuple(map(float, self.tbl.item(r, 2).text().split(",")))
                 rows_to_save.append(storage_canonical_section_csv_row(
-                    r + 1,
+                    len(rows_to_save) + 1,
                     p0,
                     p1,
                     line_id=line_id,
                     line_role=line_role,
                 ))
+            for r in range(self.tbl_poly.rowCount()):
+                meta = self._poly_section_meta[r] if 0 <= r < len(self._poly_section_meta) else {}
+                line_id = str((meta or {}).get("line_id", "")).strip()
+                if not line_id:
+                    label = (self.tbl_poly.item(r, 0).text().strip() if self.tbl_poly.item(r, 0) else f"{r + 1}")
+                    line_id = label
+                    if 0 <= r < len(self._poly_section_meta) and isinstance(self._poly_section_meta[r], dict):
+                        self._poly_section_meta[r]["line_id"] = line_id
+                line_role = self._normalize_line_role(self._get_row_line_role("polyline", r), line_id)
+                if 0 <= r < len(self._poly_section_meta) and isinstance(self._poly_section_meta[r], dict):
+                    self._poly_section_meta[r]["line_role"] = line_role
+                vertices = self._polyline_vertices(r)
+                if len(vertices) >= 2:
+                    polylines_to_save.append({
+                        "idx": int(len(polylines_to_save) + 1),
+                        "line_id": line_id,
+                        "line_role": line_role,
+                        "vertices": [[float(x), float(y)] for x, y in vertices],
+                    })
             self._backend.save_sections(run_dir, rows_to_save)
+            poly_path = self._backend.save_polylines(run_dir, polylines_to_save)
 
             self._ok(f"Sections saved: {csv_path}")
+            self._ok(f"Polylines saved: {poly_path}")
             try:
                 inter_path = self._save_main_cross_intersections(ui2_dir)
                 if inter_path:
@@ -1355,8 +1796,15 @@ class SectionSelectionTab(QWidget):
             self._err(f"Emit sections_confirmed error: {e}")
 
     def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter) and getattr(self.viewer, "is_polyline_active", lambda: False)():
+            if self.viewer.finish_polyline_pick():
+                self._ok("[UI2] Polyline completed.")
+                event.accept()
+                return
         if event.key() == Qt.Key_Delete:
-            sel = self.tbl.selectedIndexes()
+            source, _ = self._current_selection()
+            table = self.tbl_poly if source == "polyline" else self.tbl
+            sel = table.selectedIndexes() if source else []
             if not sel:
                 return
 
@@ -1365,33 +1813,7 @@ class SectionSelectionTab(QWidget):
             # nếu chọn ít nhất 1 cột Start/End → coi như xóa cả dòng
             if len(rows) >= 1:
                 for r in reversed(rows):
-                    # xoá line trên map
-                    if 0 <= r < len(self._section_lines):
-                        it = self._section_lines[r]
-                        if it is not None:
-                            self.viewer.scene.removeItem(it)
-                        self._section_lines.pop(r)
-
-                    if 0 <= r < len(self._section_line_labels):
-                        it = self._section_line_labels[r]
-                        if it is not None:
-                            self.viewer.scene.removeItem(it)
-                        self._section_line_labels.pop(r)
-
-                    if 0 <= r < len(self._sections):
-                        self._sections.pop(r)
-                    if 0 <= r < len(self._section_meta):
-                        self._section_meta.pop(r)
-
-                    self.tbl.removeRow(r)
-
-                if self._preview_line is not None:
-                    self.viewer.scene.removeItem(self._preview_line)
-                    self._preview_line = None
-                if self._preview_label is not None:
-                    self.viewer.scene.removeItem(self._preview_label)
-                    self._preview_label = None
-
+                    self._delete_section_row(str(source or "straight"), r)
                 self._ok("Deleted selected section(s).")
                 event.accept()
                 return
@@ -1447,6 +1869,9 @@ class SectionSelectionTab(QWidget):
             self.sld_vec_size.setValue(100)
         if hasattr(self, "sld_vec_opacity"):
             self.sld_vec_opacity.setValue(100)
+        if hasattr(self, "combo_draw_mode"):
+            self.combo_draw_mode.setCurrentIndex(0)
+        self.viewer.set_draw_mode("straight")
 
         # Xoá sections & line
         self._clear_sections_state()

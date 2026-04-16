@@ -201,3 +201,60 @@ def evaluate_nurbs_curve(chain_ctrl, elev_ctrl, weights=None, degree: int = 3, n
         return {"chain": np.array([], dtype=float), "elev": np.array([], dtype=float)}
     order2 = np.argsort(sx)
     return {"chain": sx[order2], "elev": sz[order2]}
+
+
+def evaluate_piecewise_cubic_segments(segments, n_samples: int = 300) -> dict:
+    segs = list(segments or [])
+    if not segs:
+        return {"chain": np.array([], dtype=float), "elev": np.array([], dtype=float)}
+
+    widths = []
+    valid_segments = []
+    for seg in segs:
+        cps = np.asarray((seg or {}).get("control_points", []), dtype=float)
+        if cps.ndim != 2 or cps.shape[0] < 4:
+            continue
+        dx = float(abs(cps[-1, 0] - cps[0, 0]))
+        if not np.isfinite(dx):
+            dx = 0.0
+        widths.append(max(dx, 1e-6))
+        valid_segments.append(seg)
+    if not valid_segments:
+        return {"chain": np.array([], dtype=float), "elev": np.array([], dtype=float)}
+
+    total_width = float(sum(widths))
+    chain_parts = []
+    elev_parts = []
+    for idx, (seg, width) in enumerate(zip(valid_segments, widths)):
+        cps = np.asarray((seg or {}).get("control_points", []), dtype=float)
+        ww = np.asarray((seg or {}).get("weights", []), dtype=float)
+        seg_degree = int((seg or {}).get("degree", 3))
+        seg_samples = int(max(16, round(float(n_samples) * (width / total_width))))
+        out = evaluate_nurbs_curve(
+            chain_ctrl=cps[:, 0],
+            elev_ctrl=cps[:, 1],
+            weights=ww if ww.ndim == 1 and ww.size == cps.shape[0] else None,
+            degree=seg_degree,
+            n_samples=seg_samples,
+        )
+        sx = np.asarray(out.get("chain", []), dtype=float)
+        sz = np.asarray(out.get("elev", []), dtype=float)
+        keep = np.isfinite(sx) & np.isfinite(sz)
+        sx = sx[keep]
+        sz = sz[keep]
+        if sx.size < 2:
+            continue
+        if idx > 0:
+            sx = sx[1:]
+            sz = sz[1:]
+        if sx.size <= 0:
+            continue
+        chain_parts.append(sx)
+        elev_parts.append(sz)
+
+    if not chain_parts:
+        return {"chain": np.array([], dtype=float), "elev": np.array([], dtype=float)}
+    return {
+        "chain": np.concatenate(chain_parts),
+        "elev": np.concatenate(elev_parts),
+    }

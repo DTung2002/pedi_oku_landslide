@@ -2,8 +2,8 @@ import csv
 import os
 from typing import Any, Dict, List, Tuple
 
-SECTION_DIRECTION_VERSION = 2
-SECTION_CHAINAGE_ORIGIN = "left"
+SECTION_DIRECTION_VERSION = 3
+SECTION_CHAINAGE_ORIGIN = "picked"
 SECTION_CSV_FIELDNAMES = [
     "idx",
     "x1",
@@ -18,7 +18,7 @@ SECTION_CSV_FIELDNAMES = [
 
 
 def reverse_section_points(p0: Tuple[float, float], p1: Tuple[float, float]) -> Tuple[Tuple[float, float], Tuple[float, float]]:
-    return (float(p1[0]), float(p1[1])), (float(p0[0]), float(p0[1]))
+    return (float(p0[0]), float(p0[1])), (float(p1[0]), float(p1[1]))
 
 
 def canonical_section_csv_row(

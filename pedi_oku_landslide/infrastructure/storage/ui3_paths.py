@@ -106,6 +106,11 @@ class UI3RunPaths:
         os.makedirs(path, exist_ok=True)
         return path
 
+    def vectors_dir(self) -> str:
+        path = os.path.join(self.ui3_run_dir(), "vectors")
+        os.makedirs(path, exist_ok=True)
+        return path
+
     def profile_png_path_for(self, line_id: str) -> str:
         return os.path.join(self.preview_dir(), f"profile_{line_id}.png")
 
@@ -126,6 +131,9 @@ class UI3RunPaths:
 
     def theta_csv_path_for(self, line_id: str) -> str:
         return os.path.join(self.ground_dir(), f"{line_id}_theta.csv")
+
+    def vectors_csv_path_for(self, line_id: str) -> str:
+        return os.path.join(self.vectors_dir(), f"{line_id}_vectors.csv")
 
     def curve_nurbs_info_json_path_for(self, line_id: str) -> str:
         return os.path.join(self.curve_dir(), f"nurbs_info_{line_id}.json")

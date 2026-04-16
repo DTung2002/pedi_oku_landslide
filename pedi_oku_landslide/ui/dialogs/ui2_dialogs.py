@@ -22,7 +22,7 @@ class AutoLineDialog(QDialog):
         self.main_num = QSpinBox()
         self.main_num.setRange(0, 200)
         self.main_num.setSingleStep(2)
-        self.main_num.setValue(4)
+        self.main_num.setValue(2)
 
         self.main_off = QDoubleSpinBox()
         self.main_off.setRange(0.0, 1e6)
@@ -32,7 +32,7 @@ class AutoLineDialog(QDialog):
         self.cross_num = QSpinBox()
         self.cross_num.setRange(0, 200)
         self.cross_num.setSingleStep(2)
-        self.cross_num.setValue(4)
+        self.cross_num.setValue(2)
 
         self.cross_off = QDoubleSpinBox()
         self.cross_off.setRange(0.0, 1e6)

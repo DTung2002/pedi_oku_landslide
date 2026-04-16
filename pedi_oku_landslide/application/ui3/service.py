@@ -27,6 +27,7 @@ from pedi_oku_landslide.application.ui3.exports import (
     save_ground_csv_for_line as _save_ground_csv_for_line_impl,
     save_rdp_csv_for_line as _save_rdp_csv_for_line_impl,
     save_theta_csv_for_line as _save_theta_csv_for_line_impl,
+    save_vectors_csv_for_line as _save_vectors_csv_for_line_impl,
 )
 from pedi_oku_landslide.application.ui3.group_state import (
     build_group_json_payload as _build_group_json_payload_impl,
@@ -243,6 +244,13 @@ class UI3BackendService:
             line_id=line_id,
             prof=profile,
             groups=groups,
+            out_csv=out_csv,
+        )
+
+    def save_vectors_csv(self, *, line_id: str, profile: Dict[str, Any], out_csv: str) -> Optional[str]:
+        return _save_vectors_csv_for_line_impl(
+            line_id=line_id,
+            prof=profile,
             out_csv=out_csv,
         )
 

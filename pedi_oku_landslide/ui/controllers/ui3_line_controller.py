@@ -7,6 +7,7 @@ import numpy as np
 import rasterio
 from PyQt5.QtWidgets import QFileDialog, QTableWidgetItem, QMessageBox
 
+from pedi_oku_landslide.application.ui3.profile_sampling import parse_nominal_length_m, resample_profile_to_nominal_grid
 from pedi_oku_landslide.domain.ui3.boring_holes import BORING_HOLES_DEFAULT_TOLERANCE_M
 
 WORKFLOW_GROUP_MIN_LEN_M = 0.0
@@ -66,17 +67,15 @@ class UI3LineControllerMixin:
     def _sync_step_to_raw_dem(self, *, log_paths: bool = False) -> None:
         if self.step_box is None:
             return
-        step_m = self._raw_dem_pixel_step_m()
-        if step_m is None:
-            return
         try:
             old = self.step_box.blockSignals(True)
-            self.step_box.setValue(float(step_m))
+            self.step_box.setValue(float(self._GROUND_EXPORT_STEP_M))
             self.step_box.blockSignals(old)
+            self.step_box.setEnabled(False)
         except Exception:
             return
         if log_paths:
-            self._log(f"[UI3] Sampling step synced to raw DEM pixel size: {step_m:.4f} m")
+            self._log(f"[UI3] Sampling step fixed to export grid: {float(self._GROUND_EXPORT_STEP_M):.4f} m")
 
     def _include_vector_angle_zero(self) -> bool:
         return True
@@ -134,7 +133,7 @@ class UI3LineControllerMixin:
 
     @staticmethod
     def _ui3_chainage_origin() -> str:
-        return "left"
+        return "picked"
 
     def _groups_to_current_chainage(
         self,
@@ -265,11 +264,11 @@ class UI3LineControllerMixin:
         if not dem_path:
             self._warn("[UI3] Raw DEM not found. Cannot render profile.")
             return None
-        return self._backend.compute_profile_for_line(
+        prof = self._backend.compute_profile_for_line(
             self._line_id_current(),
             geom,
             self._current_profile_source_key(),
-            self.step_box.value(),
+            float(self._GROUND_EXPORT_STEP_M),
             bool(slip_only),
             dem_path=dem_path,
             dem_orig_path=(dem_orig_path or dem_path),
@@ -277,6 +276,20 @@ class UI3LineControllerMixin:
             dy_path=self.dy_path,
             dz_path=self.dz_path,
             slip_mask_path=self.slip_path,
+        )
+        if not prof:
+            return None
+        nominal_length_m = parse_nominal_length_m(self._line_id_current())
+        if nominal_length_m is None:
+            try:
+                nominal_length_m = round(float(getattr(geom, "length", np.nan)), 1)
+            except Exception:
+                nominal_length_m = None
+        return resample_profile_to_nominal_grid(
+            prof,
+            line_id=self._line_id_current(),
+            target_step_m=float(self._GROUND_EXPORT_STEP_M),
+            nominal_length_m=nominal_length_m,
         )
 
     def set_context(self, project: str, run_label: str, run_dir: str) -> None:
@@ -805,6 +818,16 @@ class UI3LineControllerMixin:
     def _theta_csv_path_for(self, line_id: str) -> str:
         return os.path.join(self._ground_dir(), f"{line_id}_theta.csv")
 
+    def _vectors_csv_path_for(self, line_id: str) -> str:
+        return self._paths().vectors_csv_path_for(line_id)
+
+    def _save_vectors_csv_for_line(self, line_id: str, prof: dict) -> Optional[str]:
+        return self._backend.save_vectors_csv(
+            line_id=line_id,
+            profile=prof,
+            out_csv=self._vectors_csv_path_for(line_id),
+        )
+
     def _load_lines_into_combo(self) -> None:
         self.line_combo.blockSignals(True)
         self.line_combo.clear()
@@ -818,7 +841,7 @@ class UI3LineControllerMixin:
             lines_result = self._backend.load_lines(csv_path, self.dem_path)
             migrated = bool(lines_result.get("migrated", False))
             if migrated:
-                self._log("[UI3] Migrated legacy sections.csv to direction_version=2 and cleared old UI3 derived outputs.")
+                self._log("[UI3] Migrated legacy sections.csv to current direction version and cleared old UI3 derived outputs.")
             gdf = lines_result.get("gdf")
             if gdf is None or gdf.empty:
                 self._log(f"[!] No sections in csv:\n{csv_path}")
@@ -1102,6 +1125,13 @@ class UI3LineControllerMixin:
                 self._log(f"[UI3] Saved ground CSV: {ground_csv}")
         except Exception as e:
             self._warn(f"[UI3] Cannot save ground CSV: {e}")
+
+        try:
+            vectors_csv = self._save_vectors_csv_for_line(line_id, prof)
+            if vectors_csv:
+                self._log(f"[UI3] Saved vectors CSV: {vectors_csv}")
+        except Exception as e:
+            self._warn(f"[UI3] Cannot save vectors CSV: {e}")
 
     def _render_current_safe(self) -> None:
         try:

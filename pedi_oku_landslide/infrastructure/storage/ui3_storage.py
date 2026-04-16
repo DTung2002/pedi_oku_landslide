@@ -7,8 +7,8 @@ import geopandas as gpd
 import rasterio
 from shapely.geometry import LineString
 
-SECTION_DIRECTION_VERSION = 2
-SECTION_CHAINAGE_ORIGIN = "left"
+SECTION_DIRECTION_VERSION = 3
+SECTION_CHAINAGE_ORIGIN = "picked"
 DEFAULT_CRS = "EPSG:6678"
 SECTION_CSV_FIELDNAMES = [
     "idx",

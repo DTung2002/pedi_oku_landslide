@@ -4,11 +4,19 @@ from typing import Optional
 
 import numpy as np
 
+from pedi_oku_landslide.application.ui3.profile_sampling import (
+    parse_nominal_length_m,
+    resample_profile_to_nominal_grid,
+)
 from pedi_oku_landslide.domain.ui3.curve_state import (
     median_displacement_theta_deg_for_group,
     start_theta_deg_for_cp1,
 )
 from pedi_oku_landslide.domain.ui3.grouping import extract_curvature_rdp_nodes, filter_rdp_nodes_to_slip_zone
+
+
+def _format_csv_number(val: float) -> str:
+    return f"{float(val):.10f}".rstrip("0").rstrip(".")
 
 
 def save_ground_csv_for_line(
@@ -47,6 +55,19 @@ def save_ground_csv_for_line(
     )
     if not prof:
         return None
+
+    nominal_length_m = parse_nominal_length_m(line_id)
+    if nominal_length_m is None:
+        try:
+            nominal_length_m = round(float(getattr(geom, "length", np.nan)), 1)
+        except Exception:
+            nominal_length_m = None
+    prof = resample_profile_to_nominal_grid(
+        prof,
+        line_id=line_id,
+        target_step_m=float(ground_export_step_m),
+        nominal_length_m=nominal_length_m,
+    )
 
     chain = np.asarray(prof.get("chain", []), dtype=float)
     elev = np.asarray(prof.get("elev", []), dtype=float) if prof.get("elev", None) is not None else None
@@ -193,5 +214,52 @@ def save_theta_csv_for_line(
     with open(out_csv, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["control_point", "boundary_chainage", "theta_deg", "theta_source", "group_id"])
+        writer.writerows(rows)
+    return out_csv
+
+
+def save_vectors_csv_for_line(
+    *,
+    line_id: str,
+    prof: dict,
+    out_csv: str,
+) -> Optional[str]:
+    _ = line_id
+    if not prof:
+        return None
+
+    chain = np.asarray(prof.get("chain", []), dtype=float)
+    elev = np.asarray(prof.get("elev_s", []), dtype=float)
+    d_para = np.asarray(prof.get("d_para", []), dtype=float)
+    dz = np.asarray(prof.get("dz", []), dtype=float)
+    theta = np.asarray(prof.get("theta", []), dtype=float)
+
+    n = min(chain.size, elev.size, d_para.size, dz.size, theta.size)
+    if n <= 0:
+        return None
+
+    rows = []
+    for i in range(n):
+        s = chain[i]
+        z = elev[i]
+        dp = d_para[i]
+        dzv = dz[i]
+        th = theta[i]
+        if np.isfinite(s) and np.isfinite(z) and np.isfinite(dp) and np.isfinite(dzv):
+            rows.append((
+                float(s),
+                float(z),
+                float(dp),
+                float(dzv),
+                float(th) if np.isfinite(th) else None,
+            ))
+    if not rows:
+        return None
+
+    rows.sort(key=lambda it: float(it[0]))
+    os.makedirs(os.path.dirname(out_csv), exist_ok=True)
+    with open(out_csv, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["chainage", "elevation", "d_para", "dz", "theta_deg"])
         writer.writerows(rows)
     return out_csv

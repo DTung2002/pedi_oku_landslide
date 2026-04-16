@@ -639,33 +639,6 @@ class AnalyzeTab(QWidget):
         except Exception as e:
             self._err(f"Cannot open folder: {e}")
 
-    def _export_ui1_vectors_json(
-        self,
-        ctx: AnalysisContext,
-        *,
-        step: int,
-        scale: float,
-        vector_color: str,
-        vector_width: float,
-        vector_opacity: float,
-        min_m: float = 0.05,
-        max_m: float = 2.0,
-    ) -> str:
-        """
-        Export sampled vectors currently used by Render Vectors to JSON.
-        Output: <run_dir>/ui1/vector/vectors.json
-        """
-        return self._backend.export_vectors_json(
-            ctx,
-            step=step,
-            scale=scale,
-            vector_color=vector_color,
-            vector_width=vector_width,
-            vector_opacity=vector_opacity,
-            min_m=min_m,
-            max_m=max_m,
-        )
-
     # ---------- Status helpers ----------
     def _append_status(self, text: str) -> None:
         """
@@ -776,20 +749,6 @@ class AnalyzeTab(QWidget):
                 vector_opacity=opacity,
             )
 
-            json_path = None
-            if not quiet:
-                try:
-                    json_path = self._export_ui1_vectors_json(
-                        ctx,
-                        step=step,
-                        scale=scale,
-                        vector_color=color,
-                        vector_width=width,
-                        vector_opacity=opacity,
-                    )
-                except Exception as e:
-                    self._append_status(f"WARN: Export vector JSON failed: {e}")
-
             # Hiển thị: trái = overlay (nếu có) hoặc dz, phải = vectors overlay
             overlay = os.path.join(ctx.out_ui1, "landslide_overlay.png")
             left_img = overlay if os.path.exists(overlay) else os.path.join(ctx.out_ui1, "dz.png")
@@ -800,8 +759,6 @@ class AnalyzeTab(QWidget):
                     f"Vectors rendered (step={step}, scale={scale}, "
                     f"size={self.sld_vec_size.value()}%, opacity={self.sld_vec_opacity.value()}%)."
                 )
-                if json_path:
-                    self._info(f"Vector JSON saved: {json_path}")
 
             # emit để MainWindow enable tab Section Selection
             if emit_signal:

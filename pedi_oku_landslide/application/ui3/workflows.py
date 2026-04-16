@@ -8,7 +8,12 @@ from pedi_oku_landslide.domain.ui3.anchors import (
     save_json_items,
     update_anchors_for_saved_main_curve,
 )
-from pedi_oku_landslide.domain.ui3.curve_fit import evaluate_nurbs_curve, estimate_slip_curve, fit_bezier_smooth_curve
+from pedi_oku_landslide.domain.ui3.curve_fit import (
+    evaluate_nurbs_curve,
+    evaluate_piecewise_cubic_segments,
+    estimate_slip_curve,
+    fit_bezier_smooth_curve,
+)
 from pedi_oku_landslide.domain.ui3.grouping import (
     WORKFLOW_GROUP_MIN_LEN_M,
     auto_group_profile_by_criteria,
@@ -118,6 +123,12 @@ def fit_bezier_curve_seed(chain, elevg, target_s, target_z, curve_settings: Opti
 def evaluate_nurbs(params_or_ctrl_points, elev_ctrl=None, weights=None, degree: int = 3, n_samples: int = 300) -> Dict[str, Any]:
     if isinstance(params_or_ctrl_points, dict):
         params = dict(params_or_ctrl_points)
+        segments = params.get("segments", []) or []
+        if isinstance(segments, list) and segments:
+            return evaluate_piecewise_cubic_segments(
+                segments=segments,
+                n_samples=int(params.get("n_samples", n_samples)),
+            )
         cps = np.asarray(params.get("control_points", []), dtype=float)
         if cps.ndim != 2 or cps.shape[0] < 2:
             return {"chain": np.array([], dtype=float), "elev": np.array([], dtype=float)}

@@ -15,6 +15,7 @@ from skimage import measure
 from .ui2.ui2_auto_lines import generate_auto_lines_from_arrays
 from .ui2.ui2_intersections import build_main_cross_intersections, save_main_cross_intersections
 from .ui2.ui2_paths import validate_run_inputs
+from .ui2.ui2_polylines_storage import read_polylines_json, write_polylines_json
 from .ui2.ui2_raster import load_layers as load_run_layers
 from .ui2.ui2_raster import validate_context as validate_run_context
 from .ui2.ui2_sections_storage import (
@@ -251,6 +252,17 @@ class UI2BackendService:
         csv_path = os.path.join(run_dir, "ui2", "sections.csv")
         write_sections_csv_rows(csv_path, rows)
         return csv_path
+
+    def load_polylines(self, run_dir: str) -> Dict[str, Any]:
+        json_path = os.path.join(run_dir, "ui2", "polylines.json")
+        if not os.path.isfile(json_path):
+            return {"rows": [], "json_path": json_path}
+        return {"rows": read_polylines_json(json_path), "json_path": json_path}
+
+    def save_polylines(self, run_dir: str, rows: List[Dict[str, Any]]) -> str:
+        json_path = os.path.join(run_dir, "ui2", "polylines.json")
+        write_polylines_json(json_path, rows)
+        return json_path
 
     def generate_auto_lines(self, dx, dy, mask, transform, params: Dict[str, Any]) -> Dict[str, Any]:
         return generate_auto_lines_from_arrays(

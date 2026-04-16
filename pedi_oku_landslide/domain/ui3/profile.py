@@ -6,6 +6,8 @@ import rasterio
 from shapely.geometry import LineString
 
 
+
+
 def _open_raster(path: str):
     ds = rasterio.open(path)
     arr = ds.read(1).astype("float32")
@@ -24,13 +26,23 @@ def _densify(line: LineString, step_m: float) -> Tuple[np.ndarray, np.ndarray, n
     if not np.isfinite(length) or length <= 0:
         return np.array([]), np.array([]), np.array([])
 
-    n = max(2, int(np.ceil(length / step_m)) + 1)
-    s = np.linspace(0.0, length, n)
-    xs = np.empty(n)
-    ys = np.empty(n)
+    num_steps = int(np.floor(length / step_m))
+    s_list = []
+
+    for i in range(num_steps + 1):
+        s_list.append(i * step_m)
+
+    # Đảm bảo điểm cuối cùng được nối vào khớp với chiều dài tổng
+    if abs(s_list[-1] - length) > 1e-9:
+        s_list.append(length)
+
+    s = np.array(s_list)
+    xs = np.empty(len(s))
+    ys = np.empty(len(s))
     for i, d in enumerate(s):
         p = line.interpolate(d)
         xs[i], ys[i] = p.x, p.y
+
     return xs, ys, s
 
 

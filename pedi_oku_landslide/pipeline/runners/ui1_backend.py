@@ -11,7 +11,6 @@ from .ui1.ui1_context import (
 )
 from .ui1.ui1_ingest import resolve_run_input_path, run_ingest
 from .ui1.ui1_processing import render_vectors, run_detect, run_mask_from_dxf, run_sad, run_smooth
-from .ui1.ui1_render import export_vectors_json
 from .ui1.ui1_run_state import existing_run_preview, mask_source_info, post_sad_preview, read_sad_method
 
 
@@ -57,9 +56,6 @@ class UI1BackendService:
     def render_vectors(self, ctx: AnalysisContext, **kwargs) -> dict:
         return render_vectors(ctx, **kwargs)
 
-    def export_vectors_json(self, ctx: AnalysisContext, **kwargs) -> str:
-        return export_vectors_json(ctx, **kwargs)
-
     def resolve_run_input_path(self, run_dir: str, key: str) -> str:
         return resolve_run_input_path(run_dir, key)
 
@@ -81,7 +77,6 @@ __all__ = [
     "UI1BackendService",
     "build_context_from_run_dir",
     "create_analysis_context",
-    "export_vectors_json",
     "is_valid_run_dir",
     "load_analysis_context",
     "parse_label_from_run_id",

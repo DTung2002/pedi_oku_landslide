@@ -3,7 +3,7 @@ from typing import Optional, Tuple
 import numpy as np
 from rasterio.transform import Affine
 from PyQt5.QtCore import QPointF, QEvent, Qt, pyqtSignal
-from PyQt5.QtGui import QBrush, QColor, QFont, QFontMetrics, QImage, QPainter, QPen, QPixmap
+from PyQt5.QtGui import QBrush, QColor, QFont, QFontMetrics, QImage, QPainter, QPainterPath, QPen, QPixmap
 from PyQt5.QtWidgets import (
     QGraphicsEllipseItem,
     QGraphicsLineItem,
@@ -36,6 +36,7 @@ def _np_to_qimage_rgba(rgba: np.ndarray) -> QImage:
 class _LayeredViewer(UI1Viewer):
     cursorMoved = pyqtSignal(float, float)
     sectionPicked = pyqtSignal(float, float, float, float)
+    polylinePicked = pyqtSignal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -74,6 +75,11 @@ class _LayeredViewer(UI1Viewer):
         self._rubber = self.scene.addLine(0, 0, 0, 0, pen_rb)
         self._rubber.setZValue(1150)
         self._rubber.hide()
+        self._polyline_preview = QGraphicsPathItem()
+        self._polyline_preview.setPen(pen_rb)
+        self._polyline_preview.setZValue(1150)
+        self._polyline_preview.hide()
+        self.scene.addItem(self._polyline_preview)
 
         self._hover_dot = QGraphicsEllipseItem(-3, -3, 6, 6)
         self._hover_dot.setBrush(QBrush(QColor("#2ecc71")))
@@ -83,7 +89,9 @@ class _LayeredViewer(UI1Viewer):
         self.scene.addItem(self._hover_dot)
 
         self._picking = True
+        self._draw_mode = "straight"
         self._p1_pix: Optional[Tuple[float, float]] = None
+        self._polyline_pix: list[Tuple[float, float]] = []
         self._last_mouse_scene: Optional[QPointF] = None
 
         self.view.setDragMode(QGraphicsView.NoDrag)
@@ -226,14 +234,56 @@ class _LayeredViewer(UI1Viewer):
     def start_pick(self) -> None:
         self._picking = True
         self._p1_pix = None
+        self._polyline_pix = []
         self._start_marker.hide()
         self._rubber.hide()
+        self._polyline_preview.hide()
         self._cross_show(True)
 
     def cancel_pick(self) -> None:
         self._p1_pix = None
+        self._polyline_pix = []
         self._start_marker.hide()
         self._rubber.hide()
+        self._polyline_preview.hide()
+
+    def set_draw_mode(self, mode: str) -> None:
+        draw_mode = str(mode or "straight").strip().lower()
+        self._draw_mode = "polyline" if draw_mode == "polyline" else "straight"
+        self.cancel_pick()
+
+    def is_polyline_active(self) -> bool:
+        return self._draw_mode == "polyline" and len(self._polyline_pix) >= 2
+
+    def finish_polyline_pick(self) -> bool:
+        if self._draw_mode != "polyline" or len(self._polyline_pix) < 2:
+            return False
+        pts = [self.pix_to_map(c, r) for c, r in self._polyline_pix]
+        self.polylinePicked.emit(pts)
+        self.cancel_pick()
+        return True
+
+    def _append_polyline_point(self, c: float, r: float) -> None:
+        pt = (float(c), float(r))
+        if self._polyline_pix and abs(self._polyline_pix[-1][0] - pt[0]) <= 1e-6 and abs(self._polyline_pix[-1][1] - pt[1]) <= 1e-6:
+            return
+        self._polyline_pix.append(pt)
+        first = self._polyline_pix[0]
+        self._start_marker.setPos(first[0], first[1])
+        self._start_marker.show()
+
+    def _update_polyline_preview(self, current_pt: Optional[Tuple[float, float]] = None) -> None:
+        pts = list(self._polyline_pix)
+        if current_pt is not None:
+            pts.append((float(current_pt[0]), float(current_pt[1])))
+        if len(pts) < 2:
+            self._polyline_preview.hide()
+            return
+        path = QPainterPath(QPointF(pts[0][0], pts[0][1]))
+        for c, r in pts[1:]:
+            path.lineTo(c, r)
+        self._polyline_preview.setPath(path)
+        self._polyline_preview.show()
 
     def _cross_show(self, on: bool) -> None:
         self._cross_h.setVisible(on)
@@ -257,32 +307,46 @@ class _LayeredViewer(UI1Viewer):
                 self._cross_v.setLine(c, 0, c, self.scene.height())
                 self._hover_dot.setPos(c, r)
                 self._hover_dot.show()
-                if self._picking and self._p1_pix is not None:
-                    c1, r1 = self._p1_pix
-                    self._rubber.setLine(c1, r1, c, r)
-                    self._rubber.show()
+                if self._picking:
+                    if self._draw_mode == "straight" and self._p1_pix is not None:
+                        c1, r1 = self._p1_pix
+                        self._rubber.setLine(c1, r1, c, r)
+                        self._rubber.show()
+                    elif self._draw_mode == "polyline" and self._polyline_pix:
+                        self._update_polyline_preview((c, r))
                 x, y = self.pix_to_map(c, r)
                 self.cursorMoved.emit(x, y)
                 return True
             if ev.type() == QEvent.MouseButtonPress and ev.button() == Qt.RightButton:
-                if self._picking and self._p1_pix is not None:
+                if self._picking and (self._p1_pix is not None or self._polyline_pix):
                     self.cancel_pick()
                     return True
                 return True
+            if ev.type() == QEvent.MouseButtonDblClick and ev.button() == Qt.LeftButton:
+                sp = self.view.mapToScene(ev.pos())
+                c, r = float(sp.x()), float(sp.y())
+                if self._picking and self._draw_mode == "polyline":
+                    self._append_polyline_point(c, r)
+                    self.finish_polyline_pick()
+                    return True
             if ev.type() == QEvent.MouseButtonPress and ev.button() == Qt.LeftButton:
                 sp = self.view.mapToScene(ev.pos())
                 c, r = float(sp.x()), float(sp.y())
                 if not self._picking:
                     return True
-                if self._p1_pix is None:
-                    self._p1_pix = (c, r)
-                    self._start_marker.setPos(c, r)
-                    self._start_marker.show()
+                if self._draw_mode == "polyline":
+                    self._append_polyline_point(c, r)
+                    self._update_polyline_preview()
                 else:
-                    x1, y1 = self.pix_to_map(*self._p1_pix)
-                    x2, y2 = self.pix_to_map(c, r)
-                    self.sectionPicked.emit(x1, y1, x2, y2)
-                    self.cancel_pick()
+                    if self._p1_pix is None:
+                        self._p1_pix = (c, r)
+                        self._start_marker.setPos(c, r)
+                        self._start_marker.show()
+                    else:
+                        x1, y1 = self.pix_to_map(*self._p1_pix)
+                        x2, y2 = self.pix_to_map(c, r)
+                        self.sectionPicked.emit(x1, y1, x2, y2)
+                        self.cancel_pick()
                 return True
         return super().eventFilter(obj, ev)
 
