@@ -61,14 +61,17 @@ from pedi_oku_landslide.domain.ui3.curve_state import (
 )
 from pedi_oku_landslide.application.ui3.workflows import (
     auto_group as _auto_group_workflow_impl,
+    build_global_forward_fit_spline_workflow as _build_global_forward_fit_spline_workflow_impl,
     build_curve_seed as _build_curve_seed_workflow_impl,
     compute_profile_for_line as _compute_profile_for_line_workflow_impl,
     evaluate_nurbs as _evaluate_nurbs_workflow_impl,
     export_vectors_and_ground as _export_vectors_and_ground_workflow_impl,
     fit_bezier_curve_seed as _fit_bezier_curve_seed_workflow_impl,
+    load_theta_csv_group_angles_workflow as _load_theta_csv_group_angles_workflow_impl,
     load_saved_ui3_state as _load_saved_ui3_state_workflow_impl,
     normalize_groups as _normalize_groups_workflow_impl,
     render_preview as _render_preview_workflow_impl,
+    save_global_fit_spline_outputs as _save_global_fit_spline_outputs_workflow_impl,
     save_nurbs_outputs as _save_nurbs_outputs_workflow_impl,
     sync_anchor_updates as _sync_anchor_updates_workflow_impl,
 )
@@ -187,6 +190,28 @@ class UI3BackendService:
             groups=groups,
             overlay_curves=overlay_curves,
         )
+
+    def build_global_forward_fit_spline(
+        self,
+        *,
+        profile: Optional[Dict[str, Any]] = None,
+        prof: Optional[Dict[str, Any]] = None,
+        groups: Optional[List[Dict[str, Any]]] = None,
+        theta_rows: Optional[List[Dict[str, Any]]] = None,
+        short_length_m: float = 0.1,
+    ) -> Dict[str, Any]:
+        profile_data = profile if profile is not None else prof
+        if profile_data is None:
+            raise ValueError("Profile is required for global fit spline generation.")
+        return _build_global_forward_fit_spline_workflow_impl(
+            profile=profile_data,
+            groups=list(groups or []),
+            theta_rows=list(theta_rows or []),
+            short_length_m=short_length_m,
+        )
+
+    def load_theta_csv_group_angles(self, *, csv_path: str, groups: Optional[List[dict]]) -> List[dict]:
+        return _load_theta_csv_group_angles_workflow_impl(csv_path=csv_path, groups=groups)
 
     def extract_curvature_nodes(self, profile: Dict[str, Any], **kwargs) -> Dict[str, Any]:
         return _extract_curvature_rdp_nodes_impl(profile, **kwargs)
@@ -460,6 +485,9 @@ class UI3BackendService:
 
     def save_nurbs_outputs(self, outputs: Dict[str, Any]) -> Dict[str, Any]:
         return _save_nurbs_outputs_workflow_impl(outputs)
+
+    def save_global_fit_spline_outputs(self, outputs: Dict[str, Any]) -> Dict[str, Any]:
+        return _save_global_fit_spline_outputs_workflow_impl(outputs)
 
     def load_saved_ui3_state(self, paths: Dict[str, str]) -> Dict[str, Any]:
         return _load_saved_ui3_state_workflow_impl(paths)

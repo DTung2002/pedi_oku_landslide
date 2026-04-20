@@ -1,6 +1,6 @@
 import csv
 import os
-from typing import Optional
+from typing import List, Optional
 
 import numpy as np
 
@@ -178,11 +178,20 @@ def save_theta_csv_for_line(
             "end": float(e),
         })
     group_rows.sort(key=lambda it: (float(it["start"]), float(it["end"])))
-    if len(group_rows) < 2:
+    if len(group_rows) < 1:
         return None
 
     rows = []
-    start_chainage = float(group_rows[0]["start"])
+    slip_span = prof.get("slip_span", None)
+    first_group = group_rows[0]
+    start_chainage = float(first_group["start"])
+    try:
+        if slip_span:
+            smin, _smax = map(float, slip_span)
+            if np.isfinite(smin):
+                start_chainage = float(smin)
+    except Exception:
+        pass
     start_theta = start_theta_deg_for_cp1(
         prof,
         start_chainage,
@@ -191,19 +200,19 @@ def save_theta_csv_for_line(
     )
     first_boundary = float(group_rows[0]["end"])
     rows.append((
-        "CP1",
+        "G1",
         float(first_boundary),
         float(start_theta) if start_theta is not None and np.isfinite(start_theta) else None,
         "theta_percentile_20",
-        "",
+        str(first_group.get("id", "") or ""),
     ))
 
-    for cp_idx in range(2, len(group_rows)):
-        group = group_rows[cp_idx - 1]
-        boundary_chainage = float(group_rows[cp_idx - 1]["end"])
+    for idx in range(1, len(group_rows)):
+        group = group_rows[idx]
+        boundary_chainage = float(group["end"])
         theta_deg = median_displacement_theta_deg_for_group(group, prof)
         rows.append((
-            f"CP{cp_idx}",
+            f"G{idx + 1}",
             float(boundary_chainage),
             float(theta_deg) if theta_deg is not None and np.isfinite(theta_deg) else None,
             "median_theta_vector",
@@ -216,6 +225,93 @@ def save_theta_csv_for_line(
         writer.writerow(["control_point", "boundary_chainage", "theta_deg", "theta_source", "group_id"])
         writer.writerows(rows)
     return out_csv
+
+
+def load_theta_csv_group_angles(
+    *,
+    csv_path: str,
+    groups: Optional[list],
+) -> List[dict]:
+    group_rows = []
+    for idx, group in enumerate(groups or [], 1):
+        try:
+            start = float(group.get("start", group.get("start_chainage", np.nan)))
+            end = float(group.get("end", group.get("end_chainage", np.nan)))
+        except Exception:
+            continue
+        if not (np.isfinite(start) and np.isfinite(end)):
+            continue
+        if end < start:
+            start, end = end, start
+        group_rows.append(
+            {
+                "group_index": int(idx),
+                "group_id": str(group.get("id", group.get("group_id", f"G{idx}")) or f"G{idx}"),
+                "start": float(start),
+                "end": float(end),
+            }
+        )
+    group_rows.sort(key=lambda item: (float(item["start"]), float(item["end"])))
+    if not group_rows:
+        return []
+    if not csv_path or not os.path.exists(csv_path):
+        raise FileNotFoundError(f"Theta CSV not found: {csv_path}")
+
+    rows: List[dict] = []
+    with open(csv_path, "r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            try:
+                theta_deg = float(row.get("theta_deg", np.nan))
+            except Exception:
+                theta_deg = np.nan
+            if not np.isfinite(theta_deg):
+                continue
+            try:
+                boundary_chainage = float(row.get("boundary_chainage", np.nan))
+            except Exception:
+                boundary_chainage = np.nan
+            rows.append(
+                {
+                    "control_point": str(row.get("control_point", "") or "").strip(),
+                    "boundary_chainage": float(boundary_chainage) if np.isfinite(boundary_chainage) else None,
+                    "theta_deg": float(theta_deg),
+                    "theta_source": str(row.get("theta_source", "") or "").strip(),
+                    "group_id": str(row.get("group_id", "") or "").strip(),
+                }
+            )
+    if len(rows) != len(group_rows):
+        raise ValueError(
+            f"Theta CSV row count mismatch: expected {len(group_rows)} rows, found {len(rows)}."
+        )
+
+    tol = 1e-3
+    out: List[dict] = []
+    for row, group_row in zip(rows, group_rows):
+        gid = str(row.get("group_id", "") or "").strip()
+        if gid and gid != str(group_row["group_id"]):
+            raise ValueError(
+                f"Theta CSV group mismatch: found '{gid}', expected '{group_row['group_id']}'."
+            )
+        boundary = row.get("boundary_chainage")
+        if boundary is not None and abs(float(boundary) - float(group_row["end"])) > tol:
+            raise ValueError(
+                f"Theta CSV boundary mismatch for group '{group_row['group_id']}': "
+                f"found {float(boundary):.3f}, expected {float(group_row['end']):.3f}."
+            )
+        out.append(
+            {
+                "group_index": int(group_row["group_index"]),
+                "group_id": str(group_row["group_id"]),
+                "start": float(group_row["start"]),
+                "end": float(group_row["end"]),
+                "theta_deg": float(row["theta_deg"]),
+                "theta_source": str(row.get("theta_source", "") or ""),
+                "boundary_chainage": float(group_row["end"]),
+                "control_point": str(row.get("control_point", "") or ""),
+            }
+        )
+    return out
 
 
 def save_vectors_csv_for_line(

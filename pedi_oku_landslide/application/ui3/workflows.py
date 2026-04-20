@@ -14,6 +14,10 @@ from pedi_oku_landslide.domain.ui3.curve_fit import (
     estimate_slip_curve,
     fit_bezier_smooth_curve,
 )
+from pedi_oku_landslide.domain.ui3.global_fit_spline import (
+    SHORT_LINE_LENGTH_M,
+    build_global_forward_fit_spline,
+)
 from pedi_oku_landslide.domain.ui3.grouping import (
     WORKFLOW_GROUP_MIN_LEN_M,
     auto_group_profile_by_criteria,
@@ -23,6 +27,7 @@ from pedi_oku_landslide.domain.ui3.grouping import (
 from pedi_oku_landslide.domain.ui3.profile import compute_profile
 from pedi_oku_landslide.infrastructure.rendering.ui3_render import render_profile_png
 from pedi_oku_landslide.infrastructure.storage.ui3_storage import load_json, save_json
+from pedi_oku_landslide.application.ui3.exports import load_theta_csv_group_angles
 
 
 def compute_profile_for_line(
@@ -181,6 +186,25 @@ def render_preview(*, profile: Dict[str, Any], render_settings: Dict[str, Any], 
     return {"message": msg, "path": path}
 
 
+def build_global_forward_fit_spline_workflow(
+    *,
+    profile: Dict[str, Any],
+    groups: List[Dict[str, Any]],
+    theta_rows: List[Dict[str, Any]],
+    short_length_m: float = SHORT_LINE_LENGTH_M,
+) -> Dict[str, Any]:
+    return build_global_forward_fit_spline(
+        profile,
+        groups,
+        theta_rows,
+        short_length_m=float(short_length_m),
+    )
+
+
+def load_theta_csv_group_angles_workflow(*, csv_path: str, groups: Optional[List[dict]]) -> List[dict]:
+    return load_theta_csv_group_angles(csv_path=csv_path, groups=groups)
+
+
 def save_nurbs_outputs(outputs: Dict[str, Any]) -> Dict[str, Any]:
     saved: Dict[str, Any] = {}
     for key, spec in dict(outputs or {}).items():
@@ -191,6 +215,10 @@ def save_nurbs_outputs(outputs: Dict[str, Any]) -> Dict[str, Any]:
             continue
         saved[key] = save_json(path, spec.get("payload"))
     return saved
+
+
+def save_global_fit_spline_outputs(outputs: Dict[str, Any]) -> Dict[str, Any]:
+    return save_nurbs_outputs(outputs)
 
 
 def load_saved_ui3_state(paths: Dict[str, str]) -> Dict[str, Any]:

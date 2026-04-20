@@ -378,6 +378,8 @@ class UI3LineControllerMixin:
         self._active_groups = []
         self._active_base_curve = None
         self._active_curve = None
+        self._active_global_fit_result = None
+        self._update_global_fit_debug_panel(None, theta_csv_path=None)
         self._ui2_intersections_cache = None
         self._anchors_xyz_cache = None
         self._boring_holes_data = self._empty_boring_holes_payload()
@@ -882,6 +884,9 @@ class UI3LineControllerMixin:
         self._active_groups = []
         self._active_base_curve = None
         self._active_curve = None
+        self._active_global_fit_result = None
+        theta_path = self._theta_csv_path_for(self._line_id_current())
+        self._update_global_fit_debug_panel(None, theta_csv_path=(theta_path if os.path.exists(theta_path) else None))
         self._refresh_group_controls_for_line_role()
         self._load_boring_holes_into_ui()
         try:
@@ -909,7 +914,7 @@ class UI3LineControllerMixin:
         finally:
             self._group_table_updating = False
         if loaded:
-            self._set_curve_method_for_line(line_id, "nurbs")
+            self._set_curve_method_for_line(line_id, "global_fit_spline")
             self._log(f"[UI3] Loaded group table from: {path}")
             return True
         return False
@@ -927,12 +932,73 @@ class UI3LineControllerMixin:
             return
         line_id = self._line_id_current()
         if self._load_group_table_from_path(path, line_id):
-            try:
-                self._sync_nurbs_defaults_from_group_table()
-            except Exception:
-                pass
+            self._sync_nurbs_defaults_from_group_table()
         else:
             self._warn("[UI3] Cannot load group_info file.")
+
+    def _load_saved_global_fit_curve(self, line_id: str) -> Optional[Dict[str, np.ndarray]]:
+        curve_path = os.path.join(self._curve_dir(), f"nurbs_{line_id}.json")
+        if not os.path.exists(curve_path):
+            return None
+        try:
+            with open(curve_path, "r", encoding="utf-8") as f:
+                data = json.load(f) or {}
+            points = list(data.get("points", []) or [])
+            chain = []
+            elev = []
+            for pt in points:
+                try:
+                    s_val = float(pt.get("chainage_m", np.nan))
+                    z_val = float(pt.get("z", np.nan))
+                except Exception:
+                    continue
+                if np.isfinite(s_val) and np.isfinite(z_val):
+                    chain.append(float(s_val))
+                    elev.append(float(z_val))
+            if len(chain) < 2:
+                return None
+            return {
+                "chain": np.asarray(chain, dtype=float),
+                "elev": np.asarray(elev, dtype=float),
+            }
+        except Exception:
+            return None
+
+    def _apply_loaded_global_fit_state(self, line_id: str, data: Dict[str, Any]) -> bool:
+        curve_payload = dict(data.get("curve", {}) or {})
+        curve = {
+            "chain": np.asarray(curve_payload.get("chain", []), dtype=float),
+            "elev": np.asarray(curve_payload.get("elev", []), dtype=float),
+        }
+        if curve["chain"].size < 2 or curve["elev"].size != curve["chain"].size:
+            loaded_curve = self._load_saved_global_fit_curve(line_id)
+            if loaded_curve is None:
+                return False
+            curve = loaded_curve
+        mask = np.isfinite(curve["chain"]) & np.isfinite(curve["elev"])
+        curve["chain"] = curve["chain"][mask]
+        curve["elev"] = curve["elev"][mask]
+        if curve["chain"].size < 2:
+            return False
+        theta_csv_path = str(data.get("theta_csv_path", "") or self._theta_csv_path_for(line_id))
+        result = {
+            "curve_method": "global_fit_spline",
+            "representation": str(data.get("mode", data.get("representation", "global_forward_fit_spline")) or "global_forward_fit_spline"),
+            "short_length_m": float(data.get("short_length_m", 0.1)),
+            "fit_parameterization": str(data.get("fit_parameterization", "chord_length") or "chord_length"),
+            "theta_csv_path": theta_csv_path,
+            "theta_rows": list(data.get("theta_rows", []) or []),
+            "fit_points": list(data.get("fit_points", []) or []),
+            "steps": list(data.get("steps", []) or []),
+            "boundary_intersections": list(data.get("boundary_intersections", []) or []),
+            "curve": curve,
+        }
+        self._set_curve_method_for_line(line_id, "global_fit_spline")
+        self._active_global_fit_result = result
+        self._active_curve = {"chain": curve["chain"], "elev": curve["elev"]}
+        self._update_global_fit_debug_panel(result, theta_csv_path=theta_csv_path)
+        self._draw_global_fit_debug_overlay(result, draw_curve=not self._static_nurbs_bg_loaded)
+        return True
 
     def _load_nurbs_table_from_path(self, path: str, line_id: str) -> bool:
         if not os.path.exists(path):
@@ -940,6 +1006,11 @@ class UI3LineControllerMixin:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f) or {}
+            if str(data.get("curve_method", "") or "").strip().lower() == "global_fit_spline":
+                if self._apply_loaded_global_fit_state(line_id, data):
+                    self._log(f"[UI3] Loaded global fit spline info: {path}")
+                    return True
+                return False
             self._set_nurbs_seed_method_for_line(line_id, data.get("nurbs_seed_method"), sync_ui=False)
             cp_items = data.get("control_points", []) or []
             if not cp_items:
@@ -1020,7 +1091,7 @@ class UI3LineControllerMixin:
         try:
             if not self._load_preview_scene_from_path(path, static_nurbs_bg=True):
                 return False
-            self._log(f"[UI3] Loaded NURBS preview: {path}")
+            self._log(f"[UI3] Loaded saved curve preview: {path}")
             return True
         except Exception:
             return False
@@ -1043,6 +1114,7 @@ class UI3LineControllerMixin:
     def _load_saved_curve_state_for_current_line(self) -> None:
         line_id = self._line_id_current()
         self._populate_group_table_for_current_line()
+        self._set_curve_method_for_line(line_id, "global_fit_spline")
         prof = self._build_profile_for_current_line()
         if prof is not None:
             self._active_prof = prof
@@ -1054,11 +1126,12 @@ class UI3LineControllerMixin:
             except Exception:
                 pass
         self._active_groups = groups
+        self._active_global_fit_result = None
 
         loaded_preview = self._try_load_nurbs_preview_from_curve(line_id)
         self._try_load_nurbs_table_from_curve(line_id)
         if not loaded_preview:
-            self._log("[i] No saved NURBS preview in ui3/curve. Click 'Render Section' to preview.")
+            self._log("[i] No saved curve preview in ui3/curve. Click 'Render Section' to preview.")
         self._refresh_anchor_overlay()
 
     def _populate_group_table_for_current_line(self) -> None:
@@ -1118,6 +1191,7 @@ class UI3LineControllerMixin:
         self._active_groups = groups if groups else []
         self._active_base_curve = None
         self._active_curve = None
+        self._active_global_fit_result = None
 
         try:
             ground_csv = self._save_ground_csv_for_line(line_id, geom, step_m=float(self.step_box.value()))
@@ -1132,6 +1206,20 @@ class UI3LineControllerMixin:
                 self._log(f"[UI3] Saved vectors CSV: {vectors_csv}")
         except Exception as e:
             self._warn(f"[UI3] Cannot save vectors CSV: {e}")
+
+        try:
+            if groups:
+                theta_csv = self._save_theta_csv_for_line(line_id, prof, groups)
+                if theta_csv:
+                    self._log(f"[UI3] Saved theta CSV: {theta_csv}")
+                    self._group_table_updating = True
+                    try:
+                        self._populate_group_table_rows(groups, length_m=self._sec_len_m)
+                    finally:
+                        self._group_table_updating = False
+                    self._update_global_fit_debug_panel(None, theta_csv_path=theta_csv)
+        except Exception as e:
+            self._warn(f"[UI3] Cannot save theta CSV: {e}")
 
     def _render_current_safe(self) -> None:
         try:

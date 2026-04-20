@@ -11,6 +11,44 @@ WORKFLOW_GROUP_MIN_LEN_M = 0.0
 
 
 class UI3GroupPanelMixin:
+    def _load_theta_rows_for_line(self, line_id: Optional[str], groups: Optional[List[dict]] = None) -> List[dict]:
+        lid = str(line_id or self._line_id_current() or "").strip()
+        if not lid:
+            return []
+        path = self._theta_csv_path_for(lid)
+        if not os.path.exists(path):
+            return []
+        try:
+            group_rows = groups if groups is not None else self._read_groups_from_table()
+            if not group_rows:
+                return []
+            return self._backend.load_theta_csv_group_angles(csv_path=path, groups=group_rows)
+        except Exception:
+            return []
+
+    @staticmethod
+    def _theta_map_for_groups(theta_rows: Optional[List[dict]]) -> Dict[str, dict]:
+        out: Dict[str, dict] = {}
+        for row in theta_rows or []:
+            gid = str(row.get("group_id", "") or "").strip()
+            if gid:
+                out[gid] = dict(row)
+        return out
+
+    def _set_theta_cell(self, row: int, theta_deg: Optional[float], theta_source: str = "") -> None:
+        item = self.group_table.item(row, 3)
+        if item is None:
+            item = QTableWidgetItem("")
+            self.group_table.setItem(row, 3, item)
+        item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+        if theta_deg is None or not np.isfinite(float(theta_deg)):
+            item.setText("")
+            item.setToolTip(str(theta_source or "").strip())
+            return
+        item.setText(f"{float(theta_deg):.3f}")
+        tip = str(theta_source or "").strip()
+        item.setToolTip(tip if tip else f"{float(theta_deg):.3f} deg")
+
     def _load_group_json_data(
         self,
         path: str,
@@ -32,6 +70,8 @@ class UI3GroupPanelMixin:
     def _populate_group_table_rows(self, groups: List[dict], *, length_m: Optional[float]) -> int:
         self.group_table.setRowCount(0)
         loaded = 0
+        theta_rows = self._load_theta_rows_for_line(self._line_id_current(), groups)
+        theta_by_gid = self._theta_map_for_groups(theta_rows)
         for g in (groups or []):
             try:
                 gid = str(g.get("group_id", g.get("id", ""))).strip()
@@ -46,6 +86,13 @@ class UI3GroupPanelMixin:
             self.group_table.setItem(r, 0, QTableWidgetItem(gid or f"G{r + 1}"))
             self.group_table.setItem(r, 1, QTableWidgetItem(f"{s:.3f}"))
             self.group_table.setItem(r, 2, QTableWidgetItem(f"{e:.3f}"))
+            theta_row = theta_by_gid.get(gid or f"G{r + 1}", {})
+            theta_val = theta_row.get("theta_deg", g.get("median_theta_deg"))
+            try:
+                theta_float = float(theta_val) if theta_val is not None else None
+            except Exception:
+                theta_float = None
+            self._set_theta_cell(r, theta_float, str(theta_row.get("theta_source", "") or ""))
             self._set_group_boundary_reason(r, 1, str(g.get("start_reason", "") or ""))
             self._set_group_boundary_reason(r, 2, str(g.get("end_reason", "") or ""))
             self._set_color_cell(r, str(g.get("color", "")).strip())
@@ -304,8 +351,9 @@ class UI3GroupPanelMixin:
         self.group_table.setItem(r, 0, item_id)
         self.group_table.setItem(r, 1, item_s)
         self.group_table.setItem(r, 2, item_e)
+        self._set_theta_cell(r, None, "")
         self._set_color_cell(r, "#bbbbbb")
-        color_item = self.group_table.item(r, 3)
+        color_item = self.group_table.item(r, 4)
         if color_item:
             color_item.setFlags(color_item.flags() & ~Qt.ItemIsEditable)
 
@@ -322,10 +370,10 @@ class UI3GroupPanelMixin:
 
     def _set_color_cell(self, row: int, color_hex: str) -> None:
         c = self._normalize_color_hex(color_hex)
-        item = self.group_table.item(row, 3)
+        item = self.group_table.item(row, 4)
         if item is None:
             item = QTableWidgetItem("")
-            self.group_table.setItem(row, 3, item)
+            self.group_table.setItem(row, 4, item)
         item.setFlags(item.flags() & ~Qt.ItemIsEditable)
         if c:
             item.setData(Qt.UserRole, c)
@@ -339,7 +387,7 @@ class UI3GroupPanelMixin:
             item.setBackground(QColor(0, 0, 0, 0))
 
     def _get_color_cell_value(self, row: int) -> str:
-        item = self.group_table.item(row, 3)
+        item = self.group_table.item(row, 4)
         if item is None:
             return ""
         val = item.data(Qt.UserRole)
@@ -349,7 +397,7 @@ class UI3GroupPanelMixin:
         return self._normalize_color_hex(txt)
 
     def _on_group_cell_double_clicked(self, row: int, col: int) -> None:
-        if col != 3:
+        if col != 4:
             return
         current = self._get_color_cell_value(row)
         initial = QColor(current) if current else QColor(255, 255, 255)

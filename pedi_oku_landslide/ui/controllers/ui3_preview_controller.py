@@ -6,6 +6,7 @@ import numpy as np
 from PyQt5.QtGui import QColor, QPainterPath, QPen, QPixmap, QPixmapCache
 from PyQt5.QtWidgets import (
     QGraphicsEllipseItem,
+    QGraphicsLineItem,
     QGraphicsPathItem,
     QGraphicsPixmapItem,
     QGraphicsSimpleTextItem,
@@ -356,6 +357,67 @@ class UI3PreviewControllerMixin:
         item.setZValue(120.0)
         self.scene.addItem(item)
         self._curve_overlay_item = item
+        self._refresh_anchor_overlay()
+
+    def _draw_global_fit_debug_overlay(self, result: Optional[Dict[str, Any]], *, draw_curve: bool = False) -> None:
+        self._clear_control_points_overlay()
+        if self.scene is None or not result:
+            return
+        curve = dict(result.get("curve", {}) or {})
+        if draw_curve:
+            self._draw_curve_overlay(
+                np.asarray(curve.get("chain", []), dtype=float),
+                np.asarray(curve.get("elev", []), dtype=float),
+                color="#bf00ff",
+            )
+
+        for idx, seg in enumerate(result.get("steps", []) or [], 1):
+            start_pt = dict(seg.get("start_point", {}) or {})
+            aux_pt = dict(seg.get("aux_fit_point", {}) or {})
+            g_pt = dict(seg.get("intersection_point", {}) or {})
+            start_xy = self._chain_elev_to_scene_xy(float(start_pt.get("chain", np.nan)), float(start_pt.get("elev", np.nan)))
+            aux_xy = self._chain_elev_to_scene_xy(float(aux_pt.get("chain", np.nan)), float(aux_pt.get("elev", np.nan)))
+            if start_xy is not None and aux_xy is not None:
+                line = QGraphicsLineItem(start_xy[0], start_xy[1], aux_xy[0], aux_xy[1])
+                pen = QPen(QColor("#ff9f1a"))
+                pen.setWidth(2)
+                pen.setCosmetic(True)
+                line.setPen(pen)
+                line.setZValue(126.0)
+                self.scene.addItem(line)
+                self._cp_overlay_items.append(line)
+            if aux_xy is not None:
+                r = 7.0
+                marker = QGraphicsEllipseItem(aux_xy[0] - r, aux_xy[1] - r, 2 * r, 2 * r)
+                marker.setBrush(QColor("#ff9f1a"))
+                marker.setPen(QPen(QColor("#ffffff")))
+                marker.setZValue(127.0)
+                self.scene.addItem(marker)
+                self._cp_overlay_items.append(marker)
+
+                lbl = QGraphicsSimpleTextItem(f"aux{idx}")
+                lbl.setBrush(QColor("#7a4200"))
+                lbl.setPos(aux_xy[0] + 8.0, aux_xy[1] - 18.0)
+                lbl.setZValue(128.0)
+                self.scene.addItem(lbl)
+                self._cp_overlay_items.append(lbl)
+            if g_pt:
+                g_xy = self._chain_elev_to_scene_xy(float(g_pt.get("chain", np.nan)), float(g_pt.get("elev", np.nan)))
+                if g_xy is not None:
+                    r = 7.0
+                    marker = QGraphicsEllipseItem(g_xy[0] - r, g_xy[1] - r, 2 * r, 2 * r)
+                    marker.setBrush(QColor("#00c2a8"))
+                    marker.setPen(QPen(QColor("#ffffff")))
+                    marker.setZValue(127.0)
+                    self.scene.addItem(marker)
+                    self._cp_overlay_items.append(marker)
+
+                    lbl = QGraphicsSimpleTextItem(f"G{idx}")
+                    lbl.setBrush(QColor("#00695c"))
+                    lbl.setPos(g_xy[0] + 8.0, g_xy[1] - 18.0)
+                    lbl.setZValue(128.0)
+                    self.scene.addItem(lbl)
+                    self._cp_overlay_items.append(lbl)
         self._refresh_anchor_overlay()
 
     def _draw_control_points_overlay(self, params: Optional[Dict[str, Any]] = None) -> None:

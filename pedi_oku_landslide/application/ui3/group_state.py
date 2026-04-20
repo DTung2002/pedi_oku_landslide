@@ -13,6 +13,8 @@ from pedi_oku_landslide.domain.ui3.curve_state import (
 
 def normalize_curve_method(method: Optional[str]) -> str:
     m = str(method or "").strip().lower()
+    if m == "global_fit_spline":
+        return "global_fit_spline"
     if m == "nurbs":
         return "nurbs"
     return "bezier"
@@ -20,7 +22,7 @@ def normalize_curve_method(method: Optional[str]) -> str:
 
 def curve_method_from_group_method(group_method: Optional[str]) -> str:
     _ = group_method
-    return "nurbs"
+    return "global_fit_spline"
 
 
 def groups_to_current_chainage(

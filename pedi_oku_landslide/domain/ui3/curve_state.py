@@ -206,16 +206,15 @@ def _profile_surface_for_seed(prof: dict) -> Tuple[np.ndarray, np.ndarray]:
     return chain_u, elev_u
 
 
-def _start_percentile_slope(
+def _local_surface_window_for_seed(
     prof: dict,
     start_chainage: float,
     *,
-    percentile: float = 20.0,
     neighbors_each_side: int = 5,
-) -> Optional[float]:
+) -> Tuple[np.ndarray, np.ndarray]:
     chain, elev = _profile_surface_for_seed(prof)
     if chain.size < 2 or not np.isfinite(float(start_chainage)):
-        return None
+        return np.array([], dtype=float), np.array([], dtype=float)
 
     before = np.flatnonzero(chain < float(start_chainage))
     after = np.flatnonzero(chain > float(start_chainage))
@@ -239,17 +238,61 @@ def _start_percentile_slope(
     local_chain = np.concatenate(ch_parts) if ch_parts else np.array([], dtype=float)
     local_elev = np.concatenate(z_parts) if z_parts else np.array([], dtype=float)
     if local_chain.size < 2:
-        return None
+        return np.array([], dtype=float), np.array([], dtype=float)
 
     order = np.argsort(local_chain)
     local_chain = local_chain[order]
     local_elev = local_elev[order]
-    dx = np.diff(local_chain)
-    dz = np.diff(local_elev)
-    keep = np.isfinite(dx) & np.isfinite(dz) & (np.abs(dx) > 1e-9)
-    if int(np.count_nonzero(keep)) <= 0:
-        return None
-    slopes = dz[keep] / dx[keep]
+    return local_chain, local_elev
+
+
+def _point_slopes_for_profile_window(
+    full_chain: np.ndarray,
+    full_elev: np.ndarray,
+    local_chain: np.ndarray,
+    local_elev: np.ndarray,
+) -> np.ndarray:
+    n = int(min(local_chain.size, local_elev.size))
+    if n < 2:
+        return np.array([], dtype=float)
+    if int(min(full_chain.size, full_elev.size)) < 2:
+        return np.array([], dtype=float)
+
+    slopes = np.full(n, np.nan, dtype=float)
+    for idx in range(n):
+        ch = float(local_chain[idx])
+        zz = float(local_elev[idx])
+        next_pos = int(np.searchsorted(full_chain, ch, side="right"))
+        if next_pos < full_chain.size:
+            # Match the client sheet: slope at a point uses the next point
+            # on the full ground profile, not just within the 11-point window.
+            dx = float(full_chain[next_pos] - ch)
+            dz = float(full_elev[next_pos] - zz)
+        else:
+            prev_pos = int(np.searchsorted(full_chain, ch, side="left")) - 1
+            if prev_pos < 0:
+                continue
+            dx = float(ch - full_chain[prev_pos])
+            dz = float(zz - full_elev[prev_pos])
+        if np.isfinite(dx) and np.isfinite(dz) and abs(dx) > 1e-9:
+            slopes[idx] = dz / dx
+    return slopes[np.isfinite(slopes)]
+
+
+def _start_percentile_slope(
+    prof: dict,
+    start_chainage: float,
+    *,
+    percentile: float = 20.0,
+    neighbors_each_side: int = 5,
+) -> Optional[float]:
+    full_chain, full_elev = _profile_surface_for_seed(prof)
+    local_chain, local_elev = _local_surface_window_for_seed(
+        prof,
+        start_chainage,
+        neighbors_each_side=neighbors_each_side,
+    )
+    slopes = _point_slopes_for_profile_window(full_chain, full_elev, local_chain, local_elev)
     if slopes.size <= 0:
         return None
     slope = float(np.nanpercentile(slopes, float(percentile)))
@@ -263,16 +306,37 @@ def start_theta_deg_for_cp1(
     percentile: float = 20.0,
     neighbors_each_side: int = 5,
 ) -> Optional[float]:
+    full_chain, full_elev = _profile_surface_for_seed(prof)
+    local_chain, local_elev = _local_surface_window_for_seed(
+        prof,
+        start_chainage,
+        neighbors_each_side=neighbors_each_side,
+    )
+    slopes = _point_slopes_for_profile_window(full_chain, full_elev, local_chain, local_elev)
+    if slopes.size <= 0:
+        return None
+    theta_list = np.degrees(np.arctan(slopes))
+    theta_list = theta_list[np.isfinite(theta_list)]
+    if theta_list.size <= 0:
+        return None
+    theta_deg = float(np.nanpercentile(theta_list, float(percentile)))
+    return theta_deg if np.isfinite(theta_deg) else None
+
+
+def start_slope_for_cp1(
+    prof: dict,
+    start_chainage: float,
+    *,
+    percentile: float = 20.0,
+    neighbors_each_side: int = 5,
+) -> Optional[float]:
     start_slope = _start_percentile_slope(
         prof,
         start_chainage,
         percentile=percentile,
         neighbors_each_side=neighbors_each_side,
     )
-    if start_slope is None or not np.isfinite(start_slope):
-        return None
-    theta_deg = float(np.degrees(np.arctan(start_slope)))
-    return theta_deg if np.isfinite(theta_deg) else None
+    return float(start_slope) if start_slope is not None and np.isfinite(start_slope) else None
 
 
 def slope_theta_specs_for_groups(
@@ -336,6 +400,36 @@ def median_displacement_theta_deg_for_group(group: dict, prof: Optional[dict]) -
     if theta.size <= 0:
         return None
     med = float(np.median(theta))
+    return med if np.isfinite(med) else None
+
+
+def median_displacement_slope_for_group(group: dict, prof: Optional[dict]) -> Optional[float]:
+    chain = np.asarray((prof or {}).get("chain", []), dtype=float)
+    d_para = np.asarray((prof or {}).get("d_para", []), dtype=float)
+    dz = np.asarray((prof or {}).get("dz", []), dtype=float)
+    n = int(min(chain.size, d_para.size, dz.size))
+    if n <= 0:
+        return None
+    chain = chain[:n]
+    d_para = d_para[:n]
+    dz = dz[:n]
+    try:
+        s = float(group.get("start", group.get("start_chainage", np.nan)))
+        e = float(group.get("end", group.get("end_chainage", np.nan)))
+    except Exception:
+        return None
+    if not (np.isfinite(s) and np.isfinite(e)):
+        return None
+    if e < s:
+        s, e = e, s
+    mask = (chain >= float(s)) & (chain <= float(e)) & np.isfinite(d_para) & np.isfinite(dz) & (np.abs(d_para) > 1e-9)
+    if int(np.count_nonzero(mask)) <= 0:
+        return None
+    slopes = dz[mask] / d_para[mask]
+    slopes = slopes[np.isfinite(slopes)]
+    if slopes.size <= 0:
+        return None
+    med = float(np.median(slopes))
     return med if np.isfinite(med) else None
 
 

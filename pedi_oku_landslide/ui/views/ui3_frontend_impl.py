@@ -102,6 +102,7 @@ class CurveAnalyzeTab(
         self._active_groups: List[dict] = []
         self._active_base_curve: Optional[dict] = None
         self._active_curve: Optional[dict] = None
+        self._active_global_fit_result: Optional[Dict[str, Any]] = None
         self._curve_overlay_item: Optional[QGraphicsPathItem] = None
         self._cp_overlay_items: List[Any] = []
         self._anchor_overlay_items: List[Any] = []
@@ -313,13 +314,14 @@ class CurveAnalyzeTab(
         row_curv.addWidget(self.rdp_eps_spin)
         lg.addLayout(row_curv)
 
-        self.group_table = QTableWidget(0, 4)
+        self.group_table = QTableWidget(0, 5)
         self.group_table.setHorizontalHeaderLabels(
-            ["Group ID", "Start (m)", "End (m)", "Color"]
+            ["Group ID", "Start (m)", "End (m)", "Theta (deg)", "Color"]
         )
         self.group_table.verticalHeader().setVisible(False)
         self.group_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.group_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.group_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
         self.group_table.cellDoubleClicked.connect(self._on_group_cell_double_clicked)
         self.group_table.itemChanged.connect(self._on_group_table_item_changed)
         _set_table_visible_rows(self.group_table, rows=4, row_h=30)
@@ -367,59 +369,54 @@ class CurveAnalyzeTab(
         lbh.addLayout(row_bh_btn)
         left.addWidget(box_bh, 0)
 
-        # NURBS controls
-        box_nurbs = QGroupBox("NURBS")
+        box_nurbs = QGroupBox("Global Fit Spline")
         ln = QVBoxLayout(box_nurbs)
         ln.setContentsMargins(8, 8, 8, 8)
         ln.setSpacing(6)
 
-        row_cfg = QHBoxLayout()
-        row_cfg.addWidget(QLabel("Control points:"))
+        def _debug_row(label_text: str, value_text: str = "—") -> QLabel:
+            row = QHBoxLayout()
+            row.addWidget(QLabel(label_text))
+            value = QLabel(value_text)
+            value.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            value.setWordWrap(True)
+            row.addWidget(value, 1)
+            ln.addLayout(row)
+            return value
+
+        self.global_fit_short_length_value = _debug_row("Short line:", "0.1 m")
+        self.global_fit_theta_source_value = _debug_row("Theta source:", "—")
+        self.global_fit_fit_count_value = _debug_row("Fit points:", "0")
+        self.global_fit_step_count_value = _debug_row("Steps:", "0")
+        self.global_fit_curve_method_value = _debug_row("Method:", "global_forward_fit_spline")
+
+        row_nurbs_btn = QHBoxLayout()
+        self.btn_nurbs_save = QPushButton("Save")
+        row_nurbs_btn.addWidget(self.btn_nurbs_save, 1)
+        ln.addLayout(row_nurbs_btn)
+        self.btn_nurbs_save.clicked.connect(self._on_nurbs_save)
+        left.addWidget(box_nurbs, 0)
+
+        # Hidden legacy widgets kept as inert placeholders while active workflow uses global fit spline.
         self.nurbs_cp_spin = KeyboardOnlySpinBox()
         self.nurbs_cp_spin.setRange(2, 20)
         self.nurbs_cp_spin.setValue(4)
-        self.nurbs_cp_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
-        row_cfg.addWidget(self.nurbs_cp_spin)
-        row_cfg.addSpacing(8)
-        row_cfg.addWidget(QLabel("Degree:"))
+        self.nurbs_cp_spin.hide()
         self.nurbs_deg_spin = KeyboardOnlySpinBox()
         self.nurbs_deg_spin.setRange(1, 10)
         self.nurbs_deg_spin.setValue(3)
-        self.nurbs_deg_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
-        row_cfg.addWidget(self.nurbs_deg_spin)
-        row_cfg.addSpacing(8)
-        row_cfg.addWidget(QLabel("Seed:"))
+        self.nurbs_deg_spin.hide()
         self.nurbs_seed_method_combo = NoWheelComboBox()
         self.nurbs_seed_method_combo.addItem("Bezier-like", "bezier_like")
         self.nurbs_seed_method_combo.addItem("Slope-guided", "slope_guided")
-        row_cfg.addWidget(self.nurbs_seed_method_combo, 1)
-        ln.addLayout(row_cfg)
-
+        self.nurbs_seed_method_combo.hide()
         self.nurbs_table = QTableWidget(0, 4)
         self.nurbs_table.setHorizontalHeaderLabels(["CP", "Chainage (m)", "Elev (m)", "Weight"])
-        self.nurbs_table.verticalHeader().setVisible(False)
-        self.nurbs_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.nurbs_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        _set_table_visible_rows(self.nurbs_table, rows=4, row_h=34)
-        ln.addWidget(self.nurbs_table)
-
-        row_nurbs_btn = QHBoxLayout()
+        self.nurbs_table.hide()
         self.btn_nurbs_load = QPushButton("Load NURBS")
+        self.btn_nurbs_load.hide()
         self.btn_nurbs_reset = QPushButton("Reset NURBS")
-        self.btn_nurbs_save = QPushButton("Save")
-        row_nurbs_btn.addWidget(self.btn_nurbs_load, 1)
-        row_nurbs_btn.addWidget(self.btn_nurbs_reset, 1)
-        row_nurbs_btn.addWidget(self.btn_nurbs_save, 1)
-        ln.addLayout(row_nurbs_btn)
-
-        self.nurbs_cp_spin.valueChanged.connect(self._on_nurbs_cp_spin_changed)
-        self.nurbs_deg_spin.valueChanged.connect(self._on_nurbs_deg_spin_changed)
-        self.nurbs_seed_method_combo.currentIndexChanged.connect(self._on_nurbs_seed_method_changed)
-        self.btn_nurbs_load.clicked.connect(self._on_load_nurbs_info)
-        self.btn_nurbs_reset.clicked.connect(self._on_nurbs_reset_defaults)
-        self.btn_nurbs_save.clicked.connect(self._on_nurbs_save)
-
-        left.addWidget(box_nurbs, 0)
+        self.btn_nurbs_reset.hide()
 
         # Status
         box_st = QGroupBox("Status")
