@@ -13,6 +13,7 @@ from PyQt5.QtWidgets import (
     QGraphicsPixmapItem,
     QGraphicsRectItem,
     QGraphicsScene,
+    QGridLayout,
     QGroupBox,
     QHeaderView,
     QHBoxLayout,
@@ -35,6 +36,26 @@ from pedi_oku_landslide.ui.controllers.ui3_group_panel import UI3GroupPanelMixin
 from pedi_oku_landslide.ui.controllers.ui3_curve_panel import UI3CurvePanelMixin
 from pedi_oku_landslide.ui.controllers.ui3_line_controller import UI3LineControllerMixin, WORKFLOW_GROUPING_PARAMS
 from pedi_oku_landslide.ui.widgets.ui3_widgets import KeyboardOnlyDoubleSpinBox, KeyboardOnlySpinBox, NoWheelComboBox
+from pedi_oku_landslide.ui.layout_constants import (
+    LEFT_DEFAULT_W,
+    LEFT_MARGINS,
+    LEFT_MIN_W,
+    PANEL_SPACING,
+    PREVIEW_FIT_BUTTON_H,
+    PREVIEW_FIT_BUTTON_W,
+    PREVIEW_MIN_H,
+    PREVIEW_VIEWPORT_STYLE,
+    RIGHT_MARGINS,
+    RIGHT_MIN_W,
+    STATUS_PANEL_H,
+    CONTROL_HEIGHT,
+    PROJECT_H_SPACING,
+    PROJECT_LABEL_W,
+    PROJECT_MARGINS,
+    PROJECT_V_SPACING,
+    ROOT_MARGINS,
+    ROOT_SPACING,
+)
 
 class CurveAnalyzeTab(
     UI3PreviewControllerMixin,
@@ -61,8 +82,8 @@ class CurveAnalyzeTab(
         self._ctx: Dict[str, str] = {"project": "", "run_label": "", "run_dir": ""}
         self._splitter: Optional[QSplitter] = None
         self._left_scroll: Optional[QScrollArea] = None
-        self._left_min_w = 380
-        self._left_default_w = 490
+        self._left_min_w = LEFT_MIN_W
+        self._left_default_w = LEFT_DEFAULT_W
         self._pending_init_splitter = True
 
         self._ax_top = None  # dict: {x_min,x_max,left_px,top_px,width_px,height_px}
@@ -176,8 +197,8 @@ class CurveAnalyzeTab(
     # -------------------- UI --------------------
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(6, 6, 6, 6)
-        root.setSpacing(4)
+        root.setContentsMargins(*ROOT_MARGINS)
+        root.setSpacing(ROOT_SPACING)
 
         # ===== BODY: dùng QSplitter để panel trái/phải kéo được =====
         splitter = QSplitter(Qt.Horizontal, self)
@@ -199,42 +220,36 @@ class CurveAnalyzeTab(
         left_container = QWidget()
         left_container.setMinimumWidth(self._left_min_w)
         left = QVBoxLayout(left_container)
-        left.setContentsMargins(6, 6, 6, 6)
-        left.setSpacing(8)
+        left.setContentsMargins(*LEFT_MARGINS)
+        left.setSpacing(PANEL_SPACING)
         left_scroll.setWidget(left_container)
 
         # Project info – giống Section tab
         box_proj = QGroupBox("Project")
-        lp = QVBoxLayout(box_proj)
-        proj_input_h = 30
-        fm = self.fontMetrics()
-        proj_label_w = max(
-            fm.horizontalAdvance("Name:"),
-            fm.horizontalAdvance("Run label:")
-        ) + 15
-
-        def _fit_proj_label(text: str) -> QLabel:
-            lb = QLabel(text)
-            lb.setFixedWidth(proj_label_w)
-            return lb
-
-        row_proj = QHBoxLayout()
-        row_proj.addWidget(_fit_proj_label("Name:"))
+        lp = QGridLayout(box_proj)
+        lp.setContentsMargins(*PROJECT_MARGINS)
+        lp.setHorizontalSpacing(PROJECT_H_SPACING)
+        lp.setVerticalSpacing(PROJECT_V_SPACING)
+        lp.setColumnStretch(1, 1)
+        lbl_name = QLabel("Name:")
+        lbl_run = QLabel("Run label:")
+        lbl_name.setFixedWidth(PROJECT_LABEL_W)
+        lbl_run.setFixedWidth(PROJECT_LABEL_W)
+        lp.setColumnMinimumWidth(0, PROJECT_LABEL_W)
         self.edit_project = QLineEdit()
         self.edit_project.setPlaceholderText("—")
         self.edit_project.setReadOnly(True)
-        self.edit_project.setFixedHeight(proj_input_h)
+        self.edit_project.setFixedHeight(CONTROL_HEIGHT)
         self.edit_project.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        row_proj.addWidget(self.edit_project, 1)
-        row_proj.addSpacing(6)
-        row_proj.addWidget(_fit_proj_label("Run label:"))
         self.edit_runlabel = QLineEdit()
         self.edit_runlabel.setPlaceholderText("—")
         self.edit_runlabel.setReadOnly(True)
-        self.edit_runlabel.setFixedHeight(proj_input_h)
+        self.edit_runlabel.setFixedHeight(CONTROL_HEIGHT)
         self.edit_runlabel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        row_proj.addWidget(self.edit_runlabel, 1)
-        lp.addLayout(row_proj)
+        lp.addWidget(lbl_name, 0, 0)
+        lp.addWidget(self.edit_project, 0, 1)
+        lp.addWidget(lbl_run, 1, 0)
+        lp.addWidget(self.edit_runlabel, 1, 1)
 
         left.addWidget(box_proj)
 
@@ -336,10 +351,8 @@ class CurveAnalyzeTab(
         self.btn_draw_curve.clicked.connect(self._on_draw_curve)
         self.btn_auto_group = QPushButton("Auto Group")
         self.btn_auto_group.clicked.connect(self._on_auto_group)
-        self.btn_load_group = QPushButton("Load Group")
-        self.btn_load_group.clicked.connect(self._on_load_group_info)
 
-        for btn in (self.btn_auto_group, self.btn_load_group, self.btn_add_g, self.btn_del_g, self.btn_draw_curve):
+        for btn in (self.btn_auto_group, self.btn_add_g, self.btn_del_g, self.btn_draw_curve):
             btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             rowg.addWidget(btn, 1)
         lg.addLayout(rowg)
@@ -369,41 +382,29 @@ class CurveAnalyzeTab(
         lbh.addLayout(row_bh_btn)
         left.addWidget(box_bh, 0)
 
-        box_nurbs = QGroupBox("Global Fit Spline")
+        box_nurbs = QGroupBox("NURBS Control Points")
         ln = QVBoxLayout(box_nurbs)
         ln.setContentsMargins(8, 8, 8, 8)
         ln.setSpacing(6)
 
-        def _debug_row(label_text: str, value_text: str = "—") -> QLabel:
-            row = QHBoxLayout()
-            row.addWidget(QLabel(label_text))
-            value = QLabel(value_text)
-            value.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            value.setWordWrap(True)
-            row.addWidget(value, 1)
-            ln.addLayout(row)
-            return value
+        row_nurbs_meta = QHBoxLayout()
+        row_nurbs_meta.addWidget(QLabel("Degree:"))
+        self.nurbs_degree_value = QLabel("3")
+        row_nurbs_meta.addWidget(self.nurbs_degree_value)
+        row_nurbs_meta.addStretch(1)
+        ln.addLayout(row_nurbs_meta)
 
-        self.global_fit_short_length_value = _debug_row("Short line:", "0.1 m")
-        self.global_fit_theta_source_value = _debug_row("Theta source:", "—")
-        self.global_fit_fit_count_value = _debug_row("Fit points:", "0")
-        self.global_fit_step_count_value = _debug_row("Steps:", "0")
-        self.global_fit_curve_method_value = _debug_row("Method:", "global_forward_fit_spline")
+        self.btn_convert_nurbs = QPushButton("Convert to NURBS")
+        self.btn_convert_nurbs.setEnabled(False)
+        self.btn_convert_nurbs.clicked.connect(self._on_convert_to_nurbs)
+        ln.addWidget(self.btn_convert_nurbs)
 
-        row_nurbs_btn = QHBoxLayout()
-        self.btn_nurbs_save = QPushButton("Save")
-        row_nurbs_btn.addWidget(self.btn_nurbs_save, 1)
-        ln.addLayout(row_nurbs_btn)
-        self.btn_nurbs_save.clicked.connect(self._on_nurbs_save)
-        left.addWidget(box_nurbs, 0)
-
-        # Hidden legacy widgets kept as inert placeholders while active workflow uses global fit spline.
         self.nurbs_cp_spin = KeyboardOnlySpinBox()
-        self.nurbs_cp_spin.setRange(2, 20)
+        self.nurbs_cp_spin.setRange(4, 200)
         self.nurbs_cp_spin.setValue(4)
         self.nurbs_cp_spin.hide()
         self.nurbs_deg_spin = KeyboardOnlySpinBox()
-        self.nurbs_deg_spin.setRange(1, 10)
+        self.nurbs_deg_spin.setRange(3, 3)
         self.nurbs_deg_spin.setValue(3)
         self.nurbs_deg_spin.hide()
         self.nurbs_seed_method_combo = NoWheelComboBox()
@@ -412,53 +413,53 @@ class CurveAnalyzeTab(
         self.nurbs_seed_method_combo.hide()
         self.nurbs_table = QTableWidget(0, 4)
         self.nurbs_table.setHorizontalHeaderLabels(["CP", "Chainage (m)", "Elev (m)", "Weight"])
-        self.nurbs_table.hide()
+        self.nurbs_table.verticalHeader().setVisible(False)
+        self.nurbs_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.nurbs_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        _set_table_visible_rows(self.nurbs_table, rows=4, row_h=30)
+        ln.addWidget(self.nurbs_table)
+
+        self.btn_nurbs_save = QPushButton("Save")
+        self.btn_nurbs_save.hide()
         self.btn_nurbs_load = QPushButton("Load NURBS")
         self.btn_nurbs_load.hide()
         self.btn_nurbs_reset = QPushButton("Reset NURBS")
         self.btn_nurbs_reset.hide()
+        left.addWidget(box_nurbs, 0)
 
         # Status
         box_st = QGroupBox("Status")
         ls = QVBoxLayout(box_st)
         self.status = QTextEdit()
         self.status.setReadOnly(True)
-        self.status.setMinimumHeight(170)
-        self.status.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.status.setFixedHeight(STATUS_PANEL_H)
+        self.status.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         ls.addWidget(self.status)
-        left.addWidget(box_st, 1)
+        left.addWidget(box_st, 0)
 
         # ===== RIGHT: preview (zoomable like AnalyzeTab) =====
         right_container = QWidget()
+        right_container.setMinimumWidth(RIGHT_MIN_W)
         right_wrap = QVBoxLayout(right_container)
-        right_wrap.setContentsMargins(0, 0, 0, 0)
-
-        zoombar = QToolBar()
-        act_in = QAction("Zoom +", self)
-        act_in.triggered.connect(lambda: self.view.zoom_in())
-        act_out = QAction("Zoom –", self)
-        act_out.triggered.connect(lambda: self.view.zoom_out())
-        act_fit = QAction("Fit", self)
-        act_fit.triggered.connect(lambda: self.view.fit_to_scene())
-        act_100 = QAction("100%", self)
-        act_100.triggered.connect(lambda: self.view.set_100())
-        zoombar.addAction(act_in)
-        zoombar.addAction(act_out)
-        zoombar.addAction(act_fit)
-        zoombar.addAction(act_100)
-        zoombar.setIconSize(QSize(22, 22))
-        zoombar.setToolButtonStyle(Qt.ToolButtonTextOnly)
-        zoombar.setContentsMargins(0, 0, 0, 0)
-        zoombar.setStyleSheet("QToolBar { spacing: 6px; background: transparent; border: none; }")
-        right_wrap.addWidget(zoombar)
+        right_wrap.setContentsMargins(*RIGHT_MARGINS)
+        right_wrap.setSpacing(PANEL_SPACING)
 
         self._profile_cursor_label = QLabel("Cursor: —")
         self._profile_cursor_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        right_wrap.addWidget(self._profile_cursor_label)
+        cursor_row = QHBoxLayout()
+        cursor_row.setContentsMargins(0, 0, 0, 0)
+        cursor_row.addWidget(self._profile_cursor_label, 1)
+        self.btn_profile_fit = QPushButton("Fit")
+        self.btn_profile_fit.setFixedSize(PREVIEW_FIT_BUTTON_W, PREVIEW_FIT_BUTTON_H)
+        self.btn_profile_fit.clicked.connect(lambda: self.view.fit_to_scene())
+        cursor_row.addWidget(self.btn_profile_fit, 0)
+        right_wrap.addLayout(cursor_row)
 
         self.scene = QGraphicsScene()
         self.view = ZoomableGraphicsView(self.scene)
         self.view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.view.setMinimumHeight(PREVIEW_MIN_H)
+        self.view.setStyleSheet(PREVIEW_VIEWPORT_STYLE)
         self.view.sceneMouseMoved.connect(self._on_profile_scene_mouse_moved)
         self.view.hoverExited.connect(self._clear_profile_cursor_readout)
         right_wrap.addWidget(self.view, 1)
@@ -518,21 +519,52 @@ class CurveAnalyzeTab(
         self._enforce_left_pane_bounds()
 
     # -------------------- Status helpers --------------------
+    @staticmethod
+    def _status_brief(msg: str, fallback: str) -> str:
+        skip_prefixes = (
+            "project:",
+            "run:",
+            "output:",
+            "folder:",
+            "dem:",
+            "dx:",
+            "dy:",
+            "dz:",
+            "mask:",
+        )
+        for raw in str(msg or "").splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            low = line.lower()
+            if low.startswith("[ui3] "):
+                line = line[6:].strip()
+                low = line.lower()
+            if any(low.startswith(prefix) for prefix in skip_prefixes):
+                continue
+            if "\\" in line or "/" in line:
+                if ":" in line:
+                    line = line.split(":", 1)[0].strip()
+                else:
+                    continue
+            return line
+        return fallback
+
     def _append_status(self, text: str) -> None:
         self.status.append(text)
 
     def _ok(self, msg: str) -> None:
-        self._append_status(f"✅ {msg}")
+        self._append_status(f"OK: {self._status_brief(msg, 'Completed.')}")
 
     def _info(self, msg: str) -> None:
-        self._append_status(f"[UI3] INFO: {msg}")
+        return
 
     def _warn(self, msg: str) -> None:
-        self._append_status(f"⚠️ {msg}")
+        self._append_status(f"ERROR: {self._status_brief(msg, 'Action required.')}")
 
     def _err(self, msg: str) -> None:
-        self._append_status(f"❌ {msg}")
+        self._append_status(f"ERROR: {self._status_brief(msg, 'Error.')}")
 
     def _log(self, msg: str) -> None:
-        self._append_status(msg)
+        return
 

@@ -62,10 +62,6 @@ class ZoomableGraphicsView(QGraphicsView):
         self.fitInView(rect, Qt.KeepAspectRatio)
         self._zoom = 0
 
-    def set_100(self):
-        self.resetTransform()
-        self._zoom = 0
-
     def zoom_in(self):
         self.scale(1.25, 1.25)
         self._zoom += 1

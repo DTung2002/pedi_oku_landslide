@@ -12,6 +12,13 @@ from PyQt5.QtGui import QBrush, QPainter, QPixmap
 from PyQt5.QtCore import Qt
 import os
 
+from pedi_oku_landslide.ui.layout_constants import (
+    PREVIEW_FIT_BUTTON_H,
+    PREVIEW_FIT_BUTTON_W,
+    PREVIEW_MIN_H,
+    PREVIEW_VIEWPORT_STYLE,
+)
+
 
 class ZoomableGraphicsView(QGraphicsView):
     def __init__(self, *args, **kwargs):
@@ -29,7 +36,7 @@ class ZoomableGraphicsView(QGraphicsView):
         self.scale(factor, factor)
         self._zoom *= factor
 
-    def set_zoom_100(self):
+    def reset_view_transform(self):
         self.resetTransform()
         self._zoom = 1.0
 
@@ -37,7 +44,7 @@ class ZoomableGraphicsView(QGraphicsView):
         rect = scene_rect or self.scene().itemsBoundingRect()
         if rect.isNull():
             return
-        self.set_zoom_100()
+        self.reset_view_transform()
         self.fitInView(rect, Qt.KeepAspectRatio)
 
 
@@ -52,26 +59,23 @@ class UI1Viewer(QWidget):
         self.caption = QLabel("")
         self.caption.setStyleSheet("font-weight: 600;")
         self.scene.setBackgroundBrush(QBrush(Qt.white))
-        self.view.setStyleSheet("background: #ffffff;")
+        self.view.setStyleSheet(PREVIEW_VIEWPORT_STYLE)
+        self.view.setMinimumHeight(PREVIEW_MIN_H)
         self.caption.setStyleSheet("background: #ffffff;")
+        self.caption.hide()
 
-        tool_row = QHBoxLayout()
         self.btn_zoom_in = QPushButton("Zoom +")
         self.btn_zoom_out = QPushButton("Zoom -")
         self.btn_zoom_fit = QPushButton("Fit")
-        self.btn_zoom_100 = QPushButton("100%")
-        for button in (self.btn_zoom_in, self.btn_zoom_out, self.btn_zoom_fit, self.btn_zoom_100):
-            tool_row.addWidget(button)
-        tool_row.addStretch(1)
+        self.btn_zoom_fit.setFixedSize(PREVIEW_FIT_BUTTON_W, PREVIEW_FIT_BUTTON_H)
 
         self.btn_zoom_in.clicked.connect(lambda: self.view.scale(1.15, 1.15))
         self.btn_zoom_out.clicked.connect(lambda: self.view.scale(1 / 1.15, 1 / 1.15))
         self.btn_zoom_fit.clicked.connect(lambda: self.view.fit_to_scene())
-        self.btn_zoom_100.clicked.connect(self.view.set_zoom_100)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(self.caption)
-        layout.addLayout(tool_row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
         layout.addWidget(self.view, 1)
 
     def show_pair(

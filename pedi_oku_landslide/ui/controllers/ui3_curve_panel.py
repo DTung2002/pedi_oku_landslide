@@ -25,7 +25,7 @@ class UI3CurvePanelMixin:
             return "global_fit_spline"
         if m == "nurbs":
             return "nurbs"
-        return "global_fit_spline"
+        return "nurbs"
 
     @staticmethod
     def _curve_method_from_group_method(group_method: Optional[str]) -> str:
@@ -40,8 +40,8 @@ class UI3CurvePanelMixin:
             "profile_dem_rdp_theta0_only",
             "profile_dem_rdp_span_only",
         ):
-            return "global_fit_spline"
-        return "global_fit_spline"
+            return "nurbs"
+        return "nurbs"
 
     def _set_curve_method_for_line(self, line_id: str, curve_method: Optional[str]) -> str:
         cm = self._normalize_curve_method(curve_method)
@@ -65,7 +65,7 @@ class UI3CurvePanelMixin:
                 return cm
             except Exception:
                 pass
-        return self._set_curve_method_for_line(line_id, "global_fit_spline")
+        return self._set_curve_method_for_line(line_id, "nurbs")
 
     def _update_global_fit_debug_panel(
         self,
@@ -131,9 +131,18 @@ class UI3CurvePanelMixin:
         )
 
     def _nurbs_endpoint_targets(self, prof: dict, groups: Optional[list] = None, line_id: Optional[str] = None):
-        lid = line_id or self._line_id_current()
-        grouped = self._backend.grouped_vector_endpoints(prof, groups or self._active_groups or [])
-        base = grouped if grouped is not None else self._profile_endpoints(prof)
+        _ = line_id
+        base_curve = self._active_base_curve or {}
+        base_chain = np.asarray(base_curve.get("chain", []), dtype=float)
+        base_elev = np.asarray(base_curve.get("elev", []), dtype=float)
+        base_mask = np.isfinite(base_chain) & np.isfinite(base_elev)
+        if int(np.count_nonzero(base_mask)) >= 2:
+            base_chain = base_chain[base_mask]
+            base_elev = base_elev[base_mask]
+            base = (float(base_chain[0]), float(base_elev[0]), float(base_chain[-1]), float(base_elev[-1]))
+        else:
+            grouped = self._backend.grouped_vector_endpoints(prof, groups or self._active_groups or [])
+            base = grouped if grouped is not None else self._profile_endpoints(prof)
         if base is None:
             return None
         points = self._active_curve_constraints(log_skips=False)
@@ -235,13 +244,13 @@ class UI3CurvePanelMixin:
                 js = json.load(f) or {}
             self._set_nurbs_seed_method_for_line(line_id, js.get("nurbs_seed_method"), sync_ui=False)
             params = {
-                "degree": int(js.get("degree", 3)),
+                "degree": 3,
                 "control_points": js.get("control_points", []),
                 "weights": js.get("weights", []),
             }
             cps = np.asarray(params.get("control_points", []), dtype=float)
             ws = np.asarray(params.get("weights", []), dtype=float)
-            if cps.ndim != 2 or cps.shape[0] < 2:
+            if cps.ndim != 2 or cps.shape[0] < 4:
                 return None
             if ws.ndim != 1 or ws.size != cps.shape[0]:
                 params["weights"] = np.ones(cps.shape[0], dtype=float).tolist()
@@ -270,9 +279,13 @@ class UI3CurvePanelMixin:
         seed_method = self._get_nurbs_seed_method_for_line(line_id)
         cps = params.get("control_points", []) or []
         ww = params.get("weights", []) or []
-        deg = int(params.get("degree", 3))
+        deg = 3
         n_ctrl = max(2, len(cps))
-        deg = max(1, min(deg, n_ctrl - 1))
+        if n_ctrl < 4:
+            params = self._build_default_nurbs_params(line_id, prof, groups, base)
+            cps = params.get("control_points", []) or []
+            ww = params.get("weights", []) or []
+            n_ctrl = max(4, len(cps))
         params["degree"] = deg
         if len(ww) != n_ctrl:
             ww = [1.0] * n_ctrl
@@ -282,7 +295,7 @@ class UI3CurvePanelMixin:
         self._nurbs_updating_ui = True
         try:
             self.nurbs_cp_spin.setValue(n_ctrl)
-            self.nurbs_deg_spin.setMaximum(max(1, n_ctrl - 1))
+            self.nurbs_deg_spin.setRange(3, 3)
             self.nurbs_deg_spin.setValue(deg)
             idx = self.nurbs_seed_method_combo.findData(seed_method)
             self.nurbs_seed_method_combo.setCurrentIndex(idx if idx >= 0 else 0)
@@ -348,10 +361,8 @@ class UI3CurvePanelMixin:
         order = np.argsort(cps_arr[:, 0])
         cps_arr = cps_arr[order]
         ws_arr = np.asarray(ws, dtype=float)[order]
-        deg = int(self.nurbs_deg_spin.value())
-        deg = max(1, min(deg, len(cps) - 1))
         return {
-            "degree": deg,
+            "degree": 3,
             "control_points": cps_arr.tolist(),
             "weights": ws_arr.tolist(),
         }
@@ -464,7 +475,9 @@ class UI3CurvePanelMixin:
         cps[0, 0], cps[0, 1] = s0, z0
         cps[-1, 0], cps[-1, 1] = s1, z1
 
-        deg = int(max(1, min(int(p.get("degree", 3)), cps.shape[0] - 1)))
+        deg = 3
+        if cps.shape[0] < 4:
+            return None
         ch = np.asarray(prof.get("chain", []), dtype=float)
         n_samples = int(max(120, np.count_nonzero(np.isfinite(ch)) * 2))
         out = self._backend.evaluate_nurbs(
@@ -499,11 +512,10 @@ class UI3CurvePanelMixin:
     def _on_nurbs_deg_spin_changed(self, val: int) -> None:
         if self._nurbs_updating_ui:
             return
-        max_deg = max(1, self.nurbs_cp_spin.value() - 1)
-        if val > max_deg:
+        if int(val) != 3:
             self._nurbs_updating_ui = True
             try:
-                self.nurbs_deg_spin.setValue(max_deg)
+                self.nurbs_deg_spin.setValue(3)
             finally:
                 self._nurbs_updating_ui = False
         self._schedule_nurbs_live_update()
@@ -534,10 +546,23 @@ class UI3CurvePanelMixin:
         self._schedule_nurbs_live_update()
 
     def _on_nurbs_save(self) -> None:
-        if not self._active_prof or not self._active_global_fit_result or not self._active_curve:
-            self._warn("[UI3] Draw Curve first to generate a global fit spline preview.")
+        if not self._active_prof or not self._active_curve:
+            self._warn("[UI3] Draw Curve first to generate a NURBS preview.")
             return
         line_id = self._line_id_current()
+        params = self._collect_nurbs_params_from_ui() or self._get_nurbs_params_for_line(line_id)
+        if not params:
+            self._warn("[UI3] Draw Curve first to generate NURBS control points.")
+            return
+        params["degree"] = 3
+        cps = np.asarray(params.get("control_points", []), dtype=float)
+        weights = np.asarray(params.get("weights", []), dtype=float)
+        if cps.ndim != 2 or cps.shape[0] < 4:
+            self._warn("[UI3] NURBS degree 3 requires at least 4 control points.")
+            return
+        if weights.ndim != 1 or weights.size != cps.shape[0]:
+            weights = np.ones(cps.shape[0], dtype=float)
+            params["weights"] = weights.tolist()
         curve = {
             "chain": np.asarray((self._active_curve or {}).get("chain", []), dtype=float),
             "elev": np.asarray((self._active_curve or {}).get("elev", []), dtype=float),
@@ -546,7 +571,7 @@ class UI3CurvePanelMixin:
         curve["chain"] = curve["chain"][m_curve]
         curve["elev"] = curve["elev"][m_curve]
         if curve["chain"].size < 2:
-            self._warn("[UI3] Global fit spline preview has too few valid points.")
+            self._warn("[UI3] NURBS preview has too few valid points.")
             return
         boring_result = self._project_boring_holes_for_current_line(use_unsaved_table=True, log_skips=True)
         boring_snapshot = {
@@ -614,7 +639,7 @@ class UI3CurvePanelMixin:
             groups=self._read_groups_from_table(),
             prof=self._active_prof,
             chainage_origin=self._ui3_chainage_origin(),
-            curve_method="global_fit_spline",
+            curve_method="nurbs",
             nurbs_seed_method=self._get_nurbs_seed_method_for_line(line_id),
             profile_dem_source=self._current_profile_source_key(),
             profile_dem_path=str(getattr(self, "dem_path", "") or ""),
@@ -627,24 +652,30 @@ class UI3CurvePanelMixin:
             "chain": curve_chain.astype(float).tolist(),
             "elev": curve_elev.astype(float).tolist(),
         }
+        cp_rows = []
+        for i, cp in enumerate(cps):
+            cp_rows.append({
+                "cp_index": int(i),
+                "chainage_m": float(cp[0]),
+                "elev_m": float(cp[1]),
+                "weight": float(weights[i]) if i < weights.size and np.isfinite(weights[i]) else 1.0,
+            })
 
-        saved = self._backend.save_global_fit_spline_outputs(
+        saved = self._backend.save_nurbs_outputs(
             {
                 "preview_params": {
                     "path": self._nurbs_json_path_for(line_id),
                     "payload": {
                         "line_id": line_id,
-                        "curve_method": "global_fit_spline",
-                        "mode": "global_forward_fit_spline",
-                        "short_length_m": float(result.get("short_length_m", 0.1)),
-                        "fit_parameterization": str(result.get("fit_parameterization", "chord_length")),
+                        "curve_method": "nurbs",
+                        "mode": "cubic_nurbs",
+                        "degree": 3,
+                        "control_points": cps.astype(float).tolist(),
+                        "weights": weights.astype(float).tolist(),
                         "theta_csv_path": theta_csv_path,
                         "theta_rows": list(result.get("theta_rows", []) or []),
                         "fit_points": list(result.get("fit_points", []) or []),
                         "global_fit_points": list(result.get("global_fit_points", result.get("fit_points", [])) or []),
-                        "steps": list(result.get("steps", []) or []),
-                        "short_lines": list(result.get("short_lines", []) or []),
-                        "markers": list(result.get("markers", []) or []),
                         "boundary_intersections": list(result.get("boundary_intersections", []) or []),
                         "applied_boring_holes": boring_snapshot,
                         "curve": preview_curve,
@@ -654,9 +685,10 @@ class UI3CurvePanelMixin:
                     "path": os.path.join(self._curve_dir(), f"nurbs_{line_id}.json"),
                     "payload": {
                         "line_id": line_id,
-                        "curve_method": "global_fit_spline",
-                        "mode": "global_forward_fit_spline",
-                        "fit_parameterization": str(result.get("fit_parameterization", "chord_length")),
+                        "curve_method": "nurbs",
+                        "mode": "cubic_nurbs",
+                        "degree": 3,
+                        "control_points": cp_rows,
                         "chainage_origin": self._ui3_chainage_origin(),
                         "applied_boring_holes": boring_snapshot,
                         "count": int(len(curve_rows)),
@@ -668,18 +700,15 @@ class UI3CurvePanelMixin:
                     "path": os.path.join(self._curve_dir(), f"nurbs_info_{line_id}.json"),
                     "payload": {
                         "line_id": line_id,
-                        "curve_method": "global_fit_spline",
-                        "mode": "global_forward_fit_spline",
+                        "curve_method": "nurbs",
+                        "mode": "cubic_nurbs",
                         "chainage_origin": self._ui3_chainage_origin(),
-                        "short_length_m": float(result.get("short_length_m", 0.1)),
-                        "fit_parameterization": str(result.get("fit_parameterization", "chord_length")),
+                        "degree": 3,
+                        "control_points": cp_rows,
                         "theta_csv_path": theta_csv_path,
                         "theta_rows": list(result.get("theta_rows", []) or []),
                         "fit_points": list(result.get("fit_points", []) or []),
                         "global_fit_points": list(result.get("global_fit_points", result.get("fit_points", [])) or []),
-                        "steps": list(result.get("steps", []) or []),
-                        "short_lines": list(result.get("short_lines", []) or []),
-                        "markers": list(result.get("markers", []) or []),
                         "boundary_intersections": list(result.get("boundary_intersections", []) or []),
                         "fit_point_count": int(len(result.get("fit_points", []) or [])),
                         "curve": preview_curve,
@@ -687,7 +716,7 @@ class UI3CurvePanelMixin:
                 },
             }
         )
-        self._ok(f"[UI3] Saved global fit spline: {path}")
+        self._ok(f"[UI3] Saved NURBS curve: {path}")
         self._log(f"[UI3] Saved preview metadata: {saved.get('preview_params', self._nurbs_json_path_for(line_id))}")
         self._log(f"[UI3] Saved curve JSON: {saved.get('curve_json', '')}")
         self._log(f"[UI3] Saved groups JSON: {saved.get('group_json', groups_ui3_json)}")
@@ -781,16 +810,29 @@ class UI3CurvePanelMixin:
                 groups=groups,
                 theta_rows=theta_rows,
             )
-            curve = {
+            reference_curve = {
                 "chain": np.asarray((result.get("curve", {}) or {}).get("chain", []), dtype=float),
                 "elev": np.asarray((result.get("curve", {}) or {}).get("elev", []), dtype=float),
             }
-            mask = np.isfinite(curve["chain"]) & np.isfinite(curve["elev"])
-            curve["chain"] = curve["chain"][mask]
-            curve["elev"] = curve["elev"][mask]
-            if curve["chain"].size < 2:
-                self._warn("[UI3] Global fit spline has too few valid points.")
+            mask = np.isfinite(reference_curve["chain"]) & np.isfinite(reference_curve["elev"])
+            reference_curve["chain"] = reference_curve["chain"][mask]
+            reference_curve["elev"] = reference_curve["elev"][mask]
+            if reference_curve["chain"].size < 2:
+                self._warn("[UI3] Reference spline has too few valid points.")
                 return
+
+            self._active_prof = prof
+            self._active_groups = groups
+            self._active_base_curve = {"chain": reference_curve["chain"], "elev": reference_curve["elev"]}
+            self._nurbs_params_by_line.pop(line_id, None)
+            self._nurbs_updating_ui = True
+            try:
+                self.nurbs_deg_spin.setRange(3, 3)
+                self.nurbs_deg_spin.setValue(3)
+                self.nurbs_cp_spin.setValue(4)
+                self.nurbs_table.setRowCount(0)
+            finally:
+                self._nurbs_updating_ui = False
 
             out_png = self._profile_png_path_for(line_id)
             path = self._render_profile_png_current_settings(prof, out_png, groups=groups)
@@ -800,18 +842,80 @@ class UI3CurvePanelMixin:
                 self._err("[UI3] Cannot load PNG with curve overlay.")
                 return
 
-            result["curve"] = {"chain": curve["chain"], "elev": curve["elev"]}
+            result["curve"] = {"chain": reference_curve["chain"], "elev": reference_curve["elev"]}
             result["theta_csv_path"] = self._theta_csv_path_for(line_id)
-            self._active_prof = prof
-            self._active_groups = groups
-            self._active_base_curve = None
-            self._active_curve = {"chain": curve["chain"], "elev": curve["elev"]}
+            self._active_curve = {"chain": reference_curve["chain"], "elev": reference_curve["elev"]}
             self._active_global_fit_result = result
-            self._update_global_fit_debug_panel(result, theta_csv_path=self._theta_csv_path_for(line_id))
-            self._draw_global_fit_debug_overlay(result, draw_curve=True)
-            self._ok("[UI3] Global fit spline drawn on current section.")
+            self._draw_curve_overlay(reference_curve["chain"], reference_curve["elev"])
+            self._clear_control_points_overlay()
+            if hasattr(self, "btn_convert_nurbs"):
+                self.btn_convert_nurbs.setEnabled(True)
+            self._ok("[UI3] Global fit spline drawn. Click Convert to NURBS to generate control points.")
         except Exception as e:
             self._err(f"[UI3] Draw Curve error: {e}")
+
+    def _on_convert_to_nurbs(self) -> None:
+        try:
+            if not self._active_prof:
+                self._warn("[UI3] Draw Curve first before converting to NURBS.")
+                return
+            line_id = self._line_id_current()
+            groups = self._active_groups or self._read_groups_from_table() or []
+            reference_curve = self._active_base_curve or (self._active_global_fit_result or {}).get("curve", {})
+            reference_curve = {
+                "chain": np.asarray((reference_curve or {}).get("chain", []), dtype=float),
+                "elev": np.asarray((reference_curve or {}).get("elev", []), dtype=float),
+            }
+            mask = np.isfinite(reference_curve["chain"]) & np.isfinite(reference_curve["elev"])
+            reference_curve["chain"] = reference_curve["chain"][mask]
+            reference_curve["elev"] = reference_curve["elev"][mask]
+            if reference_curve["chain"].size < 2:
+                self._warn("[UI3] Draw Curve first before converting to NURBS.")
+                return
+
+            params = self._backend.fit_nurbs_params_from_curve(
+                reference_curve,
+                groups,
+                degree=3,
+                min_control_points=4,
+            )
+            cps = np.asarray(params.get("control_points", []), dtype=float)
+            if cps.ndim != 2 or cps.shape[0] < 4:
+                self._warn("[UI3] Cannot fit cubic NURBS control points from the current spline.")
+                return
+
+            self._active_groups = groups
+            self._active_base_curve = {"chain": reference_curve["chain"], "elev": reference_curve["elev"]}
+            self._set_curve_method_for_line(line_id, "nurbs")
+            self._set_nurbs_params_for_line(line_id, params)
+            self._nurbs_updating_ui = True
+            try:
+                self.nurbs_cp_spin.setValue(int(cps.shape[0]))
+                self.nurbs_deg_spin.setRange(3, 3)
+                self.nurbs_deg_spin.setValue(3)
+                self._populate_nurbs_table(params)
+            finally:
+                self._nurbs_updating_ui = False
+
+            curve = self._compute_nurbs_curve_from_params(params)
+            if curve is None or np.asarray(curve.get("chain", []), dtype=float).size < 2:
+                self._warn("[UI3] Cubic NURBS has too few valid points.")
+                return
+
+            result = dict(self._active_global_fit_result or {})
+            result["reference_curve"] = {"chain": reference_curve["chain"], "elev": reference_curve["elev"]}
+            result["curve"] = {"chain": curve["chain"], "elev": curve["elev"]}
+            result["theta_csv_path"] = self._theta_csv_path_for(line_id)
+            self._active_curve = {"chain": curve["chain"], "elev": curve["elev"]}
+            self._active_global_fit_result = result
+            self._draw_curve_overlay(np.asarray(curve["chain"], dtype=float), np.asarray(curve["elev"], dtype=float))
+            self._draw_control_points_overlay(params)
+            if hasattr(self, "btn_convert_nurbs"):
+                self.btn_convert_nurbs.setEnabled(True)
+            self._ok("[UI3] Converted spline to cubic NURBS.")
+            self._on_nurbs_save()
+        except Exception as e:
+            self._err(f"[UI3] Convert to NURBS error: {e}")
 
     def _sync_nurbs_defaults_from_group_table(self) -> None:
         if self._group_table_updating:
@@ -826,7 +930,9 @@ class UI3CurvePanelMixin:
             self._active_global_fit_result = None
             self._clear_curve_overlay()
             self._clear_control_points_overlay()
-            theta_path = self._theta_csv_path_for(self._line_id_current())
-            self._update_global_fit_debug_panel(None, theta_csv_path=(theta_path if os.path.exists(theta_path) else None))
+            if hasattr(self, "btn_convert_nurbs"):
+                self.btn_convert_nurbs.setEnabled(False)
+            if hasattr(self, "nurbs_table"):
+                self.nurbs_table.setRowCount(0)
         except Exception as e:
-            self._warn(f"[UI3] Cannot sync global fit spline state from groups: {e}")
+            self._warn(f"[UI3] Cannot sync NURBS state from groups: {e}")

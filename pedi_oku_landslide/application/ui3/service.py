@@ -6,6 +6,7 @@ from shapely.geometry import LineString
 from pedi_oku_landslide.domain.ui3.curve_fit import (
     estimate_slip_curve as _estimate_slip_curve_impl,
     evaluate_nurbs_curve as _evaluate_nurbs_curve_impl,
+    fit_nurbs_params_from_curve as _fit_nurbs_params_from_curve_impl,
     fit_bezier_smooth_curve as _fit_bezier_smooth_curve_impl,
 )
 from pedi_oku_landslide.domain.ui3.grouping import (
@@ -20,7 +21,6 @@ from pedi_oku_landslide.infrastructure.storage.ui3_paths import UI3RunPaths
 from pedi_oku_landslide.infrastructure.storage.ui3_storage import (
     build_gdf_from_sections_csv,
     ensure_sections_csv_current,
-    load_json,
     save_json,
 )
 from pedi_oku_landslide.application.ui3.exports import (
@@ -130,12 +130,6 @@ class UI3BackendService:
             slip_mask_path=slip_mask_path,
         )
 
-    def load_groups(self, path: str) -> Any:
-        return load_json(path, default=None)
-
-    def save_groups(self, path: str, groups: Any) -> str:
-        return save_json(path, groups)
-
     def auto_group(
         self,
         line_id: str,
@@ -181,6 +175,21 @@ class UI3BackendService:
             weights=weights,
             degree=degree,
             n_samples=n_samples,
+        )
+
+    def fit_nurbs_params_from_curve(
+        self,
+        curve: Dict[str, Any],
+        groups: List[dict],
+        *,
+        degree: int = 3,
+        min_control_points: int = 4,
+    ) -> Dict[str, Any]:
+        return _fit_nurbs_params_from_curve_impl(
+            curve,
+            groups,
+            degree=degree,
+            min_control_points=min_control_points,
         )
 
     def render_preview(self, profile: Dict[str, Any], render_settings: Dict[str, Any], groups=None, overlay_curves=None) -> Dict[str, Any]:

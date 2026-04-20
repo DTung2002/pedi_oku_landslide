@@ -93,8 +93,6 @@ def run_smooth(
 
     # ---- smooth
     method_norm = str(method or "Gaussian").strip().lower()
-    if method_norm == "mean":
-        method_norm = "gaussian"
     if method_norm != "gaussian":
         raise ValueError(f"Unsupported smooth method: {method}")
     method_label = "Gaussian"
@@ -153,7 +151,7 @@ def run_smooth(
                 "method_label": method_label,
                 "param_m": float(param_m),
                 "gaussian_sigma_percent": float(gaussian_sigma_percent),
-                "gaussian_kernel_type": "circle" if method_norm == "gaussian" else None,
+                "gaussian_kernel_type": "circle",
                 "before_radius_px_rc": [float(b_radius_px[0]), float(b_radius_px[1])],
                 "after_radius_px_rc": [float(a_radius_px[0]), float(a_radius_px[1])],
                 "after_dem_radius_px_rc": [float(d_radius_px[0]), float(d_radius_px[1])],

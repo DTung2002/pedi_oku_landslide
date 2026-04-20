@@ -90,27 +90,6 @@ def _merge_close_boundaries(cands: List[Dict[str, Any]], tol_m: float = 1e-6) ->
     return out
 
 
-def _mean_filter_profile_by_chain(chain: np.ndarray, elev: np.ndarray, radius_m: float) -> np.ndarray:
-    chain = np.asarray(chain, dtype=float)
-    elev = np.asarray(elev, dtype=float)
-    out = np.full(elev.shape, np.nan, dtype=float)
-    if chain.ndim != 1 or elev.ndim != 1 or chain.size != elev.size:
-        return out
-    finite = np.isfinite(chain) & np.isfinite(elev)
-    if int(np.count_nonzero(finite)) <= 0:
-        return out
-    c = chain[finite]
-    z = elev[finite]
-    radius = max(0.0, float(radius_m))
-    vals = np.full(z.shape, np.nan, dtype=float)
-    for i in range(c.size):
-        mask = np.abs(c - c[i]) <= radius
-        if int(np.count_nonzero(mask)) > 0:
-            vals[i] = float(np.mean(z[mask]))
-    out[finite] = vals
-    return out
-
-
 def _profile_elevation_for_curvature(prof: Dict[str, np.ndarray]) -> np.ndarray:
     chain = np.asarray(prof.get("chain", []), dtype=float)
     elev = np.asarray(prof.get("elev", []), dtype=float)

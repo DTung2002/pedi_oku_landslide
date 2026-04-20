@@ -351,6 +351,16 @@ class UI3LineControllerMixin:
         except Exception:
             pass
         try:
+            if self.nurbs_table is not None:
+                self.nurbs_table.setRowCount(0)
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "btn_convert_nurbs") and self.btn_convert_nurbs is not None:
+                self.btn_convert_nurbs.setEnabled(False)
+        except Exception:
+            pass
+        try:
             if self.boring_table is not None:
                 self.boring_table.setRowCount(0)
         except Exception:
@@ -379,7 +389,6 @@ class UI3LineControllerMixin:
         self._active_base_curve = None
         self._active_curve = None
         self._active_global_fit_result = None
-        self._update_global_fit_debug_panel(None, theta_csv_path=None)
         self._ui2_intersections_cache = None
         self._anchors_xyz_cache = None
         self._boring_holes_data = self._empty_boring_holes_payload()
@@ -885,8 +894,16 @@ class UI3LineControllerMixin:
         self._active_base_curve = None
         self._active_curve = None
         self._active_global_fit_result = None
-        theta_path = self._theta_csv_path_for(self._line_id_current())
-        self._update_global_fit_debug_panel(None, theta_csv_path=(theta_path if os.path.exists(theta_path) else None))
+        try:
+            if hasattr(self, "btn_convert_nurbs") and self.btn_convert_nurbs is not None:
+                self.btn_convert_nurbs.setEnabled(False)
+        except Exception:
+            pass
+        try:
+            if self.nurbs_table is not None:
+                self.nurbs_table.setRowCount(0)
+        except Exception:
+            pass
         self._refresh_group_controls_for_line_role()
         self._load_boring_holes_into_ui()
         try:
@@ -899,42 +916,6 @@ class UI3LineControllerMixin:
 
         self._load_saved_curve_state_for_current_line()
         self._refresh_anchor_overlay()
-
-    def _load_group_table_from_path(self, path: str, line_id: str) -> bool:
-        if not os.path.exists(path):
-            return False
-        loaded = 0
-        self._group_table_updating = True
-        try:
-            _data, groups = self._load_group_json_data(path, line_id=line_id, apply_settings=True)
-            loaded = self._populate_group_table_rows(groups, length_m=self._sec_len_m)
-        except Exception as e:
-            self._log(f"[!] Cannot read curve group file: {e}")
-            return False
-        finally:
-            self._group_table_updating = False
-        if loaded:
-            self._set_curve_method_for_line(line_id, "global_fit_spline")
-            self._log(f"[UI3] Loaded group table from: {path}")
-            return True
-        return False
-
-    def _on_load_group_info(self) -> None:
-        if self.line_combo.count() == 0:
-            self._warn("[UI3] No line selected.")
-            return
-        try:
-            start_dir = self._curve_dir()
-        except Exception:
-            start_dir = self.base_dir
-        path, _ = QFileDialog.getOpenFileName(self, "Load group_info", start_dir, "JSON files (*.json);;All files (*.*)")
-        if not path:
-            return
-        line_id = self._line_id_current()
-        if self._load_group_table_from_path(path, line_id):
-            self._sync_nurbs_defaults_from_group_table()
-        else:
-            self._warn("[UI3] Cannot load group_info file.")
 
     def _load_saved_global_fit_curve(self, line_id: str) -> Optional[Dict[str, np.ndarray]]:
         curve_path = os.path.join(self._curve_dir(), f"nurbs_{line_id}.json")
@@ -993,7 +974,7 @@ class UI3LineControllerMixin:
             "boundary_intersections": list(data.get("boundary_intersections", []) or []),
             "curve": curve,
         }
-        self._set_curve_method_for_line(line_id, "global_fit_spline")
+        self._set_curve_method_for_line(line_id, "nurbs")
         self._active_global_fit_result = result
         self._active_curve = {"chain": curve["chain"], "elev": curve["elev"]}
         self._update_global_fit_debug_panel(result, theta_csv_path=theta_csv_path)
@@ -1007,9 +988,7 @@ class UI3LineControllerMixin:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f) or {}
             if str(data.get("curve_method", "") or "").strip().lower() == "global_fit_spline":
-                if self._apply_loaded_global_fit_state(line_id, data):
-                    self._log(f"[UI3] Loaded global fit spline info: {path}")
-                    return True
+                self._log(f"[UI3] Ignored legacy global fit spline info: {path}")
                 return False
             self._set_nurbs_seed_method_for_line(line_id, data.get("nurbs_seed_method"), sync_ui=False)
             cp_items = data.get("control_points", []) or []
@@ -1029,9 +1008,9 @@ class UI3LineControllerMixin:
                     continue
                 cps.append([float(s), float(z)])
                 ws.append(float(w) if np.isfinite(w) and w > 0 else 1.0)
-            if len(cps) < 2:
+            if len(cps) < 4:
                 return False
-            params = {"degree": int(data.get("degree", 3)), "control_points": cps, "weights": ws if len(ws) == len(cps) else [1.0] * len(cps)}
+            params = {"degree": 3, "control_points": cps, "weights": ws if len(ws) == len(cps) else [1.0] * len(cps)}
             if not self._active_prof:
                 self._active_prof = self._build_profile_for_current_line()
             groups_now = self._read_groups_from_table() or []
@@ -1045,11 +1024,11 @@ class UI3LineControllerMixin:
                 params = self._reconcile_nurbs_params_with_groups(line_id, self._active_prof, self._active_groups, self._active_base_curve or {}, params)
             self._set_nurbs_params_for_line(line_id, params)
             n_ctrl = len(params.get("control_points", []) or [])
-            deg = max(1, min(int(params.get("degree", 3)), n_ctrl - 1))
+            deg = 3
             self._nurbs_updating_ui = True
             try:
                 self.nurbs_cp_spin.setValue(n_ctrl)
-                self.nurbs_deg_spin.setMaximum(max(1, n_ctrl - 1))
+                self.nurbs_deg_spin.setRange(3, 3)
                 self.nurbs_deg_spin.setValue(deg)
                 method_idx = self.nurbs_seed_method_combo.findData(self._get_nurbs_seed_method_for_line(line_id))
                 self.nurbs_seed_method_combo.setCurrentIndex(method_idx if method_idx >= 0 else 0)
@@ -1114,7 +1093,7 @@ class UI3LineControllerMixin:
     def _load_saved_curve_state_for_current_line(self) -> None:
         line_id = self._line_id_current()
         self._populate_group_table_for_current_line()
-        self._set_curve_method_for_line(line_id, "global_fit_spline")
+        self._set_curve_method_for_line(line_id, "nurbs")
         prof = self._build_profile_for_current_line()
         if prof is not None:
             self._active_prof = prof
@@ -1217,7 +1196,6 @@ class UI3LineControllerMixin:
                         self._populate_group_table_rows(groups, length_m=self._sec_len_m)
                     finally:
                         self._group_table_updating = False
-                    self._update_global_fit_debug_panel(None, theta_csv_path=theta_csv)
         except Exception as e:
             self._warn(f"[UI3] Cannot save theta CSV: {e}")
 
@@ -1226,7 +1204,7 @@ class UI3LineControllerMixin:
             self._render_current()
         except Exception:
             msg = "[UI3] Render Section failed. See log for details."
-            self._append_status(msg)
+            self._err(msg)
             log_path = ""
             try:
                 run_dir = (self._ctx.get("run_dir") or "").strip()

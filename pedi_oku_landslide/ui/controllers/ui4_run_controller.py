@@ -97,6 +97,7 @@ class UI4RunControllerMixin:
                     self._append(f"[UI4] {key} contours error: {it.get('error')}")
             if res.get("summary_json"):
                 self._append(f"[UI4] Contour summary: {res.get('summary_json')}")
+            self._append("[UI4] Contour previews generated.")
             self._refresh_preview_pngs(prefer_surface=True)
         except Exception as e:
             self._append(f"[UI4] Contours exception: {e}")
@@ -127,6 +128,7 @@ class UI4RunControllerMixin:
                 self._append(f"[UI4] Summary: {outputs.get('summary_json')}")
             self._load_ui4_summary_for_current_run()
             self.refresh_from_context()
+            self._append("[UI4] Kriging completed.")
             self._refresh_preview_pngs()
         except Exception as e:
             self._append(f"[UI4] Kriging exception: {e}")

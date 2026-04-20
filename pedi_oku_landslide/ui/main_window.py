@@ -35,7 +35,7 @@ class CustomTitleBar(QWidget):
         self.setWindowIcon(get_app_icon(base_dir))
         self.parent = parent
         self.base_dir = base_dir
-        self.setFixedHeight(60)
+        self.setFixedHeight(58)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(8, 0, 8, 0)
@@ -198,35 +198,32 @@ class MainWindow(QMainWindow):
         central = QWidget()
         root_layout = QVBoxLayout(central)
         root_layout.setContentsMargins(0, 0, 0, 0)
-        root_layout.setSpacing(0)
+        root_layout.setSpacing(10)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowSystemMenuHint)
         self.setAttribute(Qt.WA_TranslucentBackground, False)  # vẫn giữ nền trắng
         self.setCentralWidget(central)
         titlebar = CustomTitleBar(self, base_dir=self.internal_root)
         root_layout.addWidget(titlebar)
 
-        #Header (white)
-        header = QWidget(objectName="headerBar")
-        h = QHBoxLayout(header)
-        h.setContentsMargins(8, 8, 8, 8)
-        h.addStretch(1)
+        # Bọc mỗi tab bằng QScrollArea
+        self.tabs = QTabWidget()
+        tab_actions = QWidget()
+        tab_actions_lay = QHBoxLayout(tab_actions)
+        tab_actions_lay.setContentsMargins(0, 0, 8, 0)
+        tab_actions_lay.setSpacing(6)
 
         # Nút New Session
         self.btn_new_session = QPushButton("New Session")
         self.btn_new_session.setFixedHeight(28)
         self.btn_new_session.clicked.connect(self._on_new_session_clicked)
-        h.addWidget(self.btn_new_session)
+        tab_actions_lay.addWidget(self.btn_new_session)
 
         # Nút Settings
         self.btn_settings = QPushButton("Settings")
         self.btn_settings.setFixedHeight(28)
         self.btn_settings.clicked.connect(self._on_open_settings_dialog)
-        h.addWidget(self.btn_settings)
-
-        root_layout.addWidget(header)
-
-        # Bọc mỗi tab bằng QScrollArea
-        self.tabs = QTabWidget()
+        tab_actions_lay.addWidget(self.btn_settings)
+        self.tabs.setCornerWidget(tab_actions, Qt.TopRightCorner)
 
         # Analyze tab
         self.analyze_tab = AnalyzeTab(self.app_root)
@@ -295,7 +292,6 @@ class MainWindow(QMainWindow):
             return
         # Scale
         self.apply_scale(dlg.selected_scale())
-
 
     def _reset_session(self) -> None:
         self.workflow.reset_session()

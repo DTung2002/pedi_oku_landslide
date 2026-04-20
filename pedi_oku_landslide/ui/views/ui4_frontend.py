@@ -13,6 +13,7 @@ from PyQt5.QtWidgets import (
     QGroupBox,
     QSplitter,
     QComboBox,
+    QLineEdit,
     QGraphicsView,
     QGraphicsScene,
     QGraphicsPixmapItem,
@@ -30,6 +31,26 @@ from pedi_oku_landslide.pipeline.runners.ui4_backend import (
     run_ui4_kriging_for_run,
     summary_range_for_kind,
 )
+from pedi_oku_landslide.ui.layout_constants import (
+    LEFT_DEFAULT_W,
+    LEFT_MARGINS,
+    LEFT_MIN_W,
+    PANEL_SPACING,
+    PREVIEW_FIT_BUTTON_H,
+    PREVIEW_FIT_BUTTON_W,
+    PREVIEW_MIN_H,
+    PREVIEW_VIEWPORT_STYLE,
+    STATUS_PANEL_H,
+    CONTROL_HEIGHT,
+    PROJECT_H_SPACING,
+    PROJECT_LABEL_W,
+    PROJECT_MARGINS,
+    PROJECT_V_SPACING,
+    RIGHT_MARGINS,
+    RIGHT_MIN_W,
+    ROOT_MARGINS,
+    ROOT_SPACING,
+)
 from pedi_oku_landslide.ui.controllers.ui4_preview_controller import UI4PreviewControllerMixin
 from pedi_oku_landslide.ui.controllers.ui4_run_controller import UI4RunControllerMixin
 
@@ -46,8 +67,8 @@ class ZoomableImageView(QGraphicsView):
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.AnchorViewCenter)
         self.setBackgroundBrush(Qt.white)
-        self.setStyleSheet("QGraphicsView { border: 1px solid #dddddd; border-radius: 8px; }")
-        self.setMinimumHeight(420)
+        self.setStyleSheet(PREVIEW_VIEWPORT_STYLE)
+        self.setMinimumHeight(PREVIEW_MIN_H)
 
     def clear_image(self) -> None:
         self._scene.clear()
@@ -115,8 +136,8 @@ class UI4FrontendTab(UI4PreviewControllerMixin, UI4RunControllerMixin, QWidget):
         self._preview_png_paths = []
         self._last_ui4_summary: Dict = {}
         self._splitter: Optional[QSplitter] = None
-        self._left_min_w = 380
-        self._left_default_w = 490
+        self._left_min_w = LEFT_MIN_W
+        self._left_default_w = LEFT_DEFAULT_W
         self._pending_init_splitter = True
         self._ui_shown_once = False
         self._backend_collect_ui4_run_inputs = collect_ui4_run_inputs
@@ -126,8 +147,14 @@ class UI4FrontendTab(UI4PreviewControllerMixin, UI4RunControllerMixin, QWidget):
         self._backend_render_ui4_contours_for_run = render_ui4_contours_for_run
         self._backend_run_ui4_kriging_for_run = run_ui4_kriging_for_run
 
-        self.lbl_project_value = QLabel("-")
-        self.lbl_run_label_value = QLabel("-")
+        self.lbl_project_value = QLineEdit()
+        self.lbl_project_value.setPlaceholderText("—")
+        self.lbl_project_value.setReadOnly(True)
+        self.lbl_project_value.setFixedHeight(CONTROL_HEIGHT)
+        self.lbl_run_label_value = QLineEdit()
+        self.lbl_run_label_value.setPlaceholderText("—")
+        self.lbl_run_label_value.setReadOnly(True)
+        self.lbl_run_label_value.setFixedHeight(CONTROL_HEIGHT)
         self.lbl_input_status_value = QLabel("Not Ready")
         self.lbl_preview_status = QLabel("Preview: -")
         self.lbl_preview_status.hide()
@@ -136,7 +163,7 @@ class UI4FrontendTab(UI4PreviewControllerMixin, UI4RunControllerMixin, QWidget):
         self.preview_view = ZoomableImageView()
         self.status_box = QTextEdit()
         self.status_box.setReadOnly(True)
-        self.status_box.setMaximumHeight(140)
+        self.status_box.setFixedHeight(STATUS_PANEL_H)
         self.btn_refresh = QPushButton("Reload Inputs")
         self.btn_refresh.clicked.connect(self.refresh_from_context)
         self.btn_run_ui4 = QPushButton("Calculate Slip Surface")
@@ -144,6 +171,7 @@ class UI4FrontendTab(UI4PreviewControllerMixin, UI4RunControllerMixin, QWidget):
         self.btn_make_contours = QPushButton("Preview")
         self.btn_make_contours.clicked.connect(self._on_generate_contours)
         self.btn_preview_fit = QPushButton("Fit")
+        self.btn_preview_fit.setFixedSize(PREVIEW_FIT_BUTTON_W, PREVIEW_FIT_BUTTON_H)
         self.btn_preview_fit.clicked.connect(self.preview_view.fit_to_image)
         self.btn_preview_zoom_in = QPushButton("Zoom +")
         self.btn_preview_zoom_in.clicked.connect(self.preview_view.zoom_in)
@@ -182,7 +210,6 @@ class UI4FrontendTab(UI4PreviewControllerMixin, UI4RunControllerMixin, QWidget):
             self.btn_make_contours,
             self.btn_preview_zoom_out,
             self.btn_preview_zoom_in,
-            self.btn_preview_fit,
         ):
             w.setMinimumHeight(ctrl_h)
         self.surface_auto_range.setMinimumHeight(ctrl_h)
@@ -196,6 +223,8 @@ class UI4FrontendTab(UI4PreviewControllerMixin, UI4RunControllerMixin, QWidget):
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
+        root.setContentsMargins(*ROOT_MARGINS)
+        root.setSpacing(ROOT_SPACING)
         splitter = QSplitter(Qt.Horizontal)
         splitter.setChildrenCollapsible(False)
         self._splitter = splitter
@@ -204,22 +233,25 @@ class UI4FrontendTab(UI4PreviewControllerMixin, UI4RunControllerMixin, QWidget):
         # Left pane (controls / status / info) ~30%
         left_host = QWidget()
         left_lay = QVBoxLayout(left_host)
-        left_lay.setContentsMargins(6, 6, 6, 6)
-        left_lay.setSpacing(8)
+        left_lay.setContentsMargins(*LEFT_MARGINS)
+        left_lay.setSpacing(PANEL_SPACING)
 
         box_info = QGroupBox("Project")
         info_lay = QGridLayout(box_info)
-        info_lay.setContentsMargins(12, 14, 12, 12)
-        info_lay.setHorizontalSpacing(12)
-        info_lay.setVerticalSpacing(10)
-        info_lay.addWidget(QLabel("Project"), 0, 0)
-        info_lay.addWidget(self.lbl_project_value, 0, 1)
-        info_lay.addWidget(QLabel("Run label"), 1, 0)
-        info_lay.addWidget(self.lbl_run_label_value, 1, 1)
-        info_lay.addWidget(QLabel("Input Status"), 2, 0)
-        info_lay.addWidget(self.lbl_input_status_value, 2, 1)
+        info_lay.setContentsMargins(*PROJECT_MARGINS)
+        info_lay.setHorizontalSpacing(PROJECT_H_SPACING)
+        info_lay.setVerticalSpacing(PROJECT_V_SPACING)
         info_lay.setColumnStretch(1, 1)
-        for r in range(3):
+        lbl_project = QLabel("Name:")
+        lbl_run = QLabel("Run label:")
+        lbl_project.setFixedWidth(PROJECT_LABEL_W)
+        lbl_run.setFixedWidth(PROJECT_LABEL_W)
+        info_lay.setColumnMinimumWidth(0, PROJECT_LABEL_W)
+        info_lay.addWidget(lbl_project, 0, 0)
+        info_lay.addWidget(self.lbl_project_value, 0, 1)
+        info_lay.addWidget(lbl_run, 1, 0)
+        info_lay.addWidget(self.lbl_run_label_value, 1, 1)
+        for r in range(2):
             info_lay.setRowMinimumHeight(r, 30)
         left_lay.addWidget(box_info)
 
@@ -273,17 +305,16 @@ class UI4FrontendTab(UI4PreviewControllerMixin, UI4RunControllerMixin, QWidget):
         # Right pane (image only) ~70%
         right_host = QWidget()
         right_lay = QVBoxLayout(right_host)
-        right_lay.setContentsMargins(6, 6, 6, 6)
-        right_lay.setSpacing(8)
-        zoom_row = QHBoxLayout()
-        zoom_row.setSpacing(10)
-        zoom_row.addWidget(self.btn_preview_zoom_out)
-        zoom_row.addWidget(self.btn_preview_zoom_in)
-        zoom_row.addWidget(self.btn_preview_fit)
-        zoom_row.addStretch(1)
-        right_lay.addLayout(zoom_row)
-        box_image = QGroupBox("Contour Lines Preview Image")
+        right_lay.setContentsMargins(*RIGHT_MARGINS)
+        right_lay.setSpacing(PANEL_SPACING)
+        fit_row = QHBoxLayout()
+        fit_row.setContentsMargins(0, 0, 0, 0)
+        fit_row.addStretch(1)
+        fit_row.addWidget(self.btn_preview_fit)
+        right_lay.addLayout(fit_row)
+        box_image = QWidget()
         box_image_lay = QVBoxLayout(box_image)
+        box_image_lay.setContentsMargins(0, 0, 0, 0)
         box_image_lay.addWidget(self.preview_view, 1)
         right_lay.addWidget(box_image, 1)
 
@@ -294,12 +325,56 @@ class UI4FrontendTab(UI4PreviewControllerMixin, UI4RunControllerMixin, QWidget):
         # Match UI3 left pane default width (_left_default_w ~= 490 px).
         splitter.setSizes([self._left_default_w, 900])
         left_host.setMinimumWidth(self._left_min_w)
-        right_host.setMinimumWidth(500)
+        right_host.setMinimumWidth(RIGHT_MIN_W)
 
         root.addWidget(splitter, 1)
 
+    @staticmethod
+    def _status_brief(msg: str, fallback: str) -> str:
+        skip_prefixes = (
+            "project:",
+            "run:",
+            "run dir:",
+            "input dir:",
+            "dem:",
+            "ui3 curve dir:",
+            "ui3 groups dir:",
+            "surface raster:",
+            "depth raster:",
+            "variance raster:",
+            "summary:",
+            "contour summary:",
+        )
+        for raw in str(msg or "").splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            low = line.lower()
+            if low.startswith("[ui4] "):
+                line = line[6:].strip()
+                low = line.lower()
+            if any(low.startswith(prefix) for prefix in skip_prefixes):
+                continue
+            if "\\" in line or "/" in line:
+                if ":" in line:
+                    line = line.split(":", 1)[0].strip()
+                else:
+                    continue
+            return line
+        return fallback
+
     def _append(self, msg: str) -> None:
-        self.status_box.append(msg)
+        text = str(msg or "")
+        low = text.lower()
+        is_error = any(token in low for token in ("error", "failed", "exception", "missing", "cannot", "not ready"))
+        is_success = any(token in low for token in ("ready", "completed", "generated", "saved", "look ready", "raster:", "png:", "summary:"))
+        if is_error:
+            self.status_box.append(f"ERROR: {self._status_brief(text, 'Error.')}")
+        elif is_success:
+            brief = self._status_brief(text, 'Completed.')
+            if brief == "Completed." and any(token in low for token in ("raster:", "png:", "summary:")):
+                return
+            self.status_box.append(f"OK: {brief}")
 
     def _left_max_w(self) -> int:
         # Left pane can occupy at most 50% of current splitter/window width.

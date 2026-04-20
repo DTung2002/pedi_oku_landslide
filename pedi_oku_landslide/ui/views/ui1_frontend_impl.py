@@ -12,6 +12,22 @@ from ..widgets.file_picker import FilePicker
 from .ui1_viewer import UI1Viewer
 from .ui1_workers import UI1SadWorker
 from pedi_oku_landslide.pipeline.runners.ui1_backend import AnalysisContext, UI1BackendService
+from pedi_oku_landslide.ui.layout_constants import (
+    LEFT_DEFAULT_W,
+    LEFT_MARGINS,
+    LEFT_MIN_W,
+    PANEL_SPACING,
+    RIGHT_MARGINS,
+    RIGHT_MIN_W,
+    STATUS_PANEL_H,
+    CONTROL_HEIGHT,
+    PROJECT_H_SPACING,
+    PROJECT_LABEL_W,
+    PROJECT_MARGINS,
+    PROJECT_V_SPACING,
+    ROOT_MARGINS,
+    ROOT_SPACING,
+)
 
 
 class AnalyzeTab(QWidget):
@@ -29,8 +45,8 @@ class AnalyzeTab(QWidget):
         self._backend = UI1BackendService(base_dir)
         self._last_run_dir: Optional[str] = None
         self._splitter: Optional[QSplitter] = None
-        self._left_min_w = 380
-        self._left_default_w = 490
+        self._left_min_w = LEFT_MIN_W
+        self._left_default_w = LEFT_DEFAULT_W
         self._pending_init_splitter = True
         self._vec_live_timer = QTimer(self)
         self._vec_live_timer.setSingleShot(True)
@@ -41,6 +57,8 @@ class AnalyzeTab(QWidget):
     # ---------- UI ----------
     def _build_ui(self) -> None:
         root = QHBoxLayout(self)
+        root.setContentsMargins(*ROOT_MARGINS)
+        root.setSpacing(ROOT_SPACING)
 
         splitter = QSplitter(Qt.Horizontal, self)
         splitter.setChildrenCollapsible(False)
@@ -52,31 +70,35 @@ class AnalyzeTab(QWidget):
         left_container = QWidget()
         left_container.setMinimumWidth(self._left_min_w)
         left_layout = QVBoxLayout(left_container)
+        left_layout.setContentsMargins(*LEFT_MARGINS)
+        left_layout.setSpacing(PANEL_SPACING)
 
         # Project group
         grp_proj = QGroupBox("Project")
         proj_layout = QGridLayout(grp_proj)
-        proj_layout.setHorizontalSpacing(8)
-        proj_layout.setVerticalSpacing(6)
+        proj_layout.setContentsMargins(*PROJECT_MARGINS)
+        proj_layout.setHorizontalSpacing(PROJECT_H_SPACING)
+        proj_layout.setVerticalSpacing(PROJECT_V_SPACING)
         proj_layout.setColumnStretch(1, 1)
 
         lbl_name = QLabel("Name:")
         lbl_run = QLabel("Run label:")
-        label_col_w = max(lbl_name.sizeHint().width(), lbl_run.sizeHint().width())
-        proj_layout.setColumnMinimumWidth(0, label_col_w)
+        lbl_name.setFixedWidth(PROJECT_LABEL_W)
+        lbl_run.setFixedWidth(PROJECT_LABEL_W)
+        proj_layout.setColumnMinimumWidth(0, PROJECT_LABEL_W)
 
-        proj_input_h = 30
         self.edit_project = QLineEdit()
         self.edit_project.setPlaceholderText("e.g. Jimba_01")
-        self.edit_project.setFixedHeight(proj_input_h)
+        self.edit_project.setFixedHeight(CONTROL_HEIGHT)
         self.edit_project.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         self.btn_load_run = QPushButton("Load Run")
+        self.btn_load_run.setFixedHeight(CONTROL_HEIGHT)
         self.btn_load_run.setToolTip("Open an existing run folder under output/<Project>/<RunID>")
         self.btn_load_run.clicked.connect(self._on_open_existing_run)
         self.edit_runlabel = QLineEdit()
         self.edit_runlabel.setPlaceholderText("e.g. baseline")
-        self.edit_runlabel.setFixedHeight(proj_input_h)
+        self.edit_runlabel.setFixedHeight(CONTROL_HEIGHT)
         self.edit_runlabel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         # Reserve the same right column width on both rows so inputs end next to Load Run.
@@ -100,9 +122,16 @@ class AnalyzeTab(QWidget):
         self.fp_aasc = FilePicker("AFTER.asc", "ASC (*.asc)")
         self.fp_bpz  = FilePicker("BEFORE_PZ.asc", "ASC (*.asc)")
         self.fp_apz  = FilePicker("AFTER_PZ.asc", "ASC (*.asc)")
+        self.fp_mask_dxf = FilePicker("Boundary.dxf", "DXF (*.dxf)")
         
         for w in (self.fp_adem, self.fp_basc, self.fp_aasc, self.fp_bpz, self.fp_apz):
             inputs_layout.addWidget(w)
+
+        row_mask = QHBoxLayout()
+        row_mask.setContentsMargins(0, 0, 0, 0)
+        row_mask.setSpacing(6)
+        row_mask.addWidget(self.fp_mask_dxf, 1)
+        inputs_layout.addLayout(row_mask)
             
         # Actions row (inside Inputs panel)
         actions = QHBoxLayout()
@@ -120,7 +149,7 @@ class AnalyzeTab(QWidget):
         inputs_layout.addLayout(actions)
 
         # Keep action buttons at their natural size; only normalize file-picker buttons.
-        file_buttons = [self.fp_adem.btn, self.fp_basc.btn, self.fp_aasc.btn, self.fp_bpz.btn, self.fp_apz.btn]
+        file_buttons = [self.fp_adem.btn, self.fp_basc.btn, self.fp_aasc.btn, self.fp_bpz.btn, self.fp_apz.btn, self.fp_mask_dxf.btn]
         max_w = max(btn.sizeHint().width() for btn in file_buttons) + 36
         max_h = max(btn.sizeHint().height() for btn in file_buttons)
         for btn in file_buttons:
@@ -133,15 +162,7 @@ class AnalyzeTab(QWidget):
         lay_detect = QVBoxLayout(grp_detect)
 
         # ---- Smooth ----
-        self.lab_smooth_method = QLabel("Smooth Filter:")
-        self.cmb_smooth_method = QComboBox()
-        self.cmb_smooth_method.addItem("Gaussian")
-        self.cmb_smooth_method.setCurrentText("Gaussian")
-        self.cmb_smooth_method.setEnabled(False)
-        self.cmb_smooth_method.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.cmb_smooth_method.currentTextChanged.connect(self._on_smooth_method_changed)
-
-        self.lab_smooth_param = QLabel("Gaussian Radius (m):")
+        self.lab_smooth_param = QLabel("Gaussian filter (m):")
         self.spin_smooth_param = QDoubleSpinBox()
         self.spin_smooth_param.setRange(0.0, 50.0)
         self.spin_smooth_param.setSingleStep(0.5)
@@ -153,9 +174,9 @@ class AnalyzeTab(QWidget):
         self.btn_smooth.clicked.connect(self._on_smooth)
 
         # ---- Calculate SAD ----
-        lab_method = QLabel("SAD Method:")
+        lab_method = QLabel("Template Matching:")
         self.cmb_method = QComboBox()
-        self.cmb_method.addItem("Traditional", "traditional")
+        self.cmb_method.addItem("SAD", "traditional")
         self.cmb_method.addItem("SSD (OpenCV)", "ssd_opencv")
         self.cmb_method.setCurrentIndex(0)
         self.cmb_method.setEnabled(False)
@@ -171,44 +192,45 @@ class AnalyzeTab(QWidget):
         self.spin_detect_thr.setRange(0.0, 10.0)
         self.spin_detect_thr.setSingleStep(0.1)
         self.spin_detect_thr.setValue(0.8)
-        self.spin_detect_thr.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.spin_detect_thr.setFixedWidth(90)
+        self.cmb_detect_source = QComboBox()
+        self.cmb_detect_source.addItem("Displacement", "displacement")
+        self.cmb_detect_source.addItem("DXF", "dxf")
+        self.cmb_detect_source.setEnabled(False)
+        self.cmb_detect_source.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         self.btn_detect = QPushButton("Detect")
         self.btn_detect.setEnabled(False)  # bật sau SAD
-        self.btn_detect.clicked.connect(self._on_detect)
+        self.btn_detect.clicked.connect(self._on_detect_requested)
+
+        detect_buttons = (self.btn_smooth, self.btn_calc_sad, self.btn_detect)
+        detect_button_w = max(btn.sizeHint().width() for btn in detect_buttons) + 16
+        for btn in detect_buttons:
+            btn.setFixedSize(detect_button_w, CONTROL_HEIGHT)
+
+        row_detect_inputs = QWidget()
+        row_detect_inputs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        row_detect_inputs_lay = QHBoxLayout(row_detect_inputs)
+        row_detect_inputs_lay.setContentsMargins(0, 0, 0, 0)
+        row_detect_inputs_lay.setSpacing(6)
+        row_detect_inputs_lay.addWidget(self.spin_detect_thr)
+        row_detect_inputs_lay.addWidget(self.cmb_detect_source, 1)
+
         # Aligned rows: label | input | action button.
         grid_detect = QGridLayout()
         grid_detect.setHorizontalSpacing(8)
         grid_detect.setVerticalSpacing(6)
         grid_detect.setColumnStretch(1, 1)
-        grid_detect.addWidget(self.lab_smooth_method, 0, 0)
-        grid_detect.addWidget(self.cmb_smooth_method, 0, 1)
-        grid_detect.addWidget(self.lab_smooth_param, 1, 0)
-        grid_detect.addWidget(self.spin_smooth_param, 1, 1)
-        grid_detect.addWidget(self.btn_smooth, 1, 2)
-        grid_detect.addWidget(lab_method, 2, 0)
-        grid_detect.addWidget(self.cmb_method, 2, 1)
-        grid_detect.addWidget(self.btn_calc_sad, 2, 2)
-        grid_detect.addWidget(lab_detect, 3, 0)
-        grid_detect.addWidget(self.spin_detect_thr, 3, 1)
-        grid_detect.addWidget(self.btn_detect, 3, 2)
+        grid_detect.addWidget(self.lab_smooth_param, 0, 0)
+        grid_detect.addWidget(self.spin_smooth_param, 0, 1)
+        grid_detect.addWidget(self.btn_smooth, 0, 2)
+        grid_detect.addWidget(lab_method, 1, 0)
+        grid_detect.addWidget(self.cmb_method, 1, 1)
+        grid_detect.addWidget(self.btn_calc_sad, 1, 2)
+        grid_detect.addWidget(lab_detect, 2, 0)
+        grid_detect.addWidget(row_detect_inputs, 2, 1)
+        grid_detect.addWidget(self.btn_detect, 2, 2)
         lay_detect.addLayout(grid_detect)
-        self._on_smooth_method_changed(self.cmb_smooth_method.currentText())
-
-        # ---- Manual mask from DXF (optional) ----
-        sep = QFrame()
-        sep.setFrameShape(QFrame.HLine)
-        sep.setFrameShadow(QFrame.Sunken)
-        lay_detect.addWidget(sep)
-
-        self.fp_mask_dxf = FilePicker("Boundary.dxf", "DXF (*.dxf)")
-        self.btn_import_dxf_mask = QPushButton("Detect from DXF")
-        self.btn_import_dxf_mask.setEnabled(False)  # bật sau SAD (cần dx/dy grid)
-        self.btn_import_dxf_mask.clicked.connect(self._on_import_dxf_mask)
-        row_mask = QHBoxLayout()
-        row_mask.addWidget(self.fp_mask_dxf, 1)
-        row_mask.addWidget(self.btn_import_dxf_mask, 0)
-        lay_detect.addLayout(row_mask)
 
         self.lbl_mask_source = QLabel("Mask source: not set")
         self.lbl_mask_source.setWordWrap(True)
@@ -217,12 +239,39 @@ class AnalyzeTab(QWidget):
         # ---- Vector Display ----
         grp_vectors = QGroupBox("Vector Display")
         lay_vectors = QVBoxLayout(grp_vectors)
+        vec_actions = QHBoxLayout()
+        vec_actions.setContentsMargins(0, 0, 0, 0)
+        vec_actions.setSpacing(6)
+        self.btn_vec_options = QPushButton("Display ˅")
+        self.btn_vec_options.setCheckable(True)
+        self.btn_vec_options.setChecked(False)
+        self.btn_vec_options.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        self.btn_vectors = QPushButton("Render Vectors")
+        self.btn_vectors.setEnabled(False)  # bật sau SAD
+        self.btn_vectors.clicked.connect(self._on_render_vectors)
+        self.btn_vectors.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        vec_actions.addWidget(self.btn_vec_options, 1)
+        vec_actions.addWidget(self.btn_vectors, 1)
+        lay_vectors.addLayout(vec_actions)
+
+        self.vec_options_panel = QWidget()
+        vec_options_layout = QVBoxLayout(self.vec_options_panel)
+        vec_options_layout.setContentsMargins(0, 0, 0, 0)
+        vec_options_layout.setSpacing(6)
+        self.vec_options_panel.setVisible(False)
+        self.btn_vec_options.toggled.connect(
+            lambda checked: (
+                self.vec_options_panel.setVisible(checked),
+                self.btn_vec_options.setText("Display ˄" if checked else "Display ˅"),
+            )
+        )
+
         grid_vec_top = QGridLayout()
         grid_vec_top.setHorizontalSpacing(8)
         grid_vec_top.setVerticalSpacing(6)
         grid_vec_top.setColumnStretch(1, 1)
-        grid_vec_top.setColumnStretch(3, 1)
-        grid_vec_top.setColumnStretch(5, 1)
 
         lab_step = QLabel("Step:")
         lab_scale = QLabel("Scale:")
@@ -259,10 +308,9 @@ class AnalyzeTab(QWidget):
         self.combo_vec_color.setCurrentText("Blue")
         self.combo_vec_color.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
-        # Step/Scale/Color trên 1 hàng, input width bằng nhau
+        # Step/Scale/Color each on its own row, with aligned labels.
         label_col_w = max(lab_step.sizeHint().width(), lab_scale.sizeHint().width(), lab_color.sizeHint().width())
-        for col in (0, 2, 4):
-            grid_vec_top.setColumnMinimumWidth(col, label_col_w)
+        grid_vec_top.setColumnMinimumWidth(0, label_col_w)
         input_min_w = max(
             self.spin_vec_step.sizeHint().width(),
             self.spin_vec_scale.sizeHint().width(),
@@ -273,11 +321,11 @@ class AnalyzeTab(QWidget):
 
         grid_vec_top.addWidget(lab_step, 0, 0)
         grid_vec_top.addWidget(self.spin_vec_step, 0, 1)
-        grid_vec_top.addWidget(lab_scale, 0, 2)
-        grid_vec_top.addWidget(self.spin_vec_scale, 0, 3)
-        grid_vec_top.addWidget(lab_color, 0, 4)
-        grid_vec_top.addWidget(self.combo_vec_color, 0, 5)
-        lay_vectors.addLayout(grid_vec_top)
+        grid_vec_top.addWidget(lab_scale, 1, 0)
+        grid_vec_top.addWidget(self.spin_vec_scale, 1, 1)
+        grid_vec_top.addWidget(lab_color, 2, 0)
+        grid_vec_top.addWidget(self.combo_vec_color, 2, 1)
+        vec_options_layout.addLayout(grid_vec_top)
 
         grid_vec_sliders = QGridLayout()
         grid_vec_sliders.setHorizontalSpacing(8)
@@ -287,27 +335,9 @@ class AnalyzeTab(QWidget):
         grid_vec_sliders.addWidget(self.sld_vec_size, 0, 1)
         grid_vec_sliders.addWidget(lab_opacity, 1, 0)
         grid_vec_sliders.addWidget(self.sld_vec_opacity, 1, 1)
-        lay_vectors.addLayout(grid_vec_sliders)
+        vec_options_layout.addLayout(grid_vec_sliders)
+        lay_vectors.addWidget(self.vec_options_panel)
 
-        row_v3 = QHBoxLayout()
-        self.btn_vectors = QPushButton("Render Vectors")
-        self.btn_vectors.setEnabled(False)  # bật sau SAD
-        self.btn_vectors.clicked.connect(self._on_render_vectors)
-        self.btn_vectors.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        row_v3.addWidget(self.btn_vectors)
-        lay_vectors.addLayout(row_v3)
-        # Force same width as "Detect Landslide Zone" for action buttons.
-        btn_detect_w = max(
-            self.btn_detect.sizeHint().width(),
-            self.btn_smooth.sizeHint().width(),
-            self.btn_calc_sad.sizeHint().width(),
-            self.btn_import_dxf_mask.sizeHint().width(),
-            120,  # keep labels fully visible on narrow panes
-        )
-        self.btn_smooth.setFixedWidth(btn_detect_w)
-        self.btn_calc_sad.setFixedWidth(btn_detect_w)
-        self.btn_detect.setFixedWidth(btn_detect_w)
-        self.btn_import_dxf_mask.setFixedWidth(btn_detect_w)
         left_layout.addWidget(grp_detect)
         left_layout.addWidget(grp_vectors)
 
@@ -316,7 +346,7 @@ class AnalyzeTab(QWidget):
         status_layout = QVBoxLayout(grp_status)
         self.status_text = QTextEdit()
         self.status_text.setReadOnly(True)
-        self.status_text.setMinimumHeight(120)
+        self.status_text.setFixedHeight(STATUS_PANEL_H)
         status_layout.addWidget(self.status_text)
         left_layout.addWidget(grp_status)
 
@@ -333,7 +363,10 @@ class AnalyzeTab(QWidget):
 
         # ----- Right pane: Preview -----
         right_container = QWidget()
+        right_container.setMinimumWidth(RIGHT_MIN_W)
         right_layout = QVBoxLayout(right_container)
+        right_layout.setContentsMargins(*RIGHT_MARGINS)
+        right_layout.setSpacing(PANEL_SPACING)
 
         # title = QLabel("Hillshade Preview (Before / After)")
         # title.setStyleSheet("font-weight: 600;")
@@ -341,6 +374,11 @@ class AnalyzeTab(QWidget):
 
         self.viewer = UI1Viewer(right_container)
         self.viewer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        fit_row = QHBoxLayout()
+        fit_row.setContentsMargins(0, 0, 0, 0)
+        fit_row.addStretch(1)
+        fit_row.addWidget(self.viewer.btn_zoom_fit)
+        right_layout.addLayout(fit_row)
         right_layout.addWidget(self.viewer, 1)
 
         splitter.addWidget(right_container)
@@ -365,13 +403,14 @@ class AnalyzeTab(QWidget):
     def _try_apply_initial_splitter_width(self) -> None:
         if not self._pending_init_splitter or self._splitter is None:
             return
+        base_w = self._splitter.width() if self._splitter.width() > 0 else self.width()
+        if base_w < (self._left_default_w * 2):
+            return
         max_w = self._left_max_w()
         if max_w < 0:
             return
         init_left = max(self._left_min_w, min(self._left_default_w, max_w))
-        total = sum(self._splitter.sizes())
-        if total <= 0:
-            total = max(self._splitter.width(), self.width(), init_left + 1)
+        total = max(self._splitter.width(), sum(self._splitter.sizes()), self.width(), init_left + 1)
         self._splitter.setSizes([init_left, max(1, total - init_left)])
         self._pending_init_splitter = False
 
@@ -393,10 +432,16 @@ class AnalyzeTab(QWidget):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        if self._pending_init_splitter:
+            QTimer.singleShot(0, self._enforce_left_pane_bounds)
         self._enforce_left_pane_bounds()
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
+        if self._pending_init_splitter:
+            QTimer.singleShot(0, self._enforce_left_pane_bounds)
+            QTimer.singleShot(80, self._enforce_left_pane_bounds)
+            QTimer.singleShot(180, self._enforce_left_pane_bounds)
         self._enforce_left_pane_bounds()
 
     def _apply_button_style(self, container: QWidget | None = None) -> None:
@@ -484,13 +529,12 @@ class AnalyzeTab(QWidget):
             self._last_run_dir = info.get("run_dir")
 
             self.btn_open_run.setEnabled(True)
-            self.cmb_smooth_method.setEnabled(True)
             self.btn_smooth.setEnabled(True)  # bật smooth sau khi confirm
             self.cmb_method.setEnabled(True)
             self.btn_calc_sad.setEnabled(True)
             self.btn_detect.setEnabled(False)
+            self.cmb_detect_source.setEnabled(False)
             self.btn_vectors.setEnabled(False)
-            self.btn_import_dxf_mask.setEnabled(False)
 
             self._ok(
                 "Confirm Input completed.\n"
@@ -516,7 +560,7 @@ class AnalyzeTab(QWidget):
             self._warn("Please run 'Confirm Input' first.")
             return
         try:
-            method = str(self.cmb_smooth_method.currentText() or "Gaussian").strip()
+            method = "Gaussian"
             param_m = float(self.spin_smooth_param.value())
 
             ctx = self._backend.context_from_run_dir(self._last_run_dir)
@@ -542,10 +586,6 @@ class AnalyzeTab(QWidget):
 
         except Exception as e:
             self._err(f"Smooth error: {e}")
-
-    def _on_smooth_method_changed(self, text: str) -> None:
-        _method = str(text or "Gaussian").strip().lower()
-        self.lab_smooth_param.setText("Gaussian Radius (m):")
 
     def _on_calc_sad(self) -> None:
         if not self._last_run_dir:
@@ -593,8 +633,8 @@ class AnalyzeTab(QWidget):
             self.cmb_method.setEnabled(True)
             self.btn_calc_sad.setEnabled(True)
             self.btn_detect.setEnabled(True)
+            self.cmb_detect_source.setEnabled(True)
             self.btn_vectors.setEnabled(True)
-            self.btn_import_dxf_mask.setEnabled(True)
 
             # thông báo
             self._ok(
@@ -620,9 +660,11 @@ class AnalyzeTab(QWidget):
         if self._last_run_dir:
             dx_ok = os.path.exists(os.path.join(self._last_run_dir, "ui1", "dx.tif"))
             dy_ok = os.path.exists(os.path.join(self._last_run_dir, "ui1", "dy.tif"))
-            self.btn_import_dxf_mask.setEnabled(dx_ok and dy_ok)
+            self.btn_detect.setEnabled(dx_ok and dy_ok)
+            self.cmb_detect_source.setEnabled(dx_ok and dy_ok)
         else:
-            self.btn_import_dxf_mask.setEnabled(False)
+            self.btn_detect.setEnabled(False)
+            self.cmb_detect_source.setEnabled(False)
         self._err(f"SAD+dZ error: {msg}")
 
     def _on_open_run(self) -> None:
@@ -640,6 +682,38 @@ class AnalyzeTab(QWidget):
             self._err(f"Cannot open folder: {e}")
 
     # ---------- Status helpers ----------
+    @staticmethod
+    def _status_brief(msg: str, fallback: str) -> str:
+        skip_prefixes = (
+            "project:",
+            "run:",
+            "output:",
+            "folder:",
+            "outputs:",
+            "- dx:",
+            "- dy:",
+            "- dz:",
+            "- mask:",
+            "- polygons:",
+            "- dX:",
+            "- dY:",
+            "- dZ:",
+        )
+        for raw in str(msg or "").splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            low = line.lower()
+            if any(low.startswith(prefix.lower()) for prefix in skip_prefixes):
+                continue
+            if "\\" in line or "/" in line:
+                if ":" in line:
+                    line = line.split(":", 1)[0].strip()
+                else:
+                    continue
+            return line
+        return fallback
+
     def _append_status(self, text: str) -> None:
         """
         Ghi 1 dòng vào khung Status; nếu chưa có self.status_text thì in ra console.
@@ -658,18 +732,25 @@ class AnalyzeTab(QWidget):
         print(line)
 
     def _info(self, msg: str) -> None:
-        self._append_status(f"INFO: {msg}")
+        return
 
     def _ok(self, msg: str) -> None:
-        self._append_status(f"OK: {msg}")
+        self._append_status(f"OK: {self._status_brief(msg, 'Completed.')}")
 
     def _warn(self, msg: str) -> None:
-        self._append_status(f"WARN: {msg}")
+        self._append_status(f"ERROR: {self._status_brief(msg, 'Action required.')}")
         QMessageBox.warning(self, "Warning", msg)
 
     def _err(self, msg: str) -> None:
-        self._append_status(f"ERROR: {msg}")
+        self._append_status(f"ERROR: {self._status_brief(msg, 'Error.')}")
         QMessageBox.critical(self, "Error", msg)
+
+    def _on_detect_requested(self) -> None:
+        source = self.cmb_detect_source.currentData()
+        if source == "dxf":
+            self._on_import_dxf_mask()
+        else:
+            self._on_detect()
 
     def _on_detect(self) -> None:
         if not self._last_run_dir:
@@ -768,7 +849,7 @@ class AnalyzeTab(QWidget):
 
         except Exception as e:
             if quiet:
-                self._append_status(f"WARN: Live render vectors skipped: {e}")
+                return
             else:
                 self._err(f"Render vectors error: {e}")
 
@@ -824,8 +905,8 @@ class AnalyzeTab(QWidget):
             dx_ok = os.path.exists(os.path.join(ctx.out_ui1, "dx.tif"))
             dy_ok = os.path.exists(os.path.join(ctx.out_ui1, "dy.tif"))
             self.btn_detect.setEnabled(dx_ok and dy_ok)
+            self.cmb_detect_source.setEnabled(dx_ok and dy_ok)
             self.btn_vectors.setEnabled(dx_ok and dy_ok)
-            self.btn_import_dxf_mask.setEnabled(dx_ok and dy_ok)
 
             # Bật Open run
             self.btn_open_run.setEnabled(True)
@@ -895,19 +976,17 @@ class AnalyzeTab(QWidget):
 
         # 4) Đưa các nút về trạng thái ban đầu
         self.btn_open_run.setEnabled(False)
-        self.cmb_smooth_method.setEnabled(False)
         self.btn_smooth.setEnabled(False)
         self.cmb_method.setEnabled(False)
         self.btn_calc_sad.setEnabled(False)
         self.btn_detect.setEnabled(False)
+        self.cmb_detect_source.setEnabled(False)
         self.btn_vectors.setEnabled(False)
-        self.btn_import_dxf_mask.setEnabled(False)
         # Nút Confirm Input luôn bật
         self.btn_confirm.setEnabled(True)
 
         # 5) Reset các thông số xử lý
         try:
-            self.cmb_smooth_method.setCurrentText("Gaussian")
             self.spin_smooth_param.setValue(2.0)
         except Exception:
             pass
@@ -917,6 +996,10 @@ class AnalyzeTab(QWidget):
             pass
         try:
             self.spin_detect_thr.setValue(0.8)
+        except Exception:
+            pass
+        try:
+            self.cmb_detect_source.setCurrentIndex(0)
         except Exception:
             pass
         try:
@@ -946,8 +1029,8 @@ class AnalyzeTab(QWidget):
                 self.viewer.scene.clear()
             if hasattr(self.viewer, "caption"):
                 self.viewer.caption.setText("")
-            if hasattr(self.viewer, "view") and hasattr(self.viewer.view, "set_zoom_100"):
-                self.viewer.view.set_zoom_100()
+            if hasattr(self.viewer, "view") and hasattr(self.viewer.view, "reset_view_transform"):
+                self.viewer.view.reset_view_transform()
         except Exception:
             pass
 
@@ -977,7 +1060,7 @@ class AnalyzeTab(QWidget):
     def _set_sad_method_combo(self, method_key: str) -> None:
         idx = self.cmb_method.findData(method_key)
         if idx < 0:
-            idx = self.cmb_method.findText("Traditional")
+            idx = self.cmb_method.findText("SAD")
         if idx >= 0:
             self.cmb_method.setCurrentIndex(idx)
 

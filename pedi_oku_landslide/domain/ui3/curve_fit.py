@@ -203,6 +203,108 @@ def evaluate_nurbs_curve(chain_ctrl, elev_ctrl, weights=None, degree: int = 3, n
     return {"chain": sx[order2], "elev": sz[order2]}
 
 
+def fit_nurbs_params_from_curve(
+    curve: dict,
+    groups: list,
+    *,
+    degree: int = 3,
+    min_control_points: int = 4,
+) -> dict:
+    chain = np.asarray((curve or {}).get("chain", []), dtype=float)
+    elev = np.asarray((curve or {}).get("elev", []), dtype=float)
+    if chain.ndim != 1 or elev.ndim != 1 or chain.size != elev.size:
+        return {"degree": int(degree), "control_points": [], "weights": []}
+    keep = np.isfinite(chain) & np.isfinite(elev)
+    chain = chain[keep]
+    elev = elev[keep]
+    if chain.size < 2:
+        return {"degree": int(degree), "control_points": [], "weights": []}
+    order = np.argsort(chain)
+    chain = chain[order]
+    elev = elev[order]
+    chain, uniq_idx = np.unique(chain, return_index=True)
+    elev = elev[uniq_idx]
+    if chain.size < 2:
+        return {"degree": int(degree), "control_points": [], "weights": []}
+
+    s0 = float(chain[0])
+    s1 = float(chain[-1])
+    if not (np.isfinite(s0) and np.isfinite(s1)) or s1 <= s0:
+        return {"degree": int(degree), "control_points": [], "weights": []}
+
+    group_count = len(list(groups or []))
+    n_ctrl = max(int(min_control_points), int(group_count))
+    deg = int(degree)
+    if n_ctrl <= deg:
+        n_ctrl = deg + 1
+
+    interior_count = max(0, n_ctrl - 2)
+    centers = []
+    for g in list(groups or []):
+        try:
+            a = float(g.get("start", g.get("start_chainage", np.nan)))
+            b = float(g.get("end", g.get("end_chainage", np.nan)))
+        except Exception:
+            continue
+        if np.isfinite(a) and np.isfinite(b):
+            centers.append(float((a + b) * 0.5))
+    centers = sorted(c for c in centers if np.isfinite(c) and s0 < c < s1)
+
+    if group_count >= min_control_points and len(centers) >= interior_count:
+        inner = np.asarray(centers[1:1 + interior_count] if len(centers) >= interior_count + 2 else centers[:interior_count], dtype=float)
+    else:
+        inner = np.linspace(s0, s1, n_ctrl)[1:-1]
+    if inner.size != interior_count:
+        inner = np.linspace(s0, s1, n_ctrl)[1:-1]
+    cp_chain = np.concatenate(([s0], np.asarray(inner, dtype=float), [s1]))
+    cp_chain = np.maximum.accumulate(cp_chain)
+    if np.any(np.diff(cp_chain) <= 1e-9):
+        cp_chain = np.linspace(s0, s1, n_ctrl)
+
+    weights = np.ones(n_ctrl, dtype=float)
+    knot = _make_open_uniform_knot(n_ctrl, deg)
+    u = np.clip((chain - s0) / (s1 - s0), 0.0, 1.0)
+    basis = np.vstack([_bspline_basis_all(float(v), deg, knot, n_ctrl) for v in u])
+    z0 = float(elev[0])
+    z1 = float(elev[-1])
+    cp_elev = np.interp(cp_chain, chain, elev)
+    cp_elev[0] = z0
+    cp_elev[-1] = z1
+    if n_ctrl > 2 and basis.shape[0] >= n_ctrl:
+        try:
+            # Fit the parametric curve in 2D.  Fitting only z while keeping an
+            # arbitrary control-point chainage makes x(u) drift away from the
+            # spline samples, so the converted NURBS can look unrelated.
+            a = basis[:, 1:-1]
+            rhs_chain = chain - (basis[:, 0] * s0 + basis[:, -1] * s1)
+            rhs_elev = elev - (basis[:, 0] * z0 + basis[:, -1] * z1)
+            sol_chain, *_ = np.linalg.lstsq(a, rhs_chain, rcond=None)
+            sol_elev, *_ = np.linalg.lstsq(a, rhs_elev, rcond=None)
+            if (
+                sol_chain.size == n_ctrl - 2
+                and sol_elev.size == n_ctrl - 2
+                and np.all(np.isfinite(sol_chain))
+                and np.all(np.isfinite(sol_elev))
+            ):
+                fitted_chain = np.concatenate(([s0], sol_chain.astype(float), [s1]))
+                if np.all(np.diff(fitted_chain) > 1e-9) and np.all((fitted_chain[1:-1] > s0) & (fitted_chain[1:-1] < s1)):
+                    cp_chain = fitted_chain
+                    cp_elev[1:-1] = sol_elev
+        except Exception:
+            cp_chain = np.concatenate(([s0], np.asarray(inner, dtype=float), [s1]))
+            if cp_chain.size != n_ctrl or np.any(np.diff(cp_chain) <= 1e-9):
+                cp_chain = np.linspace(s0, s1, n_ctrl)
+            cp_elev = np.interp(cp_chain, chain, elev)
+            cp_elev[0] = z0
+            cp_elev[-1] = z1
+
+    return {
+        "degree": deg,
+        "control_points": np.vstack([cp_chain, cp_elev]).T.astype(float).tolist(),
+        "weights": weights.astype(float).tolist(),
+    }
+
+
 def evaluate_piecewise_cubic_segments(segments, n_samples: int = 300) -> dict:
     segs = list(segments or [])
     if not segs:

@@ -54,6 +54,22 @@ from pedi_oku_landslide.pipeline.runners.ui2.ui2_sections_storage import (
 from pedi_oku_landslide.ui.dialogs.ui2_dialogs import AutoLineDialog
 from .ui2_layered_viewer import _LayeredViewer
 from pedi_oku_landslide.ui.widgets.ui2_widgets import HBox, NoWheelComboBox as _NoWheelComboBox
+from pedi_oku_landslide.ui.layout_constants import (
+    LEFT_DEFAULT_W,
+    LEFT_MARGINS,
+    LEFT_MIN_W,
+    PANEL_SPACING,
+    RIGHT_MARGINS,
+    RIGHT_MIN_W,
+    STATUS_PANEL_H,
+    CONTROL_HEIGHT,
+    PROJECT_H_SPACING,
+    PROJECT_LABEL_W,
+    PROJECT_MARGINS,
+    PROJECT_V_SPACING,
+    ROOT_MARGINS,
+    ROOT_SPACING,
+)
 
 # ---------- UI2: Section Selection tab ----------
 
@@ -64,8 +80,8 @@ class SectionSelectionTab(QWidget):
         self.base_dir = base_dir
         self._backend = UI2BackendService()
         self._splitter: Optional[QSplitter] = None
-        self._left_min_w = 380
-        self._left_default_w = 490
+        self._left_min_w = LEFT_MIN_W
+        self._left_default_w = LEFT_DEFAULT_W
         self._pending_init_splitter = True
 
         # run context
@@ -180,6 +196,8 @@ class SectionSelectionTab(QWidget):
     # ---- UI ----
     def _build_ui(self) -> None:
         root = QHBoxLayout(self)
+        root.setContentsMargins(*ROOT_MARGINS)
+        root.setSpacing(ROOT_SPACING)
         splitter = QSplitter(Qt.Horizontal, self)
         splitter.setChildrenCollapsible(False)
         self._splitter = splitter
@@ -201,37 +219,61 @@ class SectionSelectionTab(QWidget):
         left_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         left_container = QWidget()
         left_lo = QVBoxLayout(left_container)
-        left_lo.setContentsMargins(0, 0, 0, 0)
-        left_lo.setSpacing(6)
+        left_lo.setContentsMargins(*LEFT_MARGINS)
+        left_lo.setSpacing(PANEL_SPACING)
         left_scroll.setWidget(left_container)
         left_shell.addWidget(left_scroll)
 
-        grp_proj = QGroupBox("Project"); gl = QHBoxLayout(grp_proj)
-        gl.setContentsMargins(8, 8, 8, 8)
-        gl.setSpacing(6)
-        proj_input_h = 30
+        grp_proj = QGroupBox("Project")
+        gl = QGridLayout(grp_proj)
+        gl.setContentsMargins(*PROJECT_MARGINS)
+        gl.setHorizontalSpacing(PROJECT_H_SPACING)
+        gl.setVerticalSpacing(PROJECT_V_SPACING)
+        gl.setColumnStretch(1, 1)
         lbl_name = QLabel("Name:")
         lbl_run = QLabel("Run label:")
-        fm = lbl_name.fontMetrics()
-        proj_label_w = max(fm.horizontalAdvance("Name:"), fm.horizontalAdvance("Run label:")) + 8
-        self.edit_project = QLineEdit(); self.edit_project.setPlaceholderText("—")
-        self.edit_project.setFixedHeight(proj_input_h)
+        lbl_name.setFixedWidth(PROJECT_LABEL_W)
+        lbl_run.setFixedWidth(PROJECT_LABEL_W)
+        gl.setColumnMinimumWidth(0, PROJECT_LABEL_W)
+        self.edit_project = QLineEdit()
+        self.edit_project.setPlaceholderText("—")
+        self.edit_project.setFixedHeight(CONTROL_HEIGHT)
         self.edit_project.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        lbl_name.setFixedWidth(proj_label_w)
-        gl.addWidget(lbl_name)
-        gl.addWidget(self.edit_project, 1)
-        self.edit_runlabel = QLineEdit(); self.edit_runlabel.setPlaceholderText("—")
-        self.edit_runlabel.setFixedHeight(proj_input_h)
+        self.edit_runlabel = QLineEdit()
+        self.edit_runlabel.setPlaceholderText("—")
+        self.edit_runlabel.setFixedHeight(CONTROL_HEIGHT)
         self.edit_runlabel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        lbl_run.setFixedWidth(proj_label_w)
-        gl.addWidget(lbl_run)
-        gl.addWidget(self.edit_runlabel, 1)
+        gl.addWidget(lbl_name, 0, 0)
+        gl.addWidget(self.edit_project, 0, 1)
+        gl.addWidget(lbl_run, 1, 0)
+        gl.addWidget(self.edit_runlabel, 1, 1)
         left_lo.addWidget(grp_proj)
 
-        grp_layers = QGroupBox("Layers"); ll = QGridLayout(grp_layers)
+        grp_layers = QGroupBox("Layers")
+        layers_layout = QVBoxLayout(grp_layers)
+        layers_display_header = QHBoxLayout()
+        layers_display_header.setContentsMargins(0, 0, 0, 0)
+        layers_display_header.setSpacing(6)
+        self.btn_layers_display = QPushButton("Display ˅")
+        self.btn_layers_display.setCheckable(True)
+        self.btn_layers_display.setChecked(False)
+        self.btn_layers_display.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        layers_display_header.addWidget(self.btn_layers_display, 1)
+        layers_layout.addLayout(layers_display_header)
+
+        self.layers_display_panel = QWidget()
+        ll = QGridLayout(self.layers_display_panel)
+        ll.setContentsMargins(0, 0, 0, 0)
         ll.setHorizontalSpacing(6)
         ll.setVerticalSpacing(6)
         ll.setColumnStretch(1, 1)
+        self.layers_display_panel.setVisible(False)
+        self.btn_layers_display.toggled.connect(
+            lambda checked: (
+                self.layers_display_panel.setVisible(checked),
+                self.btn_layers_display.setText("Display ˄" if checked else "Display ˅"),
+            )
+        )
 
         lbl_gf = QLabel("Grid font size:")
         lbl_hs = QLabel("Hillshade opacity:")
@@ -249,15 +291,41 @@ class SectionSelectionTab(QWidget):
         ll.addWidget(lbl_gf, 0, 0); ll.addWidget(self.sld_grid_font, 0, 1)
         ll.addWidget(lbl_hs, 1, 0); ll.addWidget(self.sld_hill, 1, 1)
         ll.addWidget(lbl_hm, 2, 0); ll.addWidget(self.sld_heat, 2, 1)
+        layers_layout.addWidget(self.layers_display_panel)
         left_lo.addWidget(grp_layers)
 
         grp_vec = QGroupBox("Vector Display"); vvl = QVBoxLayout(grp_vec)
+        vec_actions = QHBoxLayout()
+        vec_actions.setContentsMargins(0, 0, 0, 0)
+        vec_actions.setSpacing(6)
+        self.btn_vec_options = QPushButton("Display ˅")
+        self.btn_vec_options.setCheckable(True)
+        self.btn_vec_options.setChecked(False)
+        self.btn_vec_options.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        self.btn_render_vectors = QPushButton("Render Vectors")
+        self.btn_render_vectors.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        vec_actions.addWidget(self.btn_vec_options, 1)
+        vec_actions.addWidget(self.btn_render_vectors, 1)
+        vvl.addLayout(vec_actions)
+
+        self.vec_options_panel = QWidget()
+        vec_options_layout = QVBoxLayout(self.vec_options_panel)
+        vec_options_layout.setContentsMargins(0, 0, 0, 0)
+        vec_options_layout.setSpacing(6)
+        self.vec_options_panel.setVisible(False)
+        self.btn_vec_options.toggled.connect(
+            lambda checked: (
+                self.vec_options_panel.setVisible(checked),
+                self.btn_vec_options.setText("Display ˄" if checked else "Display ˅"),
+            )
+        )
+
         grid_vec_top = QGridLayout()
         grid_vec_top.setHorizontalSpacing(8)
         grid_vec_top.setVerticalSpacing(6)
         grid_vec_top.setColumnStretch(1, 1)
-        grid_vec_top.setColumnStretch(3, 1)
-        grid_vec_top.setColumnStretch(5, 1)
 
         lbl_step = QLabel("Step:")
         lbl_scale = QLabel("Scale:")
@@ -296,8 +364,7 @@ class SectionSelectionTab(QWidget):
             lbl_scale.sizeHint().width(),
             lbl_color.sizeHint().width(),
         )
-        for col in (0, 2, 4):
-            grid_vec_top.setColumnMinimumWidth(col, label_col_w)
+        grid_vec_top.setColumnMinimumWidth(0, label_col_w)
         input_min_w = max(
             self.spin_vec_step.sizeHint().width(),
             self.spin_vec_scale.sizeHint().width(),
@@ -308,11 +375,11 @@ class SectionSelectionTab(QWidget):
 
         grid_vec_top.addWidget(lbl_step, 0, 0)
         grid_vec_top.addWidget(self.spin_vec_step, 0, 1)
-        grid_vec_top.addWidget(lbl_scale, 0, 2)
-        grid_vec_top.addWidget(self.spin_vec_scale, 0, 3)
-        grid_vec_top.addWidget(lbl_color, 0, 4)
-        grid_vec_top.addWidget(self.combo_vec_color, 0, 5)
-        vvl.addLayout(grid_vec_top)
+        grid_vec_top.addWidget(lbl_scale, 1, 0)
+        grid_vec_top.addWidget(self.spin_vec_scale, 1, 1)
+        grid_vec_top.addWidget(lbl_color, 2, 0)
+        grid_vec_top.addWidget(self.combo_vec_color, 2, 1)
+        vec_options_layout.addLayout(grid_vec_top)
 
         grid_vec_sliders = QGridLayout()
         grid_vec_sliders.setHorizontalSpacing(8)
@@ -322,12 +389,9 @@ class SectionSelectionTab(QWidget):
         grid_vec_sliders.addWidget(self.sld_vec_size, 0, 1)
         grid_vec_sliders.addWidget(lbl_opacity, 1, 0)
         grid_vec_sliders.addWidget(self.sld_vec_opacity, 1, 1)
-        vvl.addLayout(grid_vec_sliders)
+        vec_options_layout.addLayout(grid_vec_sliders)
+        vvl.addWidget(self.vec_options_panel)
 
-        row_vec_btn = HBox()
-        self.btn_render_vectors = QPushButton("Render Vectors")
-        row_vec_btn.addWidget(self.btn_render_vectors, 1)
-        vvl.addLayout(row_vec_btn)
         left_lo.addWidget(grp_vec)
 
         grp_secs = QGroupBox("Sections");
@@ -349,7 +413,8 @@ class SectionSelectionTab(QWidget):
         self.tbl.setMinimumHeight(220)
         self.tbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
         self.tbl.itemChanged.connect(self._on_table_item_changed)
-        sl.addWidget(QLabel("Straight Sections"))
+        self.lbl_straight_sections = QLabel("Straight Sections")
+        sl.addWidget(self.lbl_straight_sections)
         sl.addWidget(self.tbl)
 
         self.tbl_poly = QTableWidget(0, 6)
@@ -372,7 +437,8 @@ class SectionSelectionTab(QWidget):
         self.tbl_poly.setMinimumHeight(220)
         self.tbl_poly.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
         self.tbl_poly.itemChanged.connect(self._on_polyline_table_item_changed)
-        sl.addWidget(QLabel("Polyline Sections"))
+        self.lbl_polyline_sections = QLabel("Polyline Sections")
+        sl.addWidget(self.lbl_polyline_sections)
         sl.addWidget(self.tbl_poly)
 
         # Một hàng nút thao tác Section: mode chọn + Auto Line, Preview, Clear All, Confirm
@@ -390,26 +456,40 @@ class SectionSelectionTab(QWidget):
             # stretch=1 → 4 nút chia đều chiều ngang
             row_actions.addWidget(b, 1)
         sl.addLayout(row_actions)
+        self._update_section_table_visibility()
 
         left_lo.addWidget(grp_secs)
 
         grp_status = QGroupBox("Status"); sv = QVBoxLayout(grp_status)
         self.lbl_cursor = QLabel("Cursor: —")
+        self.lbl_cursor.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         from PyQt5.QtWidgets import QPlainTextEdit
         self.status_text = QPlainTextEdit()
         self.status_text.setReadOnly(True)
         self.status_text.setLineWrapMode(QPlainTextEdit.NoWrap)
         self.status_text.setMaximumBlockCount(2000)  # tránh phình bộ nhớ khi log dài
         self.status_text.setStyleSheet("font-family: Consolas, 'Courier New', monospace;")
-        self.status_text.setMinimumHeight(220)
-        self.status_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
-        sv.addWidget(self.lbl_cursor); sv.addWidget(self.status_text)
+        self.status_text.setFixedHeight(STATUS_PANEL_H)
+        self.status_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        sv.addWidget(self.status_text)
         left_lo.addWidget(grp_status)
 
         left_lo.addStretch(1)
         # right pane: viewer
+        right = QWidget()
+        right.setMinimumWidth(RIGHT_MIN_W)
+        right_lo = QVBoxLayout(right)
+        right_lo.setContentsMargins(*RIGHT_MARGINS)
+        right_lo.setSpacing(PANEL_SPACING)
+        cursor_row = QHBoxLayout()
+        cursor_row.setContentsMargins(0, 0, 0, 0)
+        cursor_row.addWidget(self.lbl_cursor, 1)
+        cursor_row.addWidget(self.viewer.btn_zoom_fit, 0)
+        right_lo.addLayout(cursor_row)
+        right_lo.addWidget(self.viewer, 1)
+
         splitter.addWidget(left)  # khung trái (form, table, status)
-        splitter.addWidget(self.viewer)  # khung phải (map)
+        splitter.addWidget(right)  # khung phải (map)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([self._left_default_w, 700])
@@ -593,7 +673,7 @@ class SectionSelectionTab(QWidget):
             scale=self._vec_scale,
         )
 
-        # default zoom = 100% (không fit-to-view)
+        # default native transform (khong fit-to-view)
         self.viewer.view.resetTransform()
         self.viewer.view.centerOn(self.viewer.scene.itemsBoundingRect().center())
         self._ok("[UI2] Layers loaded & aligned.")
@@ -657,7 +737,22 @@ class SectionSelectionTab(QWidget):
         if hasattr(self, "combo_draw_mode"):
             mode = str(self.combo_draw_mode.currentData() or "straight")
         self.viewer.set_draw_mode(mode)
+        self._update_section_table_visibility()
         self._info(f"[UI2] Draw mode: {mode}")
+
+    def _update_section_table_visibility(self) -> None:
+        mode = "straight"
+        if hasattr(self, "combo_draw_mode"):
+            mode = str(self.combo_draw_mode.currentData() or "straight")
+        show_polyline = mode == "polyline"
+        if hasattr(self, "lbl_straight_sections"):
+            self.lbl_straight_sections.setVisible(not show_polyline)
+        if hasattr(self, "tbl"):
+            self.tbl.setVisible(not show_polyline)
+        if hasattr(self, "lbl_polyline_sections"):
+            self.lbl_polyline_sections.setVisible(show_polyline)
+        if hasattr(self, "tbl_poly"):
+            self.tbl_poly.setVisible(show_polyline)
 
     @staticmethod
     def _polyline_length(vertices: List[Tuple[float, float]]) -> float:
@@ -1872,6 +1967,7 @@ class SectionSelectionTab(QWidget):
         if hasattr(self, "combo_draw_mode"):
             self.combo_draw_mode.setCurrentIndex(0)
         self.viewer.set_draw_mode("straight")
+        self._update_section_table_visibility()
 
         # Xoá sections & line
         self._clear_sections_state()
@@ -1891,19 +1987,40 @@ class SectionSelectionTab(QWidget):
             pass
 
     # ---- status helpers ----
+    @staticmethod
+    def _status_brief(msg: str, fallback: str) -> str:
+        skip_prefixes = ("project:", "run:", "output:", "folder:", "paths:")
+        for raw in str(msg or "").splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            low = line.lower()
+            if any(low.startswith(prefix) for prefix in skip_prefixes):
+                continue
+            if "\\" in line or "/" in line:
+                if ":" in line:
+                    line = line.split(":", 1)[0].strip()
+                else:
+                    continue
+            return line
+        return fallback
+
     def _append_status(self, text: str) -> None:
         self.status_text.appendPlainText(text)
         self.status_text.moveCursor(self.status_text.textCursor().End)
 
     def _info(self, msg: str) -> None:
-        self._append_status(f"[UI2] INFO: {msg}")
+        return
 
     def _ok(self, msg: str) -> None:
-        self._append_status(f"[UI2] OK: {msg}")
+        self._append_status(f"[UI2] OK: {self._status_brief(msg, 'Completed.')}")
+
+    def _warn(self, msg: str) -> None:
+        self._append_status(f"[UI2] ERROR: {self._status_brief(msg, 'Action required.')}")
 
     def _err(self, msg: str) -> None:
         """Append error to status + popup."""
-        self._append_status(f"[UI2] ERROR: {msg}")
+        self._append_status(f"[UI2] ERROR: {self._status_brief(msg, 'Error.')}")
         try:
             QMessageBox.critical(self, "Section Selection", msg)
         except Exception:
@@ -1911,4 +2028,4 @@ class SectionSelectionTab(QWidget):
 
     # Back-compat: vài nơi cũ còn gọi self._log(...)
     def _log(self, msg: str) -> None:
-        self._info(msg)
+        return
