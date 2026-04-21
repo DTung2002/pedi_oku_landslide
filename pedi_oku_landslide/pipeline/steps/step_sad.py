@@ -9,6 +9,7 @@ import numpy as np
 import rasterio
 from rasterio.transform import Affine
 import matplotlib.pyplot as plt
+from scipy import ndimage
 
 from pedi_oku_landslide.services.session_store import AnalysisContext
 from pedi_oku_landslide.pipeline.ingest import update_ingest_processed, resolve_run_input_path
@@ -22,7 +23,47 @@ def _read_raster(path: str) -> Tuple[np.ndarray, dict, Affine, Optional[object]]
         meta = ds.meta.copy()
         transform = ds.transform
         crs = ds.crs
+    nodata = meta.get("nodata")
+    if nodata is not None:
+        try:
+            nd = float(nodata)
+            if np.isfinite(nd):
+                arr[np.isclose(arr, nd)] = np.nan
+            else:
+                arr[~np.isfinite(arr)] = np.nan
+        except Exception:
+            pass
+    # Some ASC/GeoTIFF files keep -9999 as regular finite values even when
+    # metadata is missing/stale. Treat it as nodata before computation/plotting.
+    arr[np.isclose(arr, -9999.0)] = np.nan
+    _mask_border_fill_values(arr)
     return arr, meta, transform, crs
+
+
+def _mask_border_fill_values(arr: np.ndarray) -> None:
+    """
+    Some inputs are uint8 image-like rasters where the outside/no-data area is
+    stored as a solid border-connected 0 or 255 instead of the metadata nodata.
+    Mask only border-connected components, so interior valid 0/255 values remain.
+    """
+    finite = np.isfinite(arr)
+    if not np.any(finite):
+        return
+    vals = arr[finite]
+    if float(np.nanmin(vals)) < 0.0 or float(np.nanmax(vals)) > 255.0:
+        return
+    h, w = arr.shape
+    min_border_pixels = max(32, int(0.002 * h * w))
+    seed = np.zeros(arr.shape, dtype=bool)
+    seed[0, :] = seed[-1, :] = seed[:, 0] = seed[:, -1] = True
+    for fill_val in (255.0, 0.0):
+        cand = finite & np.isclose(arr, fill_val)
+        border_seed = cand & seed
+        if not np.any(border_seed):
+            continue
+        connected = ndimage.binary_propagation(border_seed, mask=cand)
+        if int(np.sum(connected)) >= min_border_pixels:
+            arr[connected] = np.nan
 
 
 def _write_geotiff_float32(path: str, arr: np.ndarray, meta_template: dict, nodata_default: float = -9999.0) -> None:
@@ -68,9 +109,11 @@ def _nan_to_median(a: np.ndarray) -> Tuple[np.ndarray, float]:
 
 def _save_png_diverging(arr: np.ndarray, transform: Affine, out_png: str,
                         title: str, unit: str, vlim: float | None = None) -> None:
-    finite = np.isfinite(arr)
+    plot_arr = np.asarray(arr, dtype="float32").copy()
+    plot_arr[np.isclose(plot_arr, -9999.0)] = np.nan
+    finite = np.isfinite(plot_arr)
     if vlim is None and np.any(finite):
-        p2, p98 = np.nanpercentile(arr[finite], [2, 98])
+        p2, p98 = np.nanpercentile(plot_arr[finite], [2, 98])
         vmax = float(max(abs(p2), abs(p98)))
         vlim = vmax if vmax > 0 else 1.0
     if vlim is None:
@@ -85,7 +128,7 @@ def _save_png_diverging(arr: np.ndarray, transform: Affine, out_png: str,
 
     os.makedirs(os.path.dirname(out_png), exist_ok=True)
     plt.figure(figsize=(9, 9), dpi=120)
-    im = plt.imshow(arr, cmap="RdBu_r", vmin=-vlim, vmax=vlim, extent=extent, origin="upper")
+    im = plt.imshow(np.ma.masked_invalid(plot_arr), cmap="RdBu_r", vmin=-vlim, vmax=vlim, extent=extent, origin="upper")
     plt.title(title)
     plt.xlabel("X"); plt.ylabel("Y")
     plt.grid(True, linestyle="--", linewidth=0.6, alpha=0.5, color="k")
@@ -99,6 +142,8 @@ def _save_png_diverging(arr: np.ndarray, transform: Affine, out_png: str,
 
 def _save_png_sequential(arr: np.ndarray, transform: Affine, out_png: str,
                          title: str, unit: str) -> None:
+    plot_arr = np.asarray(arr, dtype="float32").copy()
+    plot_arr[np.isclose(plot_arr, -9999.0)] = np.nan
     h, w = arr.shape
     x_min = transform.c
     x_max = x_min + transform.a * w
@@ -108,7 +153,7 @@ def _save_png_sequential(arr: np.ndarray, transform: Affine, out_png: str,
 
     os.makedirs(os.path.dirname(out_png), exist_ok=True)
     plt.figure(figsize=(9, 9), dpi=120)
-    im = plt.imshow(arr, cmap="viridis", extent=extent, origin="upper")
+    im = plt.imshow(np.ma.masked_invalid(plot_arr), cmap="viridis", extent=extent, origin="upper")
     plt.title(title)
     plt.xlabel("X"); plt.ylabel("Y")
     plt.grid(True, linestyle="--", linewidth=0.6, alpha=0.5, color="k")
@@ -121,9 +166,6 @@ def _save_png_sequential(arr: np.ndarray, transform: Affine, out_png: str,
 
 
 def _bilinear_sample(arr: np.ndarray, yy: np.ndarray, xx: np.ndarray) -> np.ndarray:
-    print(np.isnan(yy).any())
-    print(np.isinf(yy).any())
-
     """
     Bilinear interpolation on 2D array.
     - (yy, xx) are float indices in row/col coords.

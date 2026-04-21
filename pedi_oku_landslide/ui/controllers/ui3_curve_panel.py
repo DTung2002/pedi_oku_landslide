@@ -424,6 +424,102 @@ class UI3CurvePanelMixin:
         self._sync_nurbs_panel_for_current_line(reset_defaults=False)
         self._schedule_nurbs_live_update()
 
+    def _apply_nurbs_params_after_edit(self, params: Dict[str, Any], current_row: Optional[int] = None) -> None:
+        line_id = self._line_id_current()
+        cps = np.asarray(params.get("control_points", []), dtype=float)
+        if cps.ndim != 2 or cps.shape[0] < 4:
+            self._warn("[UI3] Cubic NURBS requires at least 4 control points.")
+            return
+        weights = np.asarray(params.get("weights", []), dtype=float)
+        if weights.ndim != 1 or weights.size != cps.shape[0]:
+            weights = np.ones(cps.shape[0], dtype=float)
+        params = {
+            "degree": 3,
+            "control_points": cps.astype(float).tolist(),
+            "weights": np.where(np.isfinite(weights) & (weights > 0), weights, 1.0).astype(float).tolist(),
+        }
+        self._set_curve_method_for_line(line_id, "nurbs")
+        self._set_nurbs_params_for_line(line_id, params)
+        self._nurbs_updating_ui = True
+        try:
+            self.nurbs_cp_spin.setValue(int(cps.shape[0]))
+            self.nurbs_deg_spin.setRange(3, 3)
+            self.nurbs_deg_spin.setValue(3)
+            self._populate_nurbs_table(params)
+            if current_row is not None and self.nurbs_table.rowCount() > 0:
+                row = max(0, min(int(current_row), self.nurbs_table.rowCount() - 1))
+                self.nurbs_table.setCurrentCell(row, 1)
+        finally:
+            self._nurbs_updating_ui = False
+        self._schedule_nurbs_live_update()
+
+    def _on_add_nurbs_control_point(self) -> None:
+        if not self._active_prof:
+            self._warn("[UI3] Draw Curve and Convert first before adding NURBS control points.")
+            return
+        params = self._collect_nurbs_params_from_ui() or self._get_nurbs_params_for_line(self._line_id_current())
+        if not params:
+            self._warn("[UI3] Convert to NURBS first before adding control points.")
+            return
+        cps = np.asarray(params.get("control_points", []), dtype=float)
+        weights = np.asarray(params.get("weights", []), dtype=float)
+        if cps.ndim != 2 or cps.shape[0] < 4:
+            self._warn("[UI3] Convert to NURBS first before adding control points.")
+            return
+        if weights.ndim != 1 or weights.size != cps.shape[0]:
+            weights = np.ones(cps.shape[0], dtype=float)
+
+        row = int(self.nurbs_table.currentRow())
+        n = int(cps.shape[0])
+        if row < 0:
+            insert_at = n - 1
+        elif row <= 0:
+            insert_at = 1
+        elif row >= n - 1:
+            insert_at = n - 1
+        else:
+            insert_at = row + 1
+
+        new_cp = (cps[insert_at - 1] + cps[insert_at]) / 2.0
+        new_w = float((weights[insert_at - 1] + weights[insert_at]) / 2.0)
+        new_cps = np.insert(cps, insert_at, new_cp, axis=0)
+        new_weights = np.insert(weights, insert_at, max(0.001, new_w), axis=0)
+        self._apply_nurbs_params_after_edit(
+            {"degree": 3, "control_points": new_cps.tolist(), "weights": new_weights.tolist()},
+            current_row=insert_at,
+        )
+
+    def _on_delete_nurbs_control_point(self) -> None:
+        if not self._active_prof:
+            self._warn("[UI3] Draw Curve and Convert first before deleting NURBS control points.")
+            return
+        params = self._collect_nurbs_params_from_ui() or self._get_nurbs_params_for_line(self._line_id_current())
+        if not params:
+            self._warn("[UI3] Convert to NURBS first before deleting control points.")
+            return
+        cps = np.asarray(params.get("control_points", []), dtype=float)
+        weights = np.asarray(params.get("weights", []), dtype=float)
+        if cps.ndim != 2 or cps.shape[0] <= 4:
+            self._warn("[UI3] Cannot delete: cubic NURBS must keep at least 4 control points.")
+            return
+        if weights.ndim != 1 or weights.size != cps.shape[0]:
+            weights = np.ones(cps.shape[0], dtype=float)
+
+        row = int(self.nurbs_table.currentRow())
+        if row < 0:
+            self._warn("[UI3] Select a control point row to delete.")
+            return
+        if row == 0 or row == cps.shape[0] - 1:
+            self._warn("[UI3] Cannot delete locked NURBS endpoint control points.")
+            return
+
+        new_cps = np.delete(cps, row, axis=0)
+        new_weights = np.delete(weights, row, axis=0)
+        self._apply_nurbs_params_after_edit(
+            {"degree": 3, "control_points": new_cps.tolist(), "weights": new_weights.tolist()},
+            current_row=min(row, int(new_cps.shape[0]) - 2),
+        )
+
     def _schedule_nurbs_live_update(self) -> None:
         if self._nurbs_updating_ui:
             return
@@ -782,9 +878,10 @@ class UI3CurvePanelMixin:
                     curve_method=curve_method,
                 )
             else:
-                groups = self._backend.clamp_groups(prof, groups, min_len=WORKFLOW_GROUP_MIN_LEN_M)
+                groups = self._groups_clamped_to_profile_bounds(prof, groups)
+                prof = self._profile_with_group_slip_span(prof, groups)
                 if not groups:
-                    self._warn("[UI3] No groups within slip zone.")
+                    self._warn("[UI3] No groups within profile bounds.")
                     return
                 self._group_table_updating = True
                 try:
@@ -848,6 +945,19 @@ class UI3CurvePanelMixin:
             self._active_global_fit_result = result
             self._draw_curve_overlay(reference_curve["chain"], reference_curve["elev"])
             self._clear_control_points_overlay()
+            try:
+                spline_csv = self._save_spline_curve_csv_for_line(line_id, self._active_curve)
+                if spline_csv:
+                    self._log(f"[UI3] Saved spline curve CSV: {spline_csv}")
+            except Exception as e:
+                self._warn(f"[UI3] Cannot save spline curve CSV: {e}")
+            try:
+                anchor_path, n_upd = self._update_anchors_xyz_for_saved_main_curve(self._active_curve)
+                if anchor_path and n_upd > 0:
+                    self._log(f"[UI3] Updated anchors.json from spline curve: {anchor_path} (n={n_upd})")
+            except Exception as e:
+                self._warn(f"[UI3] Cannot update anchors.json from spline curve: {e}")
+            self._refresh_anchor_overlay()
             if hasattr(self, "btn_convert_nurbs"):
                 self.btn_convert_nurbs.setEnabled(True)
             self._ok("[UI3] Global fit spline drawn. Click Convert to NURBS to generate control points.")
@@ -923,7 +1033,8 @@ class UI3CurvePanelMixin:
         try:
             groups = self._read_groups_from_table()
             if groups and self._active_prof:
-                groups = self._backend.clamp_groups(self._active_prof, groups, min_len=WORKFLOW_GROUP_MIN_LEN_M)
+                groups = self._groups_clamped_to_profile_bounds(self._active_prof, groups)
+                self._active_prof = self._profile_with_group_slip_span(self._active_prof, groups)
             self._active_groups = groups or []
             self._active_base_curve = None
             self._active_curve = None

@@ -495,6 +495,8 @@ def render_profile_png(
                     label_fs = max(8, int(round(tick_font * 0.9)))
                     label_items = []
                     for gi, gr in enumerate(group_ranges):
+                        if bool(gr.get("suppress_label", False)):
+                            continue
                         try:
                             s = float(gr.get("start", gr.get("start_chainage", np.nan)))
                             e = float(gr.get("end", gr.get("end_chainage", np.nan)))

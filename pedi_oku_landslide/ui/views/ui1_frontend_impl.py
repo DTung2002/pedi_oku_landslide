@@ -346,7 +346,7 @@ class AnalyzeTab(QWidget):
         status_layout = QVBoxLayout(grp_status)
         self.status_text = QTextEdit()
         self.status_text.setReadOnly(True)
-        self.status_text.setFixedHeight(STATUS_PANEL_H)
+        self.status_text.setFixedHeight(200)
         status_layout.addWidget(self.status_text)
         left_layout.addWidget(grp_status)
 

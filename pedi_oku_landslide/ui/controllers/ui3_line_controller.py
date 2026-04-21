@@ -444,6 +444,9 @@ class UI3LineControllerMixin:
     def _groups_json_path_for(self, line_id: str) -> str:
         return self._paths().groups_json_path_for(line_id)
 
+    def _slope_json_path_for(self, line_id: str) -> str:
+        return os.path.join(self._groups_dir(), f"slope_{line_id}.json")
+
     def _ui2_intersections_json_path(self) -> str:
         return self._paths().ui2_intersections_json_path()
 
@@ -696,17 +699,21 @@ class UI3LineControllerMixin:
 
     def _refresh_group_controls_for_line_role(self) -> None:
         btn = getattr(self, "btn_auto_group", None)
-        if btn is None:
-            return
         role = self._current_ui2_line_role()
         is_main = (role == "main")
-        btn.setEnabled(is_main)
-        if is_main:
-            btn.setToolTip("")
-        elif role == "cross":
-            btn.setToolTip("Auto Group is available only for Main Lines.")
-        else:
-            btn.setToolTip("Auto Group requires a line marked as Main.")
+        combo = getattr(self, "table_selector_combo", None)
+        if combo is not None and combo.count() > 0:
+            combo.setItemText(0, "Slope" if role == "cross" else "Group")
+            if combo.currentData() == "group":
+                self._on_ui3_table_selector_changed(combo.currentIndex())
+        if btn is not None:
+            btn.setEnabled(is_main)
+            if is_main:
+                btn.setToolTip("")
+            elif role == "cross":
+                btn.setToolTip("Auto Group is available only for Main Lines.")
+            else:
+                btn.setToolTip("Auto Group requires a line marked as Main.")
 
     def _load_ui2_intersections(self, force: bool = False) -> Dict[str, Any]:
         if (not force) and isinstance(self._ui2_intersections_cache, dict):
@@ -831,6 +838,27 @@ class UI3LineControllerMixin:
 
     def _vectors_csv_path_for(self, line_id: str) -> str:
         return self._paths().vectors_csv_path_for(line_id)
+
+    def _spline_curve_csv_path_for(self, line_id: str) -> str:
+        return os.path.join(self._curve_dir(), f"spline_{line_id}.csv")
+
+    def _save_spline_curve_csv_for_line(self, line_id: str, curve: Dict[str, Any]) -> Optional[str]:
+        chain = np.asarray((curve or {}).get("chain", []), dtype=float)
+        elev = np.asarray((curve or {}).get("elev", []), dtype=float)
+        if chain.ndim != 1 or elev.ndim != 1 or chain.size != elev.size:
+            return None
+        keep = np.isfinite(chain) & np.isfinite(elev)
+        chain = chain[keep]
+        elev = elev[keep]
+        if chain.size < 2:
+            return None
+        path = self._spline_curve_csv_path_for(line_id)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            f.write("chainage_m,elevation_m\n")
+            for s, z in zip(chain, elev):
+                f.write(f"{float(s):.6f},{float(z):.6f}\n")
+        return path
 
     def _save_vectors_csv_for_line(self, line_id: str, prof: dict) -> Optional[str]:
         return self._backend.save_vectors_csv(
@@ -974,7 +1002,7 @@ class UI3LineControllerMixin:
             "boundary_intersections": list(data.get("boundary_intersections", []) or []),
             "curve": curve,
         }
-        self._set_curve_method_for_line(line_id, "nurbs")
+        self._set_curve_method_for_line(line_id, "global_fit_spline")
         self._active_global_fit_result = result
         self._active_curve = {"chain": curve["chain"], "elev": curve["elev"]}
         self._update_global_fit_debug_panel(result, theta_csv_path=theta_csv_path)
@@ -1016,7 +1044,8 @@ class UI3LineControllerMixin:
             groups_now = self._read_groups_from_table() or []
             if groups_now and self._active_prof:
                 try:
-                    groups_now = self._backend.clamp_groups(self._active_prof, groups_now, min_len=WORKFLOW_GROUP_MIN_LEN_M)
+                    groups_now = self._groups_clamped_to_profile_bounds(self._active_prof, groups_now)
+                    self._active_prof = self._profile_with_group_slip_span(self._active_prof, groups_now)
                 except Exception:
                     pass
             self._active_groups = groups_now
@@ -1093,27 +1122,49 @@ class UI3LineControllerMixin:
     def _load_saved_curve_state_for_current_line(self) -> None:
         line_id = self._line_id_current()
         self._populate_group_table_for_current_line()
-        self._set_curve_method_for_line(line_id, "nurbs")
+        curve_method = self._get_curve_method_for_line(line_id)
         prof = self._build_profile_for_current_line()
         if prof is not None:
             self._active_prof = prof
+        if self._current_ui2_line_role() == "cross":
+            if self._active_prof:
+                self._populate_slope_table_for_current_line(self._active_prof)
+                self._active_prof = self._profile_with_slope_span(self._active_prof)
+            self._active_groups = []
+            self._active_global_fit_result = None
+            self._clear_control_points_overlay()
+            self._refresh_anchor_overlay()
+            return
 
         groups = self._read_groups_from_table() or []
         if groups and self._active_prof:
             try:
-                groups = self._backend.clamp_groups(self._active_prof, groups, min_len=WORKFLOW_GROUP_MIN_LEN_M)
+                groups = self._groups_clamped_to_profile_bounds(self._active_prof, groups)
+                self._active_prof = self._profile_with_group_slip_span(self._active_prof, groups)
             except Exception:
                 pass
         self._active_groups = groups
         self._active_global_fit_result = None
 
-        loaded_preview = self._try_load_nurbs_preview_from_curve(line_id)
-        self._try_load_nurbs_table_from_curve(line_id)
+        loaded_preview = False
+        if curve_method == "nurbs":
+            loaded_preview = self._try_load_nurbs_preview_from_curve(line_id)
+            self._try_load_nurbs_table_from_curve(line_id)
+        else:
+            self.nurbs_table.setRowCount(0)
+            self._clear_control_points_overlay()
         if not loaded_preview:
             self._log("[i] No saved curve preview in ui3/curve. Click 'Render Section' to preview.")
         self._refresh_anchor_overlay()
 
     def _populate_group_table_for_current_line(self) -> None:
+        if self._current_ui2_line_role() == "cross":
+            prof = self._build_profile_for_current_line()
+            if prof is not None:
+                self._active_prof = prof
+            self._populate_slope_table_for_current_line(prof)
+            self.group_table.setRowCount(0)
+            return
         path = self._groups_json_path()
         self._group_table_updating = True
         try:
@@ -1155,12 +1206,20 @@ class UI3LineControllerMixin:
             return
 
         groups = self._load_groups_for_current_line()
-        if groups:
-            groups = self._backend.clamp_groups(prof, groups, min_len=WORKFLOW_GROUP_MIN_LEN_M)
+        render_groups = groups
+        if self._current_ui2_line_role() == "cross":
+            slope_params = self._read_slope_params_from_table() or self._load_slope_params_for_current_line(prof)
+            prof = self._profile_with_slope_span(prof, slope_params)
+            render_groups = self._cross_slope_render_group(slope_params)
+            groups = []
+        elif groups:
+            groups = self._groups_clamped_to_profile_bounds(prof, groups)
+            prof = self._profile_with_group_slip_span(prof, groups)
+            render_groups = groups
 
         line_id = self._line_id_current()
         out_png = self._profile_png_path_for(line_id)
-        path = self._render_profile_png_current_settings(prof, out_png, groups=groups if groups else None)
+        path = self._render_profile_png_current_settings(prof, out_png, groups=render_groups if render_groups else None)
         if not path or not os.path.exists(path):
             return
         if not self._load_preview_scene_from_path(path, static_nurbs_bg=False):
@@ -1187,7 +1246,7 @@ class UI3LineControllerMixin:
             self._warn(f"[UI3] Cannot save vectors CSV: {e}")
 
         try:
-            if groups:
+            if groups and self._current_ui2_line_role() != "cross":
                 theta_csv = self._save_theta_csv_for_line(line_id, prof, groups)
                 if theta_csv:
                     self._log(f"[UI3] Saved theta CSV: {theta_csv}")

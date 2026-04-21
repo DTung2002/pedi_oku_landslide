@@ -24,10 +24,38 @@ class UI3PreviewControllerMixin:
         groups: Optional[List[dict]] = None,
         overlay_curves: Optional[list] = None,
     ) -> Optional[str]:
+        y_min = None
+        y_max = None
+        try:
+            if self._current_ui2_line_role() == "cross":
+                anchors = self._anchors_for_cross_line(self._current_ui2_line_id(), require_ready=False)
+                z_vals = []
+                elev = np.asarray((prof or {}).get("elev_s", []), dtype=float)
+                if elev.size > 0:
+                    z_vals.extend(elev[np.isfinite(elev)].astype(float).tolist())
+                for a in anchors:
+                    try:
+                        z = float(a.get("z"))
+                    except Exception:
+                        continue
+                    if np.isfinite(z):
+                        z_vals.append(float(z))
+                if z_vals:
+                    z0 = float(np.nanmin(z_vals))
+                    z1 = float(np.nanmax(z_vals))
+                    span = max(z1 - z0, 0.5)
+                    pad = 0.04 * span
+                    y_min = z0 - pad
+                    y_max = z1 + pad
+        except Exception:
+            y_min = None
+            y_max = None
         result = self._backend.render_preview(
             prof,
             {
                 "out_png": out_png,
+                "y_min": y_min,
+                "y_max": y_max,
                 "vec_scale": self.vscale.value(),
                 "vec_width": self.vwidth.value(),
                 "head_len": 6.0,
@@ -259,8 +287,8 @@ class UI3PreviewControllerMixin:
         if self._current_ui2_line_role() != "cross":
             return
         cross_id = self._current_ui2_line_id()
-        anchors = self._anchors_for_cross_line(cross_id, require_ready=True)
-        if len(anchors) < 3:
+        anchors = self._anchors_for_cross_line(cross_id, require_ready=False)
+        if not anchors:
             return
 
         colors = {

@@ -469,7 +469,7 @@ class SectionSelectionTab(QWidget):
         self.status_text.setLineWrapMode(QPlainTextEdit.NoWrap)
         self.status_text.setMaximumBlockCount(2000)  # tránh phình bộ nhớ khi log dài
         self.status_text.setStyleSheet("font-family: Consolas, 'Courier New', monospace;")
-        self.status_text.setFixedHeight(STATUS_PANEL_H)
+        self.status_text.setFixedHeight(200)
         self.status_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         sv.addWidget(self.status_text)
         left_lo.addWidget(grp_status)

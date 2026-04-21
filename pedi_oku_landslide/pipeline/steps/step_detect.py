@@ -7,6 +7,7 @@ import traceback
 import numpy as np
 import rasterio
 import matplotlib.pyplot as plt
+from scipy import ndimage
 from sklearn.cluster import KMeans
 from rasterio.transform import Affine
 from rasterio.warp import reproject, Resampling
@@ -20,7 +21,44 @@ def _read(path: str):
         meta = ds.meta.copy()
         transform = ds.transform
         crs = ds.crs
+        _mask_nodata_inplace(arr, ds.nodata)
     return arr, meta, transform, crs
+
+
+def _mask_nodata_inplace(arr: np.ndarray, nodata) -> np.ndarray:
+    if nodata is not None:
+        try:
+            nd = float(nodata)
+            if np.isfinite(nd):
+                arr[np.isclose(arr, nd)] = np.nan
+            else:
+                arr[~np.isfinite(arr)] = np.nan
+        except Exception:
+            pass
+    arr[np.isclose(arr, -9999.0)] = np.nan
+    _mask_border_fill_values(arr)
+    return arr
+
+
+def _mask_border_fill_values(arr: np.ndarray) -> None:
+    finite = np.isfinite(arr)
+    if not np.any(finite):
+        return
+    vals = arr[finite]
+    if float(np.nanmin(vals)) < 0.0 or float(np.nanmax(vals)) > 255.0:
+        return
+    h, w = arr.shape
+    min_border_pixels = max(32, int(0.002 * h * w))
+    seed = np.zeros(arr.shape, dtype=bool)
+    seed[0, :] = seed[-1, :] = seed[:, 0] = seed[:, -1] = True
+    for fill_val in (255.0, 0.0):
+        cand = finite & np.isclose(arr, fill_val)
+        border_seed = cand & seed
+        if not np.any(border_seed):
+            continue
+        connected = ndimage.binary_propagation(border_seed, mask=cand)
+        if int(np.sum(connected)) >= min_border_pixels:
+            arr[connected] = np.nan
 
 
 def run_detect(
@@ -51,6 +89,7 @@ def run_detect(
     # ---- đọc dX, dY + transform để suy ra pixel size (m)
     with rasterio.open(dx_path) as dx_ds:
         dX = dx_ds.read(1).astype("float32")
+        _mask_nodata_inplace(dX, dx_ds.nodata)
         meta_dx = dx_ds.meta.copy()
         transform = dx_ds.transform
         crs = dx_ds.crs
@@ -61,24 +100,29 @@ def run_detect(
 
     with rasterio.open(dy_path) as dy_ds:
         dY = dy_ds.read(1).astype("float32")
+        _mask_nodata_inplace(dY, dy_ds.nodata)
 
     # ---- magnitude theo mét
-    mag_m = np.sqrt((dX * px_m) ** 2 + (dY * py_m) ** 2).astype("float32")
-    mag_m[~np.isfinite(mag_m)] = 0.0
+    valid_disp = np.isfinite(dX) & np.isfinite(dY)
+    mag_m = np.full(dX.shape, np.nan, dtype="float32")
+    mag_m[valid_disp] = np.sqrt((dX[valid_disp] * px_m) ** 2 + (dY[valid_disp] * py_m) ** 2).astype("float32")
 
     # ---- tạo mask
     if method == "threshold":
         thr = float(threshold_m)
-        mask = (mag_m >= thr).astype("uint8")
+        mask = (valid_disp & (mag_m >= thr)).astype("uint8")
     else:
         # auto clustering (KMeans) trên magnitude_m
-        flat = mag_m.reshape(-1, 1)
+        valid_vals = mag_m[valid_disp].reshape(-1, 1)
+        if valid_vals.size == 0:
+            raise RuntimeError("No valid displacement pixels for detection.")
         km = KMeans(n_clusters=k, n_init=10, random_state=0)
-        labels = km.fit_predict(flat)
-        lab_img = labels.reshape(mag_m.shape)
+        valid_labels = km.fit_predict(valid_vals)
+        lab_img = np.full(mag_m.shape, -1, dtype="int16")
+        lab_img[valid_disp] = valid_labels
         means = [float(np.mean(mag_m[lab_img == i])) if np.any(lab_img == i) else -1.0 for i in range(k)]
         slide_idx = int(np.argmax(means))
-        mask = (lab_img == slide_idx).astype("uint8")
+        mask = (valid_disp & (lab_img == slide_idx)).astype("uint8")
 
     # ---- ghi mask.tif (uint8, nodata=0) - KHÔNG dùng -9999 cho uint8
     mask_tif = os.path.join(ctx.out_ui1, "landslide_mask.tif")
@@ -250,7 +294,7 @@ def run_detect(
     plt.imshow(base_img, cmap="gray", extent=base_extent, origin="upper")
 
     # heatmap chỉ trong vùng mask (không phủ chỗ khác)
-    mag_show = np.ma.masked_where(mask == 0, mag_m)  # chỉ vẽ nơi mask==1
+    mag_show = np.ma.masked_where((mask == 0) | (~np.isfinite(mag_m)), mag_m)  # chỉ vẽ nơi mask==1 và có dữ liệu
     h = plt.imshow(
         mag_show, cmap="turbo", extent=base_extent, origin="upper",
         interpolation="nearest"  # giữ chi tiết
@@ -330,6 +374,7 @@ def render_vectors(
     # --- đọc dX/dY và suy pixel size (m)
     with rasterio.open(dx_path) as dx_ds:
         dX = dx_ds.read(1).astype("float32")
+        _mask_nodata_inplace(dX, dx_ds.nodata)
         transform = dx_ds.transform
         H, W = dX.shape
         px_m = abs(float(transform.a))
@@ -337,6 +382,7 @@ def render_vectors(
 
     with rasterio.open(dy_path) as dy_ds:
         dY = dy_ds.read(1).astype("float32")
+        _mask_nodata_inplace(dY, dy_ds.nodata)
 
     # --- DEM hillshade nền từ before.asc
     before_asc = os.path.join(ctx.in_dir, "before.asc")
@@ -362,7 +408,9 @@ def render_vectors(
         in_zone = np.ones_like(dX, dtype=bool)
 
     # --- chọn mẫu theo step + lọc độ lớn theo mét
-    mag_m = np.sqrt((dX * px_m) ** 2 + (dY * py_m) ** 2).astype("float32")
+    valid_disp = np.isfinite(dX) & np.isfinite(dY)
+    mag_m = np.full(dX.shape, np.nan, dtype="float32")
+    mag_m[valid_disp] = np.sqrt((dX[valid_disp] * px_m) ** 2 + (dY[valid_disp] * py_m) ** 2).astype("float32")
     sample = np.zeros_like(mag_m, dtype=bool)
     sample[::max(1, int(step)), ::max(1, int(step))] = True
 

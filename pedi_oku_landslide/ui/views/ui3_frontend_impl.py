@@ -24,6 +24,7 @@ from PyQt5.QtWidgets import (
     QSizePolicy,
     QSplitter,
     QTableWidget,
+    QTableWidgetItem,
     QTextEdit,
     QToolBar,
     QVBoxLayout,
@@ -109,6 +110,7 @@ class CurveAnalyzeTab(
         self.scene = None
         self.view = None
         self.group_table = None
+        self.table_selector_combo = None
         # --- state for grouping/guide overlays (phải ở CurveAnalyzeTab) ---
         self._px_per_m: Optional[float] = None  # pixels per meter
         self._sec_len_m: Optional[float] = None  # chiều dài tuyến (m)
@@ -134,6 +136,7 @@ class CurveAnalyzeTab(
         self._nurbs_seed_method_by_line: Dict[str, str] = {}
         self._group_table_updating: bool = False
         self._boring_table_updating: bool = False
+        self._slope_table_updating: bool = False
         self._nurbs_updating_ui: bool = False
         # True when background image already has a baked slip-curve (profile_*_nurbs.png).
         self._static_nurbs_bg_loaded: bool = False
@@ -222,10 +225,12 @@ class CurveAnalyzeTab(
         left = QVBoxLayout(left_container)
         left.setContentsMargins(*LEFT_MARGINS)
         left.setSpacing(PANEL_SPACING)
+        left.setAlignment(Qt.AlignTop)
         left_scroll.setWidget(left_container)
 
         # Project info – giống Section tab
         box_proj = QGroupBox("Project")
+        box_proj.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         lp = QGridLayout(box_proj)
         lp.setContentsMargins(*PROJECT_MARGINS)
         lp.setHorizontalSpacing(PROJECT_H_SPACING)
@@ -255,71 +260,108 @@ class CurveAnalyzeTab(
 
         # Sections + Advanced display
         box_sel = QGroupBox("Sections Display")
+        box_sel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         lsd = QVBoxLayout(box_sel)
         ls = QHBoxLayout()
         self.line_combo = NoWheelComboBox()
         self.line_combo.currentIndexChanged.connect(self._on_line_changed)
         btn_render = QPushButton("Render Section")
         btn_render.clicked.connect(self._render_current_safe)
+        self.btn_section_advanced = QPushButton("Display ▸")
+        self.btn_section_advanced.setCheckable(True)
+        self.btn_section_advanced.toggled.connect(self._on_sections_advanced_toggled)
         ls.addWidget(self.line_combo)
         ls.addWidget(btn_render)
+        ls.addWidget(self.btn_section_advanced)
         lsd.addLayout(ls)
 
         # Advanced controls
-        la = QHBoxLayout()
-        la.setSpacing(6)
+        self.section_advanced_widget = QWidget()
+        self.section_advanced_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        adv_layout = QVBoxLayout(self.section_advanced_widget)
+        adv_layout.setContentsMargins(0, 0, 0, 0)
+        adv_layout.setSpacing(6)
 
         def _fit_adv_label(text: str) -> QLabel:
             lb = QLabel(text)
-            min_w = lb.fontMetrics().horizontalAdvance(text) + 8
+            min_w = max(70, lb.fontMetrics().horizontalAdvance(text) + 8)
             lb.setFixedWidth(min_w)
             return lb
 
+        row_step = QHBoxLayout()
         lbl_step = _fit_adv_label("Step (m):")
-        la.addWidget(lbl_step)
+        row_step.addWidget(lbl_step)
         self.step_box = KeyboardOnlyDoubleSpinBox()
         self.step_box.setDecimals(4)
         self.step_box.setValue(float(self._default_profile_step_m))
         self.step_box.setMaximum(1e6)
         self.step_box.setMinimumWidth(56)
         self.step_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        la.addWidget(self.step_box, 1)
+        row_step.addWidget(self.step_box, 1)
+        adv_layout.addLayout(row_step)
+
+        row_scale = QHBoxLayout()
         lbl_scale = _fit_adv_label("Scale:")
-        la.addWidget(lbl_scale)
+        row_scale.addWidget(lbl_scale)
         self.vscale = KeyboardOnlyDoubleSpinBox()
         self.vscale.setDecimals(3)
         self.vscale.setValue(0.1)
         self.vscale.setMaximum(1e6)
         self.vscale.setMinimumWidth(56)
         self.vscale.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        la.addWidget(self.vscale, 1)
+        row_scale.addWidget(self.vscale, 1)
+        adv_layout.addLayout(row_scale)
+
+        row_width = QHBoxLayout()
         lbl_width = _fit_adv_label("Width:")
-        la.addWidget(lbl_width)
+        row_width.addWidget(lbl_width)
         self.vwidth = KeyboardOnlyDoubleSpinBox()
         self.vwidth.setDecimals(4)
         self.vwidth.setValue(0.0015)
         self.vwidth.setMaximum(1.0)
         self.vwidth.setMinimumWidth(56)
         self.vwidth.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        la.addWidget(self.vwidth, 1)
-        lsd.addLayout(la)
+        row_width.addWidget(self.vwidth, 1)
+        adv_layout.addLayout(row_width)
+        self.section_advanced_widget.hide()
+        lsd.addWidget(self.section_advanced_widget)
 
         left.addWidget(box_sel)
 
-        def _set_table_visible_rows(tbl: QTableWidget, rows: int, row_h: int) -> None:
+        def _set_table_visible_rows(tbl: QTableWidget, rows: int, row_h: int, fixed_h: Optional[int] = None) -> None:
             """Fix table height to show exactly `rows` data rows (+ header)."""
+            tbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             tbl.verticalHeader().setDefaultSectionSize(int(row_h))
+            tbl.verticalHeader().setSectionResizeMode(QHeaderView.Fixed)
             header_h = int(tbl.horizontalHeader().sizeHint().height())
             frame_h = int(tbl.frameWidth()) * 2
-            total_h = header_h + frame_h + int(rows) * int(row_h) + 2
+            total_h = int(fixed_h) if fixed_h is not None else header_h + frame_h + int(rows) * int(row_h) + 2
             tbl.setMinimumHeight(total_h)
             tbl.setMaximumHeight(total_h)
 
+        table_visible_rows = 4
+        table_row_h = 30
+        table_fixed_h = 287
+
         # Group table
         box_grp = QGroupBox("Group")
+        box_grp.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.box_group = box_grp
         lg = QVBoxLayout(box_grp)
         row_curv = QHBoxLayout()
-        row_curv.addWidget(QLabel("RDP eps (m):"))
+        row_curv.addWidget(QLabel("Table:"))
+        self.table_selector_combo = NoWheelComboBox()
+        self.table_selector_combo.addItem("Group", "group")
+        self.table_selector_combo.addItem("Boring holes", "boring")
+        self.table_selector_combo.addItem("Nurbs control points", "nurbs")
+        self.table_selector_combo.currentIndexChanged.connect(self._on_ui3_table_selector_changed)
+        self.table_selector_combo.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.table_selector_combo.setFixedWidth(self.table_selector_combo.sizeHint().width())
+        row_curv.addWidget(self.table_selector_combo)
+        row_curv.addStretch(1)
+        row_curv.addSpacing(8)
+        self.rdp_eps_label = QLabel("RDP eps (m):")
+        row_curv.addWidget(self.rdp_eps_label)
         self.rdp_eps_spin = KeyboardOnlyDoubleSpinBox()
         self.rdp_eps_spin.setDecimals(3)
         self.rdp_eps_spin.setRange(0.0, 1000.0)
@@ -339,8 +381,22 @@ class CurveAnalyzeTab(
         self.group_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
         self.group_table.cellDoubleClicked.connect(self._on_group_cell_double_clicked)
         self.group_table.itemChanged.connect(self._on_group_table_item_changed)
-        _set_table_visible_rows(self.group_table, rows=4, row_h=30)
+        _set_table_visible_rows(self.group_table, rows=table_visible_rows, row_h=table_row_h, fixed_h=table_fixed_h)
         lg.addWidget(self.group_table)
+
+        self.slope_table = QTableWidget(2, 2)
+        self.slope_table.setHorizontalHeaderLabels(["Distance (m)", "Slope (deg)"])
+        self.slope_table.setVerticalHeaderLabels(["Start", "End"])
+        self.slope_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.slope_table.verticalHeader().setSectionResizeMode(QHeaderView.Fixed)
+        self.slope_table.verticalHeader().setDefaultSectionSize(table_row_h)
+        for r in range(2):
+            for c in range(2):
+                self.slope_table.setItem(r, c, QTableWidgetItem(""))
+        self.slope_table.itemChanged.connect(self._on_slope_table_item_changed)
+        _set_table_visible_rows(self.slope_table, rows=table_visible_rows, row_h=table_row_h, fixed_h=table_fixed_h)
+        self.slope_table.hide()
+        lg.addWidget(self.slope_table)
 
         rowg = QHBoxLayout()
         self.btn_add_g = QPushButton("Add")
@@ -356,17 +412,27 @@ class CurveAnalyzeTab(
             btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             rowg.addWidget(btn, 1)
         lg.addLayout(rowg)
-        left.addWidget(box_grp, 1)
-
-        box_bh = QGroupBox("Boring Holes")
+        self._group_table_widgets = [
+            self.group_table,
+            self.btn_auto_group,
+            self.btn_add_g,
+            self.btn_del_g,
+            self.btn_draw_curve,
+        ]
+        self._slope_table_widgets = [self.slope_table]
+        box_bh = QWidget()
+        box_bh.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.box_boring_holes = box_bh
         lbh = QVBoxLayout(box_bh)
+        lbh.setContentsMargins(0, 0, 0, 0)
+        lbh.setSpacing(6)
         self.boring_table = QTableWidget(0, 4)
         self.boring_table.setHorizontalHeaderLabels(["BH", "X", "Y", "Z"])
         self.boring_table.verticalHeader().setVisible(False)
         self.boring_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.boring_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.boring_table.itemChanged.connect(self._on_boring_holes_table_item_changed)
-        _set_table_visible_rows(self.boring_table, rows=3, row_h=30)
+        _set_table_visible_rows(self.boring_table, rows=table_visible_rows, row_h=table_row_h, fixed_h=table_fixed_h)
         lbh.addWidget(self.boring_table)
 
         row_bh_btn = QHBoxLayout()
@@ -380,24 +446,14 @@ class CurveAnalyzeTab(
             btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             row_bh_btn.addWidget(btn, 1)
         lbh.addLayout(row_bh_btn)
-        left.addWidget(box_bh, 0)
+        lg.addWidget(box_bh)
 
-        box_nurbs = QGroupBox("NURBS Control Points")
+        box_nurbs = QWidget()
+        box_nurbs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.box_nurbs_control_points = box_nurbs
         ln = QVBoxLayout(box_nurbs)
-        ln.setContentsMargins(8, 8, 8, 8)
+        ln.setContentsMargins(0, 0, 0, 0)
         ln.setSpacing(6)
-
-        row_nurbs_meta = QHBoxLayout()
-        row_nurbs_meta.addWidget(QLabel("Degree:"))
-        self.nurbs_degree_value = QLabel("3")
-        row_nurbs_meta.addWidget(self.nurbs_degree_value)
-        row_nurbs_meta.addStretch(1)
-        ln.addLayout(row_nurbs_meta)
-
-        self.btn_convert_nurbs = QPushButton("Convert to NURBS")
-        self.btn_convert_nurbs.setEnabled(False)
-        self.btn_convert_nurbs.clicked.connect(self._on_convert_to_nurbs)
-        ln.addWidget(self.btn_convert_nurbs)
 
         self.nurbs_cp_spin = KeyboardOnlySpinBox()
         self.nurbs_cp_spin.setRange(4, 200)
@@ -416,8 +472,21 @@ class CurveAnalyzeTab(
         self.nurbs_table.verticalHeader().setVisible(False)
         self.nurbs_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.nurbs_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        _set_table_visible_rows(self.nurbs_table, rows=4, row_h=30)
+        _set_table_visible_rows(self.nurbs_table, rows=table_visible_rows, row_h=table_row_h, fixed_h=table_fixed_h)
         ln.addWidget(self.nurbs_table)
+
+        row_nurbs_btn = QHBoxLayout()
+        self.btn_add_nurbs_cp = QPushButton("Add")
+        self.btn_add_nurbs_cp.clicked.connect(self._on_add_nurbs_control_point)
+        self.btn_del_nurbs_cp = QPushButton("Delete")
+        self.btn_del_nurbs_cp.clicked.connect(self._on_delete_nurbs_control_point)
+        self.btn_convert_nurbs = QPushButton("Convert")
+        self.btn_convert_nurbs.setEnabled(False)
+        self.btn_convert_nurbs.clicked.connect(self._on_convert_to_nurbs)
+        for btn in (self.btn_add_nurbs_cp, self.btn_del_nurbs_cp, self.btn_convert_nurbs):
+            btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            row_nurbs_btn.addWidget(btn, 1)
+        ln.addLayout(row_nurbs_btn)
 
         self.btn_nurbs_save = QPushButton("Save")
         self.btn_nurbs_save.hide()
@@ -425,14 +494,17 @@ class CurveAnalyzeTab(
         self.btn_nurbs_load.hide()
         self.btn_nurbs_reset = QPushButton("Reset NURBS")
         self.btn_nurbs_reset.hide()
-        left.addWidget(box_nurbs, 0)
+        lg.addWidget(box_nurbs)
+        left.addWidget(box_grp, 0)
+        self._on_ui3_table_selector_changed(0)
 
         # Status
         box_st = QGroupBox("Status")
+        box_st.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         ls = QVBoxLayout(box_st)
         self.status = QTextEdit()
         self.status.setReadOnly(True)
-        self.status.setFixedHeight(STATUS_PANEL_H)
+        self.status.setFixedHeight(200)
         self.status.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         ls.addWidget(self.status)
         left.addWidget(box_st, 0)
@@ -472,6 +544,57 @@ class CurveAnalyzeTab(
         splitter.setSizes([self._left_default_w, 900])
 
         self._apply_button_style()
+
+    def _on_sections_advanced_toggled(self, checked: bool) -> None:
+        widget = getattr(self, "section_advanced_widget", None)
+        if widget is not None:
+            widget.setVisible(bool(checked))
+        btn = getattr(self, "btn_section_advanced", None)
+        if btn is not None:
+            btn.setText("Display ▾" if checked else "Display ▸")
+
+    def _on_ui3_table_selector_changed(self, _idx: int) -> None:
+        combo = getattr(self, "table_selector_combo", None)
+        selected = combo.currentData() if combo is not None else "group"
+        selected = str(selected or "group")
+        is_cross = False
+        try:
+            is_cross = self._current_ui2_line_role() == "cross"
+        except Exception:
+            is_cross = False
+        if is_cross and selected == "group":
+            selected = "slope"
+
+        titles = {
+            "group": "Group",
+            "slope": "Slope",
+            "boring": "Boring Holes",
+            "nurbs": "NURBS Control Points",
+        }
+        box_group = getattr(self, "box_group", None)
+        if box_group is not None:
+            box_group.setTitle(titles.get(selected, "Group"))
+
+        show_group = selected == "group"
+        show_slope = selected == "slope"
+        rdp_label = getattr(self, "rdp_eps_label", None)
+        if rdp_label is not None:
+            rdp_label.setVisible(show_group)
+        rdp_spin = getattr(self, "rdp_eps_spin", None)
+        if rdp_spin is not None:
+            rdp_spin.setVisible(show_group)
+        for widget in getattr(self, "_group_table_widgets", []) or []:
+            widget.setVisible(show_group)
+        for widget in getattr(self, "_slope_table_widgets", []) or []:
+            widget.setVisible(show_slope)
+
+        box_bh = getattr(self, "box_boring_holes", None)
+        if box_bh is not None:
+            box_bh.setVisible(selected == "boring")
+
+        box_nurbs = getattr(self, "box_nurbs_control_points", None)
+        if box_nurbs is not None:
+            box_nurbs.setVisible(selected == "nurbs")
 
     def _left_max_w(self) -> int:
         base_w = self.width()

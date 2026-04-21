@@ -1,3 +1,4 @@
+import json
 import math
 import os
 from typing import Any, Dict, List, Optional, Tuple
@@ -63,7 +64,10 @@ class UI3GroupPanelMixin:
             apply_settings=bool(apply_settings),
             apply_group_json_settings=self._apply_group_json_settings,
         )
-        self._set_curve_method_for_line(lid, cm)
+        # Do not overwrite an in-session curve method (e.g. user has drawn a spline
+        # but not converted to NURBS) when merely switching lines and reloading groups.
+        if not self._curve_method_by_line.get(lid, ""):
+            self._set_curve_method_for_line(lid, cm)
         self._set_nurbs_seed_method_for_line(lid, data.get("nurbs_seed_method"), sync_ui=(lid == self._line_id_current()))
         return data, groups
 
@@ -235,6 +239,7 @@ class UI3GroupPanelMixin:
             finally:
                 self._group_table_updating = False
         self._sync_nurbs_defaults_from_group_table()
+        self._autosave_group_table_state()
         if changed_group_chainage and self._active_prof:
             self._render_current_safe()
 
@@ -246,6 +251,7 @@ class UI3GroupPanelMixin:
         n_groups = len(self._read_groups_from_table()) + 1
         self.group_table.setItem(r, 0, QTableWidgetItem(f"G{n_groups}"))
         self._sync_nurbs_defaults_from_group_table()
+        self._autosave_group_table_state()
 
     def _on_delete_group(self):
         rows = sorted({i.row() for i in self.group_table.selectedIndexes()}, reverse=True)
@@ -258,6 +264,7 @@ class UI3GroupPanelMixin:
                 continue
             self.group_table.removeRow(r)
         self._sync_nurbs_defaults_from_group_table()
+        self._autosave_group_table_state()
 
     def _read_groups_from_table(self):
         rows = self.group_table.rowCount()
@@ -287,6 +294,113 @@ class UI3GroupPanelMixin:
             except Exception:
                 continue
         return self._backend.normalize_groups(out)
+
+    def _autosave_group_table_state(self) -> None:
+        if self._group_table_updating:
+            return
+        try:
+            if self.line_combo is None or self.line_combo.count() <= 0 or self.line_combo.currentIndex() < 0:
+                return
+        except Exception:
+            return
+
+        groups = self._read_groups_from_table()
+        prof_for_stats = self._active_prof or self._build_profile_for_current_line()
+        if prof_for_stats and groups:
+            groups = self._groups_clamped_to_profile_bounds(prof_for_stats, groups)
+            prof_for_stats = self._profile_with_group_slip_span(prof_for_stats, groups)
+            self._active_groups = groups
+            self._active_prof = prof_for_stats
+
+        try:
+            line_id = self._line_id_current()
+            js = self._backend.build_group_json_payload(
+                line_label=self.line_combo.currentText(),
+                groups=groups,
+                prof=prof_for_stats,
+                chainage_origin=self._ui3_chainage_origin(),
+                curve_method=self._get_curve_method_for_line(line_id),
+                nurbs_seed_method=self._get_nurbs_seed_method_for_line(line_id),
+                profile_dem_source=self._current_profile_source_key(),
+                profile_dem_path=str(getattr(self, "dem_path", "") or ""),
+                grouping_params=self._grouping_params_current(),
+                group_method=None,
+            )
+            self._backend.save_group_json(self._groups_json_path(), js)
+        except Exception as e:
+            self._warn(f"[UI3] Cannot auto-save groups: {e}")
+
+    def _profile_chain_bounds(self, prof: Optional[dict]) -> Optional[Tuple[float, float]]:
+        if not prof:
+            return None
+        chain = np.asarray(prof.get("chain", []), dtype=float)
+        elev = np.asarray(prof.get("elev_s", prof.get("z", [])), dtype=float)
+        if chain.ndim != 1 or chain.size == 0:
+            return None
+        keep = np.isfinite(chain)
+        if elev.ndim == 1 and elev.size == chain.size:
+            keep = keep & np.isfinite(elev)
+        if int(np.count_nonzero(keep)) <= 0:
+            return None
+        return float(np.nanmin(chain[keep])), float(np.nanmax(chain[keep]))
+
+    def _groups_clamped_to_profile_bounds(self, prof: Optional[dict], groups: List[dict]) -> List[dict]:
+        bounds = self._profile_chain_bounds(prof)
+        if bounds is None:
+            return self._backend.normalize_groups(groups or [])
+        smin, smax = bounds
+        if smax < smin:
+            smin, smax = smax, smin
+        out = []
+        for g in self._backend.normalize_groups(groups or []):
+            try:
+                s = float(g.get("start", g.get("start_chainage", 0.0)))
+                e = float(g.get("end", g.get("end_chainage", 0.0)))
+            except Exception:
+                continue
+            if e < s:
+                s, e = e, s
+            s = max(float(smin), min(float(smax), s))
+            e = max(float(smin), min(float(smax), e))
+            if e <= s:
+                continue
+            row = dict(g)
+            row["start"] = float(s)
+            row["end"] = float(e)
+            out.append(row)
+        return self._backend.normalize_groups(out)
+
+    def _profile_with_group_slip_span(self, prof: Optional[dict], groups: List[dict]) -> Optional[dict]:
+        if not prof or not groups:
+            return prof
+        starts = []
+        ends = []
+        for g in groups:
+            try:
+                s = float(g.get("start", g.get("start_chainage")))
+                e = float(g.get("end", g.get("end_chainage")))
+            except Exception:
+                continue
+            if e < s:
+                s, e = e, s
+            starts.append(s)
+            ends.append(e)
+        if not starts or not ends:
+            return prof
+        bounds = self._profile_chain_bounds(prof)
+        if bounds is None:
+            return prof
+        full_min, full_max = bounds
+        s0 = max(float(full_min), min(float(full_max), float(min(starts))))
+        s1 = max(float(full_min), min(float(full_max), float(max(ends))))
+        if s1 <= s0:
+            return prof
+        out = dict(prof)
+        out["slip_span"] = (float(s0), float(s1))
+        chain = np.asarray(out.get("chain", []), dtype=float)
+        if chain.ndim == 1 and chain.size > 0:
+            out["slip_mask"] = np.isfinite(chain) & (chain >= float(s0)) & (chain <= float(s1))
+        return out
 
     def _find_ungrouped_row(self) -> Optional[int]:
         rows = self.group_table.rowCount()
@@ -404,6 +518,7 @@ class UI3GroupPanelMixin:
         color = QColorDialog.getColor(initial, self, "Select group color")
         if color.isValid():
             self._set_color_cell(row, color.name())
+            self._autosave_group_table_state()
             self._render_current_safe()
 
     def _get_ungrouped_color(self) -> str:
@@ -414,6 +529,8 @@ class UI3GroupPanelMixin:
         return c or "#bbbbbb"
 
     def _load_groups_for_current_line(self):
+        if self._current_ui2_line_role() == "cross":
+            return []
         line_id = self._line_id_current()
         table_groups = self._read_groups_from_table()
         if table_groups:
@@ -427,6 +544,176 @@ class UI3GroupPanelMixin:
             except Exception:
                 pass
         return []
+
+    def _slope_at_chain(self, prof: Optional[dict], s_val: float) -> float:
+        if not prof:
+            return 0.0
+        chain = np.asarray(prof.get("chain", []), dtype=float)
+        d_para = np.asarray(prof.get("d_para", []), dtype=float)
+        dz = np.asarray(prof.get("dz", []), dtype=float)
+        if chain.ndim != 1 or d_para.shape != chain.shape or dz.shape != chain.shape:
+            return 0.0
+        keep = np.isfinite(chain) & np.isfinite(d_para) & np.isfinite(dz)
+        if int(np.count_nonzero(keep)) < 2:
+            return 0.0
+        ch = chain[keep]
+        slope = np.degrees(np.arctan2(dz[keep], d_para[keep]))
+        slope = ((slope + 90.0) % 180.0) - 90.0
+        order = np.argsort(ch)
+        ch = ch[order]
+        slope = slope[order]
+        try:
+            return float(np.interp(float(s_val), ch, slope))
+        except Exception:
+            return 0.0
+
+    def _default_slope_params_for_profile(self, prof: Optional[dict]) -> Dict[str, float]:
+        if not prof:
+            return {"start": 0.0, "end": 0.0, "start_slope_deg": 0.0, "end_slope_deg": 0.0}
+        span = None
+        try:
+            span = prof.get("slip_span", None)
+            if span:
+                s0, s1 = map(float, span)
+            else:
+                bounds = self._profile_chain_bounds(prof)
+                s0, s1 = bounds if bounds is not None else (0.0, 0.0)
+        except Exception:
+            s0, s1 = 0.0, 0.0
+        if s1 < s0:
+            s0, s1 = s1, s0
+        return {
+            "start": float(s0),
+            "end": float(s1),
+            "start_slope_deg": self._slope_at_chain(prof, float(s0)),
+            "end_slope_deg": self._slope_at_chain(prof, float(s1)),
+        }
+
+    def _read_slope_params_from_table(self) -> Optional[Dict[str, float]]:
+        tbl = getattr(self, "slope_table", None)
+        if tbl is None or tbl.rowCount() < 2 or tbl.columnCount() < 2:
+            return None
+        try:
+            s0 = float((tbl.item(0, 0).text() if tbl.item(0, 0) else "").strip())
+            z0 = float((tbl.item(0, 1).text() if tbl.item(0, 1) else "").strip())
+            s1 = float((tbl.item(1, 0).text() if tbl.item(1, 0) else "").strip())
+            z1 = float((tbl.item(1, 1).text() if tbl.item(1, 1) else "").strip())
+        except Exception:
+            return None
+        if not all(np.isfinite(v) for v in (s0, z0, s1, z1)):
+            return None
+        if s1 < s0:
+            s0, s1 = s1, s0
+            z0, z1 = z1, z0
+        return {"start": float(s0), "end": float(s1), "start_slope_deg": float(z0), "end_slope_deg": float(z1)}
+
+    def _set_slope_table_params(self, params: Dict[str, float]) -> None:
+        tbl = getattr(self, "slope_table", None)
+        if tbl is None:
+            return
+        self._slope_table_updating = True
+        try:
+            vals = [
+                (float(params.get("start", 0.0)), float(params.get("start_slope_deg", 0.0))),
+                (float(params.get("end", 0.0)), float(params.get("end_slope_deg", 0.0))),
+            ]
+            for r, (s_val, slope_val) in enumerate(vals):
+                for c, val in enumerate((s_val, slope_val)):
+                    item = tbl.item(r, c)
+                    if item is None:
+                        item = QTableWidgetItem("")
+                        tbl.setItem(r, c, item)
+                    item.setText(f"{float(val):.3f}")
+        finally:
+            self._slope_table_updating = False
+
+    def _load_slope_params_for_current_line(self, prof: Optional[dict] = None) -> Dict[str, float]:
+        line_id = self._line_id_current()
+        path = self._slope_json_path_for(line_id)
+        params = None
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f) or {}
+                params = {
+                    "start": float(data.get("start")),
+                    "end": float(data.get("end")),
+                    "start_slope_deg": float(data.get("start_slope_deg", 0.0)),
+                    "end_slope_deg": float(data.get("end_slope_deg", 0.0)),
+                }
+            except Exception:
+                params = None
+        if params is None:
+            params = self._default_slope_params_for_profile(prof or self._active_prof)
+        bounds = self._profile_chain_bounds(prof or self._active_prof)
+        if bounds is not None:
+            mn, mx = bounds
+            params["start"] = max(mn, min(mx, float(params["start"])))
+            params["end"] = max(mn, min(mx, float(params["end"])))
+            if params["end"] < params["start"]:
+                params["start"], params["end"] = params["end"], params["start"]
+        return params
+
+    def _save_slope_params_for_current_line(self, params: Optional[Dict[str, float]] = None) -> None:
+        if self._slope_table_updating:
+            return
+        params = params or self._read_slope_params_from_table()
+        if not params:
+            return
+        line_id = self._line_id_current()
+        payload = {"line_id": line_id, **params}
+        path = self._slope_json_path_for(line_id)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+
+    def _populate_slope_table_for_current_line(self, prof: Optional[dict] = None) -> None:
+        params = self._load_slope_params_for_current_line(prof)
+        self._set_slope_table_params(params)
+        try:
+            self._save_slope_params_for_current_line(params)
+        except Exception:
+            pass
+
+    def _profile_with_slope_span(self, prof: Optional[dict], params: Optional[Dict[str, float]] = None) -> Optional[dict]:
+        if not prof:
+            return prof
+        params = params or self._read_slope_params_from_table()
+        if not params:
+            return prof
+        out = dict(prof)
+        s0 = float(params.get("start", 0.0))
+        s1 = float(params.get("end", 0.0))
+        if s1 < s0:
+            s0, s1 = s1, s0
+        out["slip_span"] = (s0, s1)
+        chain = np.asarray(out.get("chain", []), dtype=float)
+        if chain.ndim == 1 and chain.size > 0:
+            out["slip_mask"] = np.isfinite(chain) & (chain >= s0) & (chain <= s1)
+        return out
+
+    def _cross_slope_render_group(self, params: Optional[Dict[str, float]] = None) -> List[dict]:
+        params = params or self._read_slope_params_from_table()
+        if not params:
+            return []
+        return [{
+            "id": "Slope",
+            "start": float(params.get("start", 0.0)),
+            "end": float(params.get("end", 0.0)),
+            "color": "#87cefa",
+            "suppress_label": True,
+        }]
+
+    def _on_slope_table_item_changed(self, _item) -> None:
+        if self._slope_table_updating:
+            return
+        try:
+            self._save_slope_params_for_current_line()
+        except Exception as e:
+            self._warn(f"[UI3] Cannot auto-save slope table: {e}")
+        if self._active_prof:
+            self._active_prof = self._profile_with_slope_span(self._active_prof)
+            self._render_current_safe()
 
     def _on_confirm_groups(self):
         if self.line_combo.count() == 0:
@@ -450,7 +737,8 @@ class UI3GroupPanelMixin:
             prof = self._compute_profile_for_geom(geom, slip_only=False)
             if prof:
                 prof_for_stats = prof
-                groups = self._backend.clamp_groups(prof, groups, min_len=WORKFLOW_GROUP_MIN_LEN_M)
+                groups = self._groups_clamped_to_profile_bounds(prof, groups)
+                prof_for_stats = self._profile_with_group_slip_span(prof, groups)
         except Exception:
             pass
 
