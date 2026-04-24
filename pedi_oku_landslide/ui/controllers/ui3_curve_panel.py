@@ -1,6 +1,6 @@
 import json
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from PyQt5.QtWidgets import QAbstractSpinBox, QDoubleSpinBox, QTableWidgetItem
@@ -196,6 +196,7 @@ class UI3CurvePanelMixin:
         _ = log_skips
         points: List[dict] = []
         if self._current_ui2_line_role() == "cross":
+            span = self._cross_line_slip_span_bounds(self._active_prof) if self._active_prof else None
             anchors = self._anchors_for_cross_line(self._current_ui2_line_id(), require_ready=True)
             for anchor in anchors:
                 try:
@@ -204,6 +205,8 @@ class UI3CurvePanelMixin:
                 except Exception:
                     continue
                 if not (np.isfinite(s_val) and np.isfinite(z_val)):
+                    continue
+                if span is not None and (s_val < span[0] or s_val > span[1]):
                     continue
                 points.append(
                     {
@@ -222,12 +225,249 @@ class UI3CurvePanelMixin:
         points = self._active_curve_constraints(log_skips=log_skips)
         if not points:
             return curve
+        if self._current_ui2_line_role() == "cross":
+            return self._smooth_constrain_curve_to_points(curve, points)
         return self._backend.constrain_curve_to_points(
             curve,
             points,
             chain_key="s",
             elev_key="z",
         )
+
+    @staticmethod
+    def _smooth_hermite_interp(x_nodes: np.ndarray, y_nodes: np.ndarray, xq: np.ndarray) -> np.ndarray:
+        x = np.asarray(x_nodes, dtype=float)
+        y = np.asarray(y_nodes, dtype=float)
+        q = np.asarray(xq, dtype=float)
+        if x.size < 2:
+            return np.full(q.shape, float(y[0]) if y.size else np.nan, dtype=float)
+        order = np.argsort(x)
+        x = x[order]
+        y = y[order]
+        x, idx = np.unique(x, return_index=True)
+        y = y[idx]
+        if x.size < 2:
+            return np.full(q.shape, float(y[0]) if y.size else np.nan, dtype=float)
+        dx = np.diff(x)
+        dy = np.diff(y)
+        sec = np.divide(dy, dx, out=np.zeros_like(dy), where=np.abs(dx) > 1e-12)
+        slope = np.zeros_like(x)
+        slope[0] = sec[0]
+        slope[-1] = sec[-1]
+        for i in range(1, x.size - 1):
+            if sec[i - 1] * sec[i] <= 0:
+                slope[i] = 0.0
+            else:
+                slope[i] = 0.5 * (sec[i - 1] + sec[i])
+                limit = 3.0 * min(abs(sec[i - 1]), abs(sec[i]))
+                slope[i] = float(np.clip(slope[i], -limit, limit))
+        out = np.empty(q.shape, dtype=float)
+        q_clip = np.clip(q, x[0], x[-1])
+        seg = np.searchsorted(x, q_clip, side="right") - 1
+        seg = np.clip(seg, 0, x.size - 2)
+        h = x[seg + 1] - x[seg]
+        t = np.divide(q_clip - x[seg], h, out=np.zeros_like(q_clip), where=np.abs(h) > 1e-12)
+        h00 = 2.0 * t**3 - 3.0 * t**2 + 1.0
+        h10 = t**3 - 2.0 * t**2 + t
+        h01 = -2.0 * t**3 + 3.0 * t**2
+        h11 = t**3 - t**2
+        out[:] = (
+            h00 * y[seg]
+            + h10 * h * slope[seg]
+            + h01 * y[seg + 1]
+            + h11 * h * slope[seg + 1]
+        )
+        return out
+
+    def _smooth_constrain_curve_to_points(self, curve: Dict[str, np.ndarray], points: List[dict]) -> Optional[Dict[str, np.ndarray]]:
+        ch = np.asarray((curve or {}).get("chain", []), dtype=float)
+        zz = np.asarray((curve or {}).get("elev", []), dtype=float)
+        m = np.isfinite(ch) & np.isfinite(zz)
+        ch = ch[m]
+        zz = zz[m]
+        if ch.size < 2:
+            return curve
+        order = np.argsort(ch)
+        ch = ch[order]
+        zz = zz[order]
+        ch, idx = np.unique(ch, return_index=True)
+        zz = zz[idx]
+        a_s = []
+        a_z = []
+        for pt in points:
+            try:
+                s_val = float(pt.get("s"))
+                z_val = float(pt.get("z"))
+            except Exception:
+                continue
+            if np.isfinite(s_val) and np.isfinite(z_val) and ch[0] <= s_val <= ch[-1]:
+                a_s.append(s_val)
+                a_z.append(z_val)
+        if not a_s:
+            return {"chain": ch, "elev": zz}
+        a_s = np.asarray(a_s, dtype=float)
+        a_z = np.asarray(a_z, dtype=float)
+        o = np.argsort(a_s)
+        a_s = a_s[o]
+        a_z = a_z[o]
+        ch_aug = np.unique(np.concatenate([ch, a_s]))
+        base_zz = np.interp(ch_aug, ch, zz)
+        residual = a_z - np.interp(a_s, ch_aug, base_zz)
+        node_x = np.concatenate([[float(ch_aug[0])], a_s, [float(ch_aug[-1])]])
+        node_r = np.concatenate([[0.0], residual, [0.0]])
+        corr = self._smooth_hermite_interp(node_x, node_r, ch_aug)
+        zz_adj = base_zz + corr
+        for s_val, z_val in zip(a_s, a_z):
+            hit = np.isclose(ch_aug, s_val, rtol=0.0, atol=1e-9)
+            zz_adj[hit] = z_val
+        return {"chain": ch_aug, "elev": zz_adj}
+
+    def _cross_line_slip_span_bounds(self, prof: Dict[str, Any]) -> Optional[Tuple[float, float]]:
+        chain = np.asarray((prof or {}).get("chain", []), dtype=float)
+        if chain.size < 2:
+            return None
+        finite = np.isfinite(chain)
+        if not bool(np.any(finite)):
+            return None
+        slip_mask = np.asarray((prof or {}).get("slip_mask", []), dtype=bool)
+        if slip_mask.shape == chain.shape and bool(np.any(finite & slip_mask)):
+            vals = chain[finite & slip_mask]
+            s0, s1 = float(np.nanmin(vals)), float(np.nanmax(vals))
+        else:
+            span = (prof or {}).get("slip_span", None)
+            if isinstance(span, (list, tuple)) and len(span) >= 2:
+                try:
+                    s0, s1 = float(span[0]), float(span[1])
+                except Exception:
+                    s0, s1 = float(np.nanmin(chain[finite])), float(np.nanmax(chain[finite]))
+            else:
+                s0, s1 = float(np.nanmin(chain[finite])), float(np.nanmax(chain[finite]))
+        if not (np.isfinite(s0) and np.isfinite(s1)):
+            return None
+        if s1 < s0:
+            s0, s1 = s1, s0
+        if s1 <= s0:
+            return None
+        return s0, s1
+
+    def _interp_profile_elev(self, prof: Dict[str, Any], s_val: float) -> Optional[float]:
+        ch = np.asarray((prof or {}).get("chain", []), dtype=float)
+        zz = np.asarray((prof or {}).get("elev_s", []), dtype=float)
+        if ch.size != zz.size or ch.size < 2:
+            return None
+        m = np.isfinite(ch) & np.isfinite(zz)
+        if int(np.count_nonzero(m)) < 2:
+            return None
+        ch = ch[m]
+        zz = zz[m]
+        order = np.argsort(ch)
+        ch = ch[order]
+        zz = zz[order]
+        ch_u, idx = np.unique(ch, return_index=True)
+        zz_u = zz[idx]
+        if ch_u.size < 2:
+            return None
+        return float(np.interp(float(s_val), ch_u, zz_u))
+
+    def _cross_anchor_points_in_span(self, line_id: str, s0: float, s1: float) -> List[Dict[str, Any]]:
+        anchors = self._anchors_for_cross_line(line_id, require_ready=True)
+        out: List[Dict[str, Any]] = []
+        lo, hi = (float(s0), float(s1)) if s0 <= s1 else (float(s1), float(s0))
+        for anchor in anchors:
+            try:
+                s = float(anchor.get("s_on_cross"))
+                z = float(anchor.get("z"))
+            except Exception:
+                continue
+            if not (np.isfinite(s) and np.isfinite(z)):
+                continue
+            if s < lo or s > hi:
+                continue
+            out.append(
+                {
+                    "s": float(s),
+                    "z": float(z),
+                    "label": str(anchor.get("main_label_fixed", anchor.get("main_line_id", "")) or "").strip(),
+                    "source": "cross_anchor",
+                }
+            )
+        out.sort(key=lambda p: (float(p["s"]), str(p.get("label", ""))))
+        dedup: List[Dict[str, Any]] = []
+        for p in out:
+            if dedup and abs(float(p["s"]) - float(dedup[-1]["s"])) < 1e-6:
+                dedup[-1] = p
+            else:
+                dedup.append(p)
+        return dedup
+
+    @staticmethod
+    def _ensure_cubic_nurbs_control_points(points: np.ndarray) -> np.ndarray:
+        pts = np.asarray(points, dtype=float)
+        if pts.ndim != 2 or pts.shape[1] != 2:
+            return np.empty((0, 2), dtype=float)
+        m = np.isfinite(pts[:, 0]) & np.isfinite(pts[:, 1])
+        pts = pts[m]
+        if pts.shape[0] < 2:
+            return pts
+        pts = pts[np.argsort(pts[:, 0])]
+        unique = [pts[0]]
+        for p in pts[1:]:
+            if abs(float(p[0]) - float(unique[-1][0])) < 1e-6:
+                unique[-1] = p
+            else:
+                unique.append(p)
+        pts = np.asarray(unique, dtype=float)
+        if pts.shape[0] >= 4:
+            return pts
+        s0, s1 = float(pts[0, 0]), float(pts[-1, 0])
+        if s1 <= s0:
+            return pts
+        target_s = np.linspace(s0, s1, 4)
+        add = []
+        for s in target_s:
+            if pts.shape[0] + len(add) >= 4:
+                break
+            if np.any(np.isclose(pts[:, 0], s, atol=1e-6)):
+                continue
+            add.append([float(s), float(np.interp(s, pts[:, 0], pts[:, 1]))])
+        if pts.shape[0] + len(add) < 4:
+            for s in np.linspace(s0, s1, 8):
+                if pts.shape[0] + len(add) >= 4:
+                    break
+                if np.any(np.isclose(pts[:, 0], s, atol=1e-6)):
+                    continue
+                if any(abs(float(a[0]) - float(s)) < 1e-6 for a in add):
+                    continue
+                add.append([float(s), float(np.interp(s, pts[:, 0], pts[:, 1]))])
+        if add:
+            pts = np.vstack([pts, np.asarray(add, dtype=float)])
+        pts = pts[np.argsort(pts[:, 0])]
+        return pts
+
+    def _build_smooth_cross_nurbs_control_points(self, key_points: np.ndarray) -> np.ndarray:
+        pts = self._ensure_cubic_nurbs_control_points(np.asarray(key_points, dtype=float))
+        if pts.ndim != 2 or pts.shape[0] < 2:
+            return pts
+        pts = pts[np.argsort(pts[:, 0])]
+        s0, s1 = float(pts[0, 0]), float(pts[-1, 0])
+        if not (np.isfinite(s0) and np.isfinite(s1)) or s1 <= s0:
+            return pts
+        desired = int(min(40, max(10, 2 + 4 * (pts.shape[0] - 1))))
+        target_s = np.linspace(s0, s1, desired)
+        guide_s = np.unique(np.concatenate([target_s, pts[:, 0]]))
+        guide_z = self._smooth_hermite_interp(pts[:, 0], pts[:, 1], guide_s)
+        cps = np.vstack([guide_s, guide_z]).T.astype(float)
+        cps[0] = pts[0]
+        cps[-1] = pts[-1]
+        cps = cps[np.isfinite(cps[:, 0]) & np.isfinite(cps[:, 1])]
+        cps = cps[np.argsort(cps[:, 0])]
+        unique = [cps[0]]
+        for p in cps[1:]:
+            if abs(float(p[0]) - float(unique[-1][0])) < 1e-6:
+                unique[-1] = p
+            else:
+                unique.append(p)
+        return np.asarray(unique, dtype=float)
 
     def _get_nurbs_params_for_line(self, line_id: str) -> Optional[Dict[str, Any]]:
         return self._nurbs_params_by_line.get(line_id)
@@ -675,11 +915,15 @@ class UI3CurvePanelMixin:
             "count": int(len(boring_result.get("items", []) or [])),
             "items": list(boring_result.get("items", []) or []),
         }
+        is_cross_line = self._current_ui2_line_role() == "cross"
+        render_groups = self._active_groups if self._active_groups else None
+        if is_cross_line:
+            render_groups = self._cross_line_slip_span_render_group(self._active_prof)
         out_png = self._nurbs_png_path_for(line_id)
         path = self._render_profile_png_current_settings(
             self._active_prof,
             out_png,
-            groups=self._active_groups if self._active_groups else None,
+            groups=render_groups if render_groups else None,
             overlay_curves=[(curve["chain"], curve["elev"], "#bf00ff", "Slip curve")],
         )
         if not path or not os.path.exists(path):
@@ -720,28 +964,6 @@ class UI3CurvePanelMixin:
                 "z": float(z),
             })
         groups_ui3_json = self._groups_json_path_for(line_id)
-        group_method = None
-        if os.path.exists(groups_ui3_json):
-            try:
-                with open(groups_ui3_json, "r", encoding="utf-8") as f:
-                    old_js = json.load(f) or {}
-                if old_js.get("group_method", None):
-                    group_method = str(old_js.get("group_method"))
-            except Exception:
-                pass
-
-        groups_ui3_payload = self._backend.build_group_json_payload(
-            line_label=self.line_combo.currentText(),
-            groups=self._read_groups_from_table(),
-            prof=self._active_prof,
-            chainage_origin=self._ui3_chainage_origin(),
-            curve_method="nurbs",
-            nurbs_seed_method=self._get_nurbs_seed_method_for_line(line_id),
-            profile_dem_source=self._current_profile_source_key(),
-            profile_dem_path=str(getattr(self, "dem_path", "") or ""),
-            grouping_params=self._grouping_params_current(),
-            group_method=group_method,
-        )
         theta_csv_path = self._theta_csv_path_for(line_id)
         result = dict(self._active_global_fit_result or {})
         preview_curve = {
@@ -757,65 +979,87 @@ class UI3CurvePanelMixin:
                 "weight": float(weights[i]) if i < weights.size and np.isfinite(weights[i]) else 1.0,
             })
 
-        saved = self._backend.save_nurbs_outputs(
-            {
-                "preview_params": {
-                    "path": self._nurbs_json_path_for(line_id),
-                    "payload": {
-                        "line_id": line_id,
-                        "curve_method": "nurbs",
-                        "mode": "cubic_nurbs",
-                        "degree": 3,
-                        "control_points": cps.astype(float).tolist(),
-                        "weights": weights.astype(float).tolist(),
-                        "theta_csv_path": theta_csv_path,
-                        "theta_rows": list(result.get("theta_rows", []) or []),
-                        "fit_points": list(result.get("fit_points", []) or []),
-                        "global_fit_points": list(result.get("global_fit_points", result.get("fit_points", [])) or []),
-                        "boundary_intersections": list(result.get("boundary_intersections", []) or []),
-                        "applied_boring_holes": boring_snapshot,
-                        "curve": preview_curve,
-                    },
+        outputs = {
+            "preview_params": {
+                "path": self._nurbs_json_path_for(line_id),
+                "payload": {
+                    "line_id": line_id,
+                    "curve_method": "nurbs",
+                    "mode": "cubic_nurbs",
+                    "degree": 3,
+                    "control_points": cps.astype(float).tolist(),
+                    "weights": weights.astype(float).tolist(),
+                    "theta_csv_path": theta_csv_path,
+                    "theta_rows": list(result.get("theta_rows", []) or []),
+                    "fit_points": list(result.get("fit_points", []) or []),
+                    "global_fit_points": list(result.get("global_fit_points", result.get("fit_points", [])) or []),
+                    "boundary_intersections": list(result.get("boundary_intersections", []) or []),
+                    "applied_boring_holes": boring_snapshot,
+                    "curve": preview_curve,
                 },
-                "curve_json": {
-                    "path": os.path.join(self._curve_dir(), f"nurbs_{line_id}.json"),
-                    "payload": {
-                        "line_id": line_id,
-                        "curve_method": "nurbs",
-                        "mode": "cubic_nurbs",
-                        "degree": 3,
-                        "control_points": cp_rows,
-                        "chainage_origin": self._ui3_chainage_origin(),
-                        "applied_boring_holes": boring_snapshot,
-                        "count": int(len(curve_rows)),
-                        "points": curve_rows,
-                    },
+            },
+            "curve_json": {
+                "path": os.path.join(self._curve_dir(), f"nurbs_{line_id}.json"),
+                "payload": {
+                    "line_id": line_id,
+                    "curve_method": "nurbs",
+                    "mode": "cubic_nurbs",
+                    "degree": 3,
+                    "control_points": cp_rows,
+                    "chainage_origin": self._ui3_chainage_origin(),
+                    "applied_boring_holes": boring_snapshot,
+                    "count": int(len(curve_rows)),
+                    "points": curve_rows,
                 },
-                "group_json": {"path": groups_ui3_json, "payload": groups_ui3_payload},
-                "nurbs_info": {
-                    "path": os.path.join(self._curve_dir(), f"nurbs_info_{line_id}.json"),
-                    "payload": {
-                        "line_id": line_id,
-                        "curve_method": "nurbs",
-                        "mode": "cubic_nurbs",
-                        "chainage_origin": self._ui3_chainage_origin(),
-                        "degree": 3,
-                        "control_points": cp_rows,
-                        "theta_csv_path": theta_csv_path,
-                        "theta_rows": list(result.get("theta_rows", []) or []),
-                        "fit_points": list(result.get("fit_points", []) or []),
-                        "global_fit_points": list(result.get("global_fit_points", result.get("fit_points", [])) or []),
-                        "boundary_intersections": list(result.get("boundary_intersections", []) or []),
-                        "fit_point_count": int(len(result.get("fit_points", []) or [])),
-                        "curve": preview_curve,
-                    },
+            },
+            "nurbs_info": {
+                "path": os.path.join(self._curve_dir(), f"nurbs_info_{line_id}.json"),
+                "payload": {
+                    "line_id": line_id,
+                    "curve_method": "nurbs",
+                    "mode": "cubic_nurbs",
+                    "chainage_origin": self._ui3_chainage_origin(),
+                    "degree": 3,
+                    "control_points": cp_rows,
+                    "theta_csv_path": theta_csv_path,
+                    "theta_rows": list(result.get("theta_rows", []) or []),
+                    "fit_points": list(result.get("fit_points", []) or []),
+                    "global_fit_points": list(result.get("global_fit_points", result.get("fit_points", [])) or []),
+                    "boundary_intersections": list(result.get("boundary_intersections", []) or []),
+                    "fit_point_count": int(len(result.get("fit_points", []) or [])),
+                    "curve": preview_curve,
                 },
-            }
-        )
+            },
+        }
+        if not is_cross_line:
+            group_method = None
+            if os.path.exists(groups_ui3_json):
+                try:
+                    with open(groups_ui3_json, "r", encoding="utf-8") as f:
+                        old_js = json.load(f) or {}
+                    if old_js.get("group_method", None):
+                        group_method = str(old_js.get("group_method"))
+                except Exception:
+                    pass
+            groups_ui3_payload = self._backend.build_group_json_payload(
+                line_label=self.line_combo.currentText(),
+                groups=self._read_groups_from_table(),
+                prof=self._active_prof,
+                chainage_origin=self._ui3_chainage_origin(),
+                curve_method="nurbs",
+                nurbs_seed_method=self._get_nurbs_seed_method_for_line(line_id),
+                profile_dem_source=self._current_profile_source_key(),
+                profile_dem_path=str(getattr(self, "dem_path", "") or ""),
+                grouping_params=self._grouping_params_current(),
+                group_method=group_method,
+            )
+            outputs["group_json"] = {"path": groups_ui3_json, "payload": groups_ui3_payload}
+        saved = self._backend.save_nurbs_outputs(outputs)
         self._ok(f"[UI3] Saved NURBS curve: {path}")
         self._log(f"[UI3] Saved preview metadata: {saved.get('preview_params', self._nurbs_json_path_for(line_id))}")
         self._log(f"[UI3] Saved curve JSON: {saved.get('curve_json', '')}")
-        self._log(f"[UI3] Saved groups JSON: {saved.get('group_json', groups_ui3_json)}")
+        if not is_cross_line:
+            self._log(f"[UI3] Saved groups JSON: {saved.get('group_json', groups_ui3_json)}")
         self._log(f"[UI3] Saved curve info: {saved.get('nurbs_info', '')}")
         try:
             anchor_path, n_upd = self._update_anchors_xyz_for_saved_main_curve(curve)
@@ -949,6 +1193,23 @@ class UI3CurvePanelMixin:
                 spline_csv = self._save_spline_curve_csv_for_line(line_id, self._active_curve)
                 if spline_csv:
                     self._log(f"[UI3] Saved spline curve CSV: {spline_csv}")
+                    group_method = None
+                    groups_ui3_json = self._groups_json_path_for(line_id)
+                    if os.path.exists(groups_ui3_json):
+                        try:
+                            with open(groups_ui3_json, "r", encoding="utf-8") as f:
+                                old_js = json.load(f) or {}
+                            if old_js.get("group_method", None):
+                                group_method = str(old_js.get("group_method"))
+                        except Exception:
+                            pass
+                    self._save_groups_to_ui(
+                        groups,
+                        prof,
+                        line_id,
+                        curve_method=curve_method,
+                        group_method=group_method,
+                    )
             except Exception as e:
                 self._warn(f"[UI3] Cannot save spline curve CSV: {e}")
             try:
@@ -964,8 +1225,109 @@ class UI3CurvePanelMixin:
         except Exception as e:
             self._err(f"[UI3] Draw Curve error: {e}")
 
+    def _on_draw_cross_nurbs(self) -> None:
+        try:
+            if self._current_ui2_line_role() != "cross":
+                return
+            if not hasattr(self, "_gdf") or self._gdf is None or self._gdf.empty:
+                self._warn("[UI3] No lines.")
+                return
+            row = self.line_combo.currentIndex()
+            if row < 0:
+                self._warn("[UI3] Select a Cross Line first.")
+                return
+
+            line_id = self._line_id_current()
+            prof = self._active_prof
+            if not prof or len(prof.get("chain", [])) < 2:
+                geom = self._gdf.geometry.iloc[row]
+                prof = self._compute_profile_for_geom(geom, slip_only=False)
+            if not prof or len(prof.get("chain", [])) < 2:
+                self._warn("[UI3] Cannot compute Cross Line profile.")
+                return
+
+            span = self._cross_line_slip_span_bounds(prof)
+            if span is None:
+                self._warn("[UI3] Cannot detect slip span for this Cross Line.")
+                return
+            s0, s1 = span
+            z0 = self._interp_profile_elev(prof, s0)
+            z1 = self._interp_profile_elev(prof, s1)
+            if z0 is None or z1 is None:
+                self._warn("[UI3] Cannot interpolate slip-span endpoint elevations.")
+                return
+
+            anchors = self._cross_anchor_points_in_span(self._current_ui2_line_id(), s0, s1)
+            if not anchors:
+                self._warn("[UI3] No ready anchors inside slip span for this Cross Line.")
+                return
+
+            raw_points = [[float(s0), float(z0)]]
+            raw_points.extend([[float(a["s"]), float(a["z"])] for a in anchors])
+            raw_points.append([float(s1), float(z1)])
+            cps = self._build_smooth_cross_nurbs_control_points(np.asarray(raw_points, dtype=float))
+            if cps.ndim != 2 or cps.shape[0] < 4:
+                self._warn("[UI3] Cubic NURBS requires at least 4 valid control points.")
+                return
+
+            params = {
+                "degree": 3,
+                "control_points": cps.astype(float).tolist(),
+                "weights": np.ones(cps.shape[0], dtype=float).tolist(),
+            }
+            reference_curve = {"chain": cps[:, 0], "elev": cps[:, 1]}
+            self._active_prof = prof
+            self._active_groups = []
+            self._active_base_curve = reference_curve
+            self._set_curve_method_for_line(line_id, "nurbs")
+            self._set_nurbs_params_for_line(line_id, params)
+            self._nurbs_updating_ui = True
+            try:
+                self.nurbs_cp_spin.setValue(int(cps.shape[0]))
+                self.nurbs_deg_spin.setRange(3, 3)
+                self.nurbs_deg_spin.setValue(3)
+                self._populate_nurbs_table(params)
+            finally:
+                self._nurbs_updating_ui = False
+
+            curve = self._compute_nurbs_curve_from_params(params)
+            if curve is None or np.asarray(curve.get("chain", []), dtype=float).size < 2:
+                self._warn("[UI3] Cubic NURBS has too few valid points.")
+                return
+
+            result = dict(self._active_global_fit_result or {})
+            result["reference_curve"] = reference_curve
+            result["curve"] = {"chain": curve["chain"], "elev": curve["elev"]}
+            result["fit_points"] = anchors
+            result["global_fit_points"] = anchors
+            result["theta_csv_path"] = self._theta_csv_path_for(line_id)
+            self._active_curve = {"chain": curve["chain"], "elev": curve["elev"]}
+            self._active_global_fit_result = result
+
+            render_groups = self._cross_line_slip_span_render_group(prof)
+            out_png = self._profile_png_path_for(line_id)
+            path = self._render_profile_png_current_settings(
+                prof,
+                out_png,
+                groups=render_groups if render_groups else None,
+            )
+            if path and os.path.exists(path):
+                self._load_preview_scene_from_path(path, static_nurbs_bg=False)
+            self._draw_curve_overlay(np.asarray(curve["chain"], dtype=float), np.asarray(curve["elev"], dtype=float))
+            self._draw_control_points_overlay(params)
+            if hasattr(self, "btn_convert_nurbs"):
+                self.btn_convert_nurbs.setEnabled(True)
+                self.btn_convert_nurbs.setText("Draw")
+            self._ok("[UI3] Drew Cross Line NURBS through ready anchors.")
+            self._on_nurbs_save()
+        except Exception as e:
+            self._err(f"[UI3] Draw Cross Line NURBS error: {e}")
+
     def _on_convert_to_nurbs(self) -> None:
         try:
+            if self._current_ui2_line_role() == "cross":
+                self._on_draw_cross_nurbs()
+                return
             if not self._active_prof:
                 self._warn("[UI3] Draw Curve first before converting to NURBS.")
                 return

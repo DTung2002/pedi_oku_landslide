@@ -71,10 +71,6 @@ class UI4RunControllerMixin:
         try:
             self._append("[UI4] Generating contour previews...")
             contour_kwargs = self._contour_param_values()
-            err = self._validate_contour_params(contour_kwargs)
-            if err:
-                self._append(f"[UI4] {err}")
-                return
             self._append(
                 "[UI4] Contour settings: "
                 f"surface(step={contour_kwargs['surface_interval_m']}, "
@@ -108,6 +104,15 @@ class UI4RunControllerMixin:
             self._append("[UI4] Cannot run UI4: missing run context.")
             return
         try:
+            self.refresh_from_context()
+            info = self._last_info or {}
+            if not info.get("ok", False) or not info.get("ready_for_ui4", False):
+                missing = info.get("missing_required", [])
+                if missing:
+                    self._append("[UI4] Missing required inputs: " + ", ".join(map(str, missing)))
+                else:
+                    self._append(f"[UI4] Inputs not ready: {info.get('error', 'unknown error')}")
+                return
             self._append("[UI4] Running kriging backend...")
             res = self._backend_run_ui4_kriging_for_run(run_dir, log_fn=self._append)
             if not res.get("ok", False):
@@ -147,11 +152,6 @@ class UI4RunControllerMixin:
         self.preview_file_combo.blockSignals(False)
         self._preview_png_paths = []
         self.preview_view.clear_image()
-        self.surface_auto_range.setChecked(True)
-        self.depth_auto_range.setChecked(True)
+        self._sync_step_visibility_for_preview_type()
         self.surface_step.setValue(1.0)
         self.depth_step.setValue(1.0)
-        self.surface_zmin.setValue(0.0)
-        self.surface_zmax.setValue(0.0)
-        self.depth_zmin.setValue(0.0)
-        self.depth_zmax.setValue(0.0)

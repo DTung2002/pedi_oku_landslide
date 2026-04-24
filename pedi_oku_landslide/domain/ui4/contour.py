@@ -643,3 +643,22 @@ def render_ui4_contours_for_run(
         json.dump(outputs, f, ensure_ascii=False, indent=2)
     outputs["summary_json"] = summary_path
     return outputs
+
+
+def _pick_ui4_surface_depth_rasters(ui4_dir: str, shared: Dict[str, Any]) -> Tuple[str, str]:
+    surface_tif = _pick_existing([
+        shared.get("ui4_surface_masked_tif", ""),
+        os.path.join(ui4_dir, "slip_surface_kriging_masked.tif"),
+        shared.get("ui4_surface_tif", ""),
+        *glob.glob(os.path.join(ui4_dir, "slip_surface_kriging_*_masked.tif")),
+        *glob.glob(os.path.join(ui4_dir, "slip_surface_kriging_*.tif")),
+    ])
+    depth_candidates = [
+        shared.get("ui4_depth_masked_tif", ""),
+        os.path.join(ui4_dir, "slip_depth_kriging_masked.tif"),
+        shared.get("ui4_depth_tif", ""),
+        *glob.glob(os.path.join(ui4_dir, "slip_depth_kriging_*_masked.tif")),
+        *glob.glob(os.path.join(ui4_dir, "slip_depth_kriging_*.tif")),
+    ]
+    depth_tif = _pick_existing([p for p in depth_candidates if "variance" not in os.path.basename(str(p)).lower()])
+    return surface_tif, depth_tif

@@ -136,7 +136,6 @@ class CurveAnalyzeTab(
         self._nurbs_seed_method_by_line: Dict[str, str] = {}
         self._group_table_updating: bool = False
         self._boring_table_updating: bool = False
-        self._slope_table_updating: bool = False
         self._nurbs_updating_ui: bool = False
         # True when background image already has a baked slip-curve (profile_*_nurbs.png).
         self._static_nurbs_bg_loaded: bool = False
@@ -352,11 +351,11 @@ class CurveAnalyzeTab(
         row_curv.addWidget(QLabel("Table:"))
         self.table_selector_combo = NoWheelComboBox()
         self.table_selector_combo.addItem("Group", "group")
-        self.table_selector_combo.addItem("Boring holes", "boring")
-        self.table_selector_combo.addItem("Nurbs control points", "nurbs")
+        self.table_selector_combo.addItem("NURBS", "nurbs")
+        self.table_selector_combo.addItem("Boring Holes", "boring")
         self.table_selector_combo.currentIndexChanged.connect(self._on_ui3_table_selector_changed)
         self.table_selector_combo.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        self.table_selector_combo.setFixedWidth(self.table_selector_combo.sizeHint().width())
+        self._update_ui3_table_selector_width()
         row_curv.addWidget(self.table_selector_combo)
         row_curv.addStretch(1)
         row_curv.addSpacing(8)
@@ -384,20 +383,6 @@ class CurveAnalyzeTab(
         _set_table_visible_rows(self.group_table, rows=table_visible_rows, row_h=table_row_h, fixed_h=table_fixed_h)
         lg.addWidget(self.group_table)
 
-        self.slope_table = QTableWidget(2, 2)
-        self.slope_table.setHorizontalHeaderLabels(["Distance (m)", "Slope (deg)"])
-        self.slope_table.setVerticalHeaderLabels(["Start", "End"])
-        self.slope_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.slope_table.verticalHeader().setSectionResizeMode(QHeaderView.Fixed)
-        self.slope_table.verticalHeader().setDefaultSectionSize(table_row_h)
-        for r in range(2):
-            for c in range(2):
-                self.slope_table.setItem(r, c, QTableWidgetItem(""))
-        self.slope_table.itemChanged.connect(self._on_slope_table_item_changed)
-        _set_table_visible_rows(self.slope_table, rows=table_visible_rows, row_h=table_row_h, fixed_h=table_fixed_h)
-        self.slope_table.hide()
-        lg.addWidget(self.slope_table)
-
         rowg = QHBoxLayout()
         self.btn_add_g = QPushButton("Add")
         self.btn_add_g.clicked.connect(self._on_add_group)
@@ -419,7 +404,6 @@ class CurveAnalyzeTab(
             self.btn_del_g,
             self.btn_draw_curve,
         ]
-        self._slope_table_widgets = [self.slope_table]
         box_bh = QWidget()
         box_bh.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.box_boring_holes = box_bh
@@ -553,30 +537,64 @@ class CurveAnalyzeTab(
         if btn is not None:
             btn.setText("Display ▾" if checked else "Display ▸")
 
+    def _update_ui3_table_selector_width(self) -> None:
+        combo = getattr(self, "table_selector_combo", None)
+        if combo is None:
+            return
+        texts = [combo.itemText(i) for i in range(combo.count())]
+        texts.extend(["Group", "NURBS", "Boring Holes"])
+        fm = combo.fontMetrics()
+        max_text_w = max((fm.horizontalAdvance(str(t)) for t in texts if str(t)), default=0)
+        width = max(combo.sizeHint().width(), max_text_w + 56)
+        combo.setMinimumWidth(int(width))
+        combo.setFixedWidth(int(width))
+
+    def _sync_ui3_table_selector_items_for_role(self, is_cross: bool) -> None:
+        combo = getattr(self, "table_selector_combo", None)
+        if combo is None:
+            return
+        desired = [("NURBS", "nurbs"), ("Boring Holes", "boring")] if is_cross else [
+            ("Group", "group"),
+            ("NURBS", "nurbs"),
+            ("Boring Holes", "boring"),
+        ]
+        current_data = str(combo.currentData() or "")
+        existing = [(combo.itemText(i), str(combo.itemData(i) or "")) for i in range(combo.count())]
+        if existing != desired:
+            old = combo.blockSignals(True)
+            try:
+                combo.clear()
+                for text, data in desired:
+                    combo.addItem(text, data)
+                valid_data = [data for _, data in desired]
+                next_data = current_data if current_data in valid_data else desired[0][1]
+                idx = combo.findData(next_data)
+                combo.setCurrentIndex(idx if idx >= 0 else 0)
+            finally:
+                combo.blockSignals(old)
+        elif current_data not in [data for _, data in desired] and combo.count() > 0:
+            combo.setCurrentIndex(0)
+        self._update_ui3_table_selector_width()
+        self._on_ui3_table_selector_changed(combo.currentIndex())
+
     def _on_ui3_table_selector_changed(self, _idx: int) -> None:
         combo = getattr(self, "table_selector_combo", None)
         selected = combo.currentData() if combo is not None else "group"
         selected = str(selected or "group")
-        is_cross = False
         try:
             is_cross = self._current_ui2_line_role() == "cross"
         except Exception:
             is_cross = False
-        if is_cross and selected == "group":
-            selected = "slope"
-
         titles = {
             "group": "Group",
-            "slope": "Slope",
             "boring": "Boring Holes",
-            "nurbs": "NURBS Control Points",
+            "nurbs": "NURBS",
         }
         box_group = getattr(self, "box_group", None)
         if box_group is not None:
-            box_group.setTitle(titles.get(selected, "Group"))
+            box_group.setTitle("Cross Line" if (is_cross and selected == "group") else titles.get(selected, "Group"))
 
-        show_group = selected == "group"
-        show_slope = selected == "slope"
+        show_group = (selected == "group") and (not is_cross)
         rdp_label = getattr(self, "rdp_eps_label", None)
         if rdp_label is not None:
             rdp_label.setVisible(show_group)
@@ -585,8 +603,6 @@ class CurveAnalyzeTab(
             rdp_spin.setVisible(show_group)
         for widget in getattr(self, "_group_table_widgets", []) or []:
             widget.setVisible(show_group)
-        for widget in getattr(self, "_slope_table_widgets", []) or []:
-            widget.setVisible(show_slope)
 
         box_bh = getattr(self, "box_boring_holes", None)
         if box_bh is not None:
@@ -595,6 +611,11 @@ class CurveAnalyzeTab(
         box_nurbs = getattr(self, "box_nurbs_control_points", None)
         if box_nurbs is not None:
             box_nurbs.setVisible(selected == "nurbs")
+        btn_convert = getattr(self, "btn_convert_nurbs", None)
+        if btn_convert is not None:
+            btn_convert.setText("Draw" if (is_cross and selected == "nurbs") else "Convert")
+            if is_cross and selected == "nurbs":
+                btn_convert.setEnabled(True)
 
     def _left_max_w(self) -> int:
         base_w = self.width()

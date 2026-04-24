@@ -444,9 +444,6 @@ class UI3LineControllerMixin:
     def _groups_json_path_for(self, line_id: str) -> str:
         return self._paths().groups_json_path_for(line_id)
 
-    def _slope_json_path_for(self, line_id: str) -> str:
-        return os.path.join(self._groups_dir(), f"slope_{line_id}.json")
-
     def _ui2_intersections_json_path(self) -> str:
         return self._paths().ui2_intersections_json_path()
 
@@ -703,9 +700,13 @@ class UI3LineControllerMixin:
         is_main = (role == "main")
         combo = getattr(self, "table_selector_combo", None)
         if combo is not None and combo.count() > 0:
-            combo.setItemText(0, "Slope" if role == "cross" else "Group")
-            if combo.currentData() == "group":
-                self._on_ui3_table_selector_changed(combo.currentIndex())
+            try:
+                self._sync_ui3_table_selector_items_for_role(role == "cross")
+            except Exception:
+                try:
+                    self._on_ui3_table_selector_changed(combo.currentIndex())
+                except Exception:
+                    pass
         if btn is not None:
             btn.setEnabled(is_main)
             if is_main:
@@ -859,6 +860,33 @@ class UI3LineControllerMixin:
             for s, z in zip(chain, elev):
                 f.write(f"{float(s):.6f},{float(z):.6f}\n")
         return path
+
+    def _load_spline_curve_csv_for_line(self, line_id: str) -> Optional[Dict[str, np.ndarray]]:
+        path = self._spline_curve_csv_path_for(line_id)
+        if not os.path.exists(path):
+            return None
+        chain: List[float] = []
+        elev: List[float] = []
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                _header = f.readline()
+                for line in f:
+                    parts = [p.strip() for p in str(line).split(",")]
+                    if len(parts) < 2:
+                        continue
+                    try:
+                        s = float(parts[0])
+                        z = float(parts[1])
+                    except Exception:
+                        continue
+                    if np.isfinite(s) and np.isfinite(z):
+                        chain.append(float(s))
+                        elev.append(float(z))
+        except Exception:
+            return None
+        if len(chain) < 2:
+            return None
+        return {"chain": np.asarray(chain, dtype=float), "elev": np.asarray(elev, dtype=float)}
 
     def _save_vectors_csv_for_line(self, line_id: str, prof: dict) -> Optional[str]:
         return self._backend.save_vectors_csv(
@@ -1104,6 +1132,70 @@ class UI3LineControllerMixin:
         except Exception:
             return False
 
+    def _try_load_spline_preview_from_curve(self, line_id: str) -> bool:
+        curve = self._load_spline_curve_csv_for_line(line_id)
+        if curve is None:
+            return False
+        if not self._active_prof:
+            self._active_prof = self._build_profile_for_current_line()
+        if not self._active_prof:
+            return False
+        try:
+            out_png = self._profile_png_path_for(line_id)
+            path = self._render_profile_png_current_settings(
+                self._active_prof,
+                out_png,
+                groups=self._active_groups if self._active_groups else None,
+            )
+            if not path or not os.path.exists(path):
+                return False
+            if not self._load_preview_scene_from_path(path, static_nurbs_bg=False):
+                return False
+            result = {
+                "curve_method": "global_fit_spline",
+                "representation": "global_forward_fit_spline",
+                "theta_csv_path": self._theta_csv_path_for(line_id),
+                "curve": curve,
+            }
+            self._set_curve_method_for_line(line_id, "global_fit_spline")
+            self._active_curve = {"chain": curve["chain"], "elev": curve["elev"]}
+            self._active_base_curve = {"chain": curve["chain"], "elev": curve["elev"]}
+            self._active_global_fit_result = result
+            self._draw_curve_overlay(curve["chain"], curve["elev"])
+            self._clear_control_points_overlay()
+            self._update_global_fit_debug_panel(result, theta_csv_path=self._theta_csv_path_for(line_id))
+            if hasattr(self, "btn_convert_nurbs") and self.btn_convert_nurbs is not None:
+                self.btn_convert_nurbs.setEnabled(True)
+            self._log(f"[UI3] Loaded saved spline curve: {self._spline_curve_csv_path_for(line_id)}")
+            return True
+        except Exception as e:
+            self._log(f"[!] Cannot load saved spline curve: {e}")
+            return False
+
+    def _saved_spline_is_newer_than_nurbs(self, line_id: str) -> bool:
+        spline_path = self._spline_curve_csv_path_for(line_id)
+        if not os.path.exists(spline_path):
+            return False
+        nurbs_paths = [
+            self._curve_nurbs_info_json_path_for(line_id),
+            os.path.join(self._curve_dir(), f"nurbs_{line_id}.json"),
+            self._curve_nurbs_png_path_for(line_id),
+            self._nurbs_json_path_for(line_id),
+        ]
+        nurbs_mtimes = []
+        for path in nurbs_paths:
+            try:
+                if path and os.path.exists(path):
+                    nurbs_mtimes.append(os.path.getmtime(path))
+            except Exception:
+                pass
+        if not nurbs_mtimes:
+            return True
+        try:
+            return os.path.getmtime(spline_path) > max(nurbs_mtimes)
+        except Exception:
+            return False
+
     def _build_profile_for_current_line(self) -> Optional[dict]:
         try:
             if not hasattr(self, "_gdf") or self._gdf is None or self._gdf.empty:
@@ -1127,9 +1219,6 @@ class UI3LineControllerMixin:
         if prof is not None:
             self._active_prof = prof
         if self._current_ui2_line_role() == "cross":
-            if self._active_prof:
-                self._populate_slope_table_for_current_line(self._active_prof)
-                self._active_prof = self._profile_with_slope_span(self._active_prof)
             self._active_groups = []
             self._active_global_fit_result = None
             self._clear_control_points_overlay()
@@ -1147,12 +1236,19 @@ class UI3LineControllerMixin:
         self._active_global_fit_result = None
 
         loaded_preview = False
-        if curve_method == "nurbs":
+        if curve_method == "nurbs" and self._saved_spline_is_newer_than_nurbs(line_id):
+            self.nurbs_table.setRowCount(0)
+            self._clear_control_points_overlay()
+            loaded_preview = self._try_load_spline_preview_from_curve(line_id)
+        elif curve_method == "nurbs":
             loaded_preview = self._try_load_nurbs_preview_from_curve(line_id)
             self._try_load_nurbs_table_from_curve(line_id)
+            if not loaded_preview:
+                loaded_preview = self._try_load_spline_preview_from_curve(line_id)
         else:
             self.nurbs_table.setRowCount(0)
             self._clear_control_points_overlay()
+            loaded_preview = self._try_load_spline_preview_from_curve(line_id)
         if not loaded_preview:
             self._log("[i] No saved curve preview in ui3/curve. Click 'Render Section' to preview.")
         self._refresh_anchor_overlay()
@@ -1162,7 +1258,6 @@ class UI3LineControllerMixin:
             prof = self._build_profile_for_current_line()
             if prof is not None:
                 self._active_prof = prof
-            self._populate_slope_table_for_current_line(prof)
             self.group_table.setRowCount(0)
             return
         path = self._groups_json_path()
@@ -1183,6 +1278,50 @@ class UI3LineControllerMixin:
                     self.group_table.setItem(r, 0, QTableWidgetItem(""))
         finally:
             self._group_table_updating = False
+
+    def _cross_line_slip_span_render_group(self, prof: Optional[dict]) -> List[dict]:
+        if not prof:
+            return []
+        chain = np.asarray(prof.get("chain", []), dtype=float)
+        if chain.ndim != 1 or chain.size == 0:
+            return []
+        s0 = s1 = None
+        slip_mask = prof.get("slip_mask", None)
+        try:
+            mask = np.asarray(slip_mask)
+            if mask.shape == chain.shape:
+                keep = np.isfinite(chain) & (mask == True)
+                if np.any(keep):
+                    s0 = float(np.nanmin(chain[keep]))
+                    s1 = float(np.nanmax(chain[keep]))
+        except Exception:
+            s0 = s1 = None
+        if s0 is None or s1 is None:
+            try:
+                span = prof.get("slip_span", None)
+                if span:
+                    s0, s1 = map(float, span)
+            except Exception:
+                s0 = s1 = None
+        if s0 is None or s1 is None:
+            keep = np.isfinite(chain)
+            if np.any(keep):
+                s0 = float(np.nanmin(chain[keep]))
+                s1 = float(np.nanmax(chain[keep]))
+        if s0 is None or s1 is None:
+            return []
+        if s1 < s0:
+            s0, s1 = s1, s0
+        if not (np.isfinite(s0) and np.isfinite(s1)) or s1 <= s0:
+            return []
+        return [{
+            "id": "Slip span",
+            "start": float(s0),
+            "end": float(s1),
+            "color": "#87cefa",
+            "start_reason": "slip span start",
+            "end_reason": "slip span end",
+        }]
 
     def _render_current(self) -> None:
         if not hasattr(self, "_gdf") or self._gdf is None or self._gdf.empty:
@@ -1208,10 +1347,8 @@ class UI3LineControllerMixin:
         groups = self._load_groups_for_current_line()
         render_groups = groups
         if self._current_ui2_line_role() == "cross":
-            slope_params = self._read_slope_params_from_table() or self._load_slope_params_for_current_line(prof)
-            prof = self._profile_with_slope_span(prof, slope_params)
-            render_groups = self._cross_slope_render_group(slope_params)
             groups = []
+            render_groups = self._cross_line_slip_span_render_group(prof)
         elif groups:
             groups = self._groups_clamped_to_profile_bounds(prof, groups)
             prof = self._profile_with_group_slip_span(prof, groups)

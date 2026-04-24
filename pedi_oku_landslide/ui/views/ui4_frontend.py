@@ -17,7 +17,6 @@ from PyQt5.QtWidgets import (
     QGraphicsView,
     QGraphicsScene,
     QGraphicsPixmapItem,
-    QCheckBox,
     QDoubleSpinBox,
     QGridLayout,
     QSizePolicy,
@@ -29,7 +28,6 @@ from pedi_oku_landslide.pipeline.runners.ui4_backend import (
     load_ui4_summary_for_run,
     render_ui4_contours_for_run,
     run_ui4_kriging_for_run,
-    summary_range_for_kind,
 )
 from pedi_oku_landslide.ui.layout_constants import (
     LEFT_DEFAULT_W,
@@ -143,7 +141,6 @@ class UI4FrontendTab(UI4PreviewControllerMixin, UI4RunControllerMixin, QWidget):
         self._backend_collect_ui4_run_inputs = collect_ui4_run_inputs
         self._backend_list_ui4_preview_pngs = list_ui4_preview_pngs
         self._backend_load_ui4_summary = load_ui4_summary_for_run
-        self._backend_summary_range = summary_range_for_kind
         self._backend_render_ui4_contours_for_run = render_ui4_contours_for_run
         self._backend_run_ui4_kriging_for_run = run_ui4_kriging_for_run
 
@@ -164,8 +161,6 @@ class UI4FrontendTab(UI4PreviewControllerMixin, UI4RunControllerMixin, QWidget):
         self.status_box = QTextEdit()
         self.status_box.setReadOnly(True)
         self.status_box.setFixedHeight(STATUS_PANEL_H)
-        self.btn_refresh = QPushButton("Reload Inputs")
-        self.btn_refresh.clicked.connect(self.refresh_from_context)
         self.btn_run_ui4 = QPushButton("Calculate Slip Surface")
         self.btn_run_ui4.clicked.connect(self._on_run_ui4)
         self.btn_make_contours = QPushButton("Preview")
@@ -177,21 +172,11 @@ class UI4FrontendTab(UI4PreviewControllerMixin, UI4RunControllerMixin, QWidget):
         self.btn_preview_zoom_in.clicked.connect(self.preview_view.zoom_in)
         self.btn_preview_zoom_out = QPushButton("Zoom -")
         self.btn_preview_zoom_out.clicked.connect(self.preview_view.zoom_out)
-        self.surface_auto_range = QCheckBox("Auto")
-        self.surface_auto_range.setChecked(True)
-        self.surface_auto_range.toggled.connect(self._on_surface_auto_range_toggled)
-        self.surface_zmin = self._make_z_spin()
-        self.surface_zmax = self._make_z_spin()
         self.surface_step = self._make_step_spin(1.0)
-        self.depth_auto_range = QCheckBox("Auto")
-        self.depth_auto_range.setChecked(True)
-        self.depth_auto_range.toggled.connect(self._on_depth_auto_range_toggled)
-        self.depth_zmin = self._make_z_spin()
-        self.depth_zmax = self._make_z_spin()
         self.depth_step = self._make_step_spin(1.0)
 
         self._build_ui()
-        self._update_contour_range_controls()
+        self._sync_step_visibility_for_preview_type()
         self._apply_ui4_panel_spacing()
 
     def _apply_ui4_panel_spacing(self) -> None:
@@ -199,21 +184,14 @@ class UI4FrontendTab(UI4PreviewControllerMixin, UI4RunControllerMixin, QWidget):
         ctrl_h = 32
         for w in (
             self.preview_file_combo,
-            self.surface_zmin,
-            self.surface_zmax,
             self.surface_step,
-            self.depth_zmin,
-            self.depth_zmax,
             self.depth_step,
-            self.btn_refresh,
             self.btn_run_ui4,
             self.btn_make_contours,
             self.btn_preview_zoom_out,
             self.btn_preview_zoom_in,
         ):
             w.setMinimumHeight(ctrl_h)
-        self.surface_auto_range.setMinimumHeight(ctrl_h)
-        self.depth_auto_range.setMinimumHeight(ctrl_h)
         for lbl in (
             self.lbl_project_value,
             self.lbl_run_label_value,
@@ -264,31 +242,16 @@ class UI4FrontendTab(UI4PreviewControllerMixin, UI4RunControllerMixin, QWidget):
         cfg_lay.setHorizontalSpacing(10)
         cfg_lay.setVerticalSpacing(10)
         cfg_lay.addWidget(QLabel("Type"), 0, 0)
-        cfg_lay.addWidget(QLabel("Auto Range"), 0, 1)
-        cfg_lay.addWidget(QLabel("Z min (m)"), 0, 2)
-        cfg_lay.addWidget(QLabel("Z max (m)"), 0, 3)
-        cfg_lay.addWidget(QLabel("Step (m)"), 0, 4)
-        cfg_lay.addWidget(QLabel("Surface"), 1, 0)
-        cfg_lay.addWidget(self.surface_auto_range, 1, 1)
-        cfg_lay.addWidget(self.surface_zmin, 1, 2)
-        cfg_lay.addWidget(self.surface_zmax, 1, 3)
-        cfg_lay.addWidget(self.surface_step, 1, 4)
-        cfg_lay.addWidget(QLabel("Depth"), 2, 0)
-        cfg_lay.addWidget(self.depth_auto_range, 2, 1)
-        cfg_lay.addWidget(self.depth_zmin, 2, 2)
-        cfg_lay.addWidget(self.depth_zmax, 2, 3)
-        cfg_lay.addWidget(self.depth_step, 2, 4)
-        for r in range(3):
-            cfg_lay.setRowMinimumHeight(r, 32)
+        cfg_lay.addWidget(self.preview_file_combo, 0, 1)
+        cfg_lay.addWidget(QLabel("Step (m)"), 0, 2)
+        cfg_lay.addWidget(self.surface_step, 0, 3)
+        cfg_lay.addWidget(self.depth_step, 0, 3)
+        cfg_lay.setColumnStretch(1, 1)
+        cfg_lay.setRowMinimumHeight(0, 32)
         display_lay.addLayout(cfg_lay)
-        preview_ctl = QHBoxLayout()
-        preview_ctl.setSpacing(10)
-        preview_ctl.addWidget(QLabel("File"))
-        preview_ctl.addWidget(self.preview_file_combo, 1)
-        display_lay.addLayout(preview_ctl)
         action_row = QHBoxLayout()
         action_row.setSpacing(10)
-        for b in (self.btn_refresh, self.btn_run_ui4, self.btn_make_contours):
+        for b in (self.btn_run_ui4, self.btn_make_contours):
             b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             action_row.addWidget(b, 1)
         display_lay.addLayout(action_row)
@@ -417,15 +380,6 @@ class UI4FrontendTab(UI4PreviewControllerMixin, UI4RunControllerMixin, QWidget):
         if clamped_left != left_w and total > 0:
             self._splitter.setSizes([clamped_left, max(1, total - clamped_left)])
 
-    def _make_z_spin(self) -> QDoubleSpinBox:
-        s = QDoubleSpinBox()
-        s.setRange(-1_000_000.0, 1_000_000.0)
-        s.setDecimals(3)
-        s.setSingleStep(1.0)
-        s.setKeyboardTracking(False)
-        s.setValue(0.0)
-        return s
-
     def _make_step_spin(self, default: float) -> QDoubleSpinBox:
         s = QDoubleSpinBox()
         s.setRange(0.01, 1_000_000.0)
@@ -453,20 +407,3 @@ class UI4FrontendTab(UI4PreviewControllerMixin, UI4RunControllerMixin, QWidget):
             return
         self._enforce_left_pane_bounds()
 
-    def _update_contour_range_controls(self, *_args) -> None:
-        surf_manual = not self.surface_auto_range.isChecked()
-        self.surface_zmin.setEnabled(surf_manual)
-        self.surface_zmax.setEnabled(surf_manual)
-        depth_manual = not self.depth_auto_range.isChecked()
-        self.depth_zmin.setEnabled(depth_manual)
-        self.depth_zmax.setEnabled(depth_manual)
-
-    def _on_surface_auto_range_toggled(self, checked: bool) -> None:
-        if not checked:
-            self._populate_manual_range_from_summary("surface")
-        self._update_contour_range_controls()
-
-    def _on_depth_auto_range_toggled(self, checked: bool) -> None:
-        if not checked:
-            self._populate_manual_range_from_summary("depth")
-        self._update_contour_range_controls()
